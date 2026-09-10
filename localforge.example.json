@@ -1,0 +1,22 @@
+{
+  "workspace_root": "C:\\Projects\\MyApp",
+  "mode": "DEVELOPMENT",
+  "allowed_read_roots": ["C:\\Projects\\MyApp"],
+  "allowed_write_roots": ["C:\\Projects\\MyApp"],
+  "denied_paths": ["C:\\Projects\\MyApp\\.git\\hooks"],
+  "network": "unrestricted",
+  "default_shell": "powershell",
+  "default_timeout_seconds": 600,
+  "max_capture_bytes": 1000000,
+  "max_file_read_bytes": 1000000,
+  "process_buffer_bytes": 4000000,
+  "inherit_environment": [
+    "PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "COMSPEC",
+    "USERPROFILE", "APPDATA", "LOCALAPPDATA", "ProgramFiles", "ProgramFiles(x86)"
+  ],
+  "deny_environment": [
+    "*TOKEN*", "*SECRET*", "*PASSWORD*", "*KEY*", "AWS_*", "AZURE_*", "GITHUB_*", "NPM_TOKEN"
+  ],
+  "extra_environment": {},
+  "allow_shell_commands": true
+}
