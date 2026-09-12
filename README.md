@@ -6,7 +6,7 @@ LocalForge MCP gives an MCP client structured access to a real workspace, files,
 
 > Beta software with powerful host access. Read [Security model](#security-model) before use.
 
-**Disclaimer:** This is a small, quick project that was partially vibe-coded. While I used AI agents to assist with development, I personally reviewed, tested, and validated the code rather than relying on generated output without verification. This project is primarily for personal use, especially to make `Amazon Quick` more useful in my company and bring it closer to the experience of a real coding agent.
+Disclaimer: This is a small, quick project that was partially vibe-coded. While I used AI agents to assist with development, I personally reviewed, tested, and validated the code rather than relying on generated output without verification.
 
 ## Features
 
@@ -177,17 +177,30 @@ Prefer argument arrays:
 {"command":["npm","test"],"cwd":".","timeout":600}
 ```
 
-Use a shell only when operators, pipelines, or shell syntax are required:
+String commands automatically use the configured shell:
 
 ```json
-{"command":"npm test | Select-String failed","shell":true}
+{"command":"npm test | Select-String failed"}
 ```
+
+Pass `shell` explicitly only to force array commands through the shell. Argument arrays bypass shell parsing and stay preferred.
 
 ### `process`
 
 Actions: `start`, `read`, `write`, `status`, `list`, `restart`, and `stop`.
 
 Use `after` with the previous `next_after` value for incremental log reads. `cursor_lost=true` means older output was evicted from the bounded buffer.
+
+### Quick examples
+
+```json
+{"action":"get"}
+{"action":"read","path":"src/app.py","line_start":1,"line_end":80}
+{"query":"UserService","glob":["*.py"],"context_lines":2}
+{"action":"status"}
+{"command":["npm","test"],"cwd":".","timeout":600}
+{"action":"start","command":["npm","run","dev"]}
+```
 
 ## Configuration
 
@@ -214,7 +227,7 @@ Supported `default_shell` values:
 - `cmd`
 - `sh`
 
-String commands require `shell=true`. Argument arrays bypass shell parsing and are preferred.
+`execute.timeout` is seconds. `process.wait_ms` is milliseconds (max 60000). `limit_bytes`, `max_bytes`, and `max_file_read_bytes` are bytes. `filesystem offset` is a byte offset in legacy read mode; use `line_start`/`line_end` for line mode.
 
 ## Security model
 

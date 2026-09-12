@@ -120,3 +120,15 @@ def test_filesystem_errors_are_structured(tmp_path):
         server.cap.filesystem("write", "ok.txt", "x")
         server.cap.filesystem("move", "ok.txt", destination="no-such-dir/moved.txt")
     assert bad_dest.value.code == "path_not_found"
+
+def test_call_logs_to_stderr_only(tmp_path, capsys):
+    import os
+    server = make(tmp_path)
+    os.environ["LOCALFORGE_LOG"] = "1"
+    try:
+        server.call("workspace", {"action": "get"})
+    finally:
+        del os.environ["LOCALFORGE_LOG"]
+    captured = capsys.readouterr()
+    assert "tool=workspace" in captured.err and "ok" in captured.err
+    assert captured.out == ""
