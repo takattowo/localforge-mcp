@@ -23,6 +23,9 @@ def _fs_error(action, target, exc):
         raise RuntimeFault("io_error", f"Filesystem error during {action}: {exc}") from exc
     raise
 
+DEFAULT_EXCLUDES = [".git/**", ".venv/**", "__pycache__/**", "node_modules/**", ".hg/**",
+                    "target/**", "dist/**", "build/**", "*.egg-info/**"]
+
 class Capabilities:
     def __init__(self, cfg, paths, policy, processes):
         self.cfg, self.paths, self.policy, self.processes = cfg, paths, policy, processes
@@ -161,18 +164,31 @@ class Capabilities:
                 os.unlink(temp)
 
     def search(self, query=None, path=".", glob=None, exclude=None, case_sensitive=False,
-               max_results=200, files_only=False, fixed_string=True):
+               max_results=200, files_only=False, fixed_string=True, context_lines=0,
+               include_hidden=False, max_file_size_bytes=1_000_000):
+        if int(max_file_size_bytes) <= 0:
+            raise RuntimeFault("invalid_arguments", "max_file_size_bytes must be positive")
+        context = max(0, min(int(context_lines or 0), 5))
+        if files_only and query is not None:
+            raise RuntimeFault("invalid_arguments", "files_only search takes no query")
+        applied = list(dict.fromkeys([*(exclude or []), *DEFAULT_EXCLUDES]))
         root = self.paths.resolve(path, cwd=self.cwd, access="read", must_exist=True)
-        if not root.is_dir():
-            raise RuntimeFault("not_directory", f"Not a directory: {root}")
         maximum = max(1, min(int(max_results), 5000))
         rg = shutil.which("rg")
+        if root.is_file():
+            if rg:
+                return self._search_rg_file(rg, root, query, case_sensitive, maximum, files_only, fixed_string, context, applied)
+            return self._search_python_file(root, query, case_sensitive, maximum, files_only, context, int(max_file_size_bytes), applied)
+        if not root.is_dir():
+            raise RuntimeFault("not_directory", f"Not a directory: {root}")
         if rg:
-            return self._search_rg(rg, root, query, glob or [], exclude or [], case_sensitive, maximum, files_only, fixed_string)
-        return self._search_python(root, query, glob or [], exclude or [], case_sensitive, maximum, files_only)
+            return self._search_rg(rg, root, query, glob or [], applied, case_sensitive, maximum, files_only, fixed_string, context, bool(include_hidden))
+        return self._search_python(root, query, glob or [], applied, case_sensitive, maximum, files_only, context, int(max_file_size_bytes), bool(include_hidden))
 
-    def _search_rg(self, rg, root, query, includes, excludes, case_sensitive, maximum, files_only, fixed_string):
-        command = [rg, "--hidden"]
+    def _search_rg(self, rg, root, query, includes, excludes, case_sensitive, maximum, files_only, fixed_string, context, include_hidden):
+        command = [rg]
+        if include_hidden:
+            command.append("--hidden")
         for pattern in includes:
             command += ["-g", pattern]
         for pattern in excludes:
@@ -183,7 +199,8 @@ class Capabilities:
                                     env=safe_environment(self.cfg))
             paths = result.stdout.splitlines()
             return {"engine": "ripgrep", "results": [{"path": p} for p in paths[:maximum]],
-                    "exit_code": result.returncode, "truncated": len(paths) > maximum}
+                    "exit_code": result.returncode, "truncated": len(paths) > maximum,
+                    "applied_excludes": excludes}
         if query is None:
             raise RuntimeFault("invalid_arguments", "Content search requires query")
         command += ["--json"]
@@ -191,29 +208,103 @@ class Capabilities:
             command.append("-F")
         if not case_sensitive:
             command.append("-i")
+        if context > 0:
+            command += ["-C", str(context)]
         command += [query, str(root)]
         result = subprocess.run(command, capture_output=True, text=True, errors="replace", timeout=60,
                                 env=safe_environment(self.cfg))
-        matches = []
+        events = []
         for line in result.stdout.splitlines():
-            event = json.loads(line)
+            try:
+                events.append(json.loads(line))
+            except ValueError:
+                continue
+        matches = self._rg_matches(events, maximum, context)
+        return {"engine": "ripgrep", "results": matches, "exit_code": result.returncode,
+                "truncated": len(matches) >= maximum, "applied_excludes": excludes}
+
+    @staticmethod
+    def _rg_matches(events, maximum, context):
+        matches = []
+        for i, event in enumerate(events):
             if event.get("type") != "match":
                 continue
             data = event["data"]
-            matches.append({"path": data["path"].get("text"), "line": data["line_number"],
-                            "text": data["lines"].get("text", "").rstrip("\r\n")})
+            entry = {"path": data["path"].get("text"), "line": data["line_number"],
+                     "text": data["lines"].get("text", "").rstrip("\r\n")}
+            if context > 0:
+                before = [e["data"]["lines"].get("text", "").rstrip("\r\n") for e in events[max(0, i - context):i] if e.get("type") == "context"]
+                after = [e["data"]["lines"].get("text", "").rstrip("\r\n") for e in events[i + 1:i + 1 + context] if e.get("type") == "context"]
+                entry["context"] = before + after
+            matches.append(entry)
+            if len(matches) >= maximum:
+                break
+        return matches
+
+    def _search_rg_file(self, rg, target, query, case_sensitive, maximum, files_only, fixed_string, context, applied):
+        if files_only:
+            return {"engine": "ripgrep", "results": [{"path": str(target)}], "exit_code": 0, "truncated": False, "applied_excludes": applied}
+        if query is None:
+            raise RuntimeFault("invalid_arguments", "Content search requires query")
+        command = ["rg", "--json"]
+        if fixed_string:
+            command.append("-F")
+        if not case_sensitive:
+            command.append("-i")
+        if context > 0:
+            command += ["-C", str(context)]
+        command += [query, str(target)]
+        result = subprocess.run(command, capture_output=True, text=True, errors="replace", timeout=60,
+                                env=safe_environment(self.cfg))
+        matches = []
+        events = []
+        for line in result.stdout.splitlines():
+            try:
+                events.append(json.loads(line))
+            except ValueError:
+                continue
+        for i, event in enumerate(events):
+            if event.get("type") != "match":
+                continue
+            data = event["data"]
+            entry = {"path": data["path"].get("text"), "line": data["line_number"],
+                     "text": data["lines"].get("text", "").rstrip("\r\n")}
+            if context > 0:
+                before = [e["data"]["lines"].get("text", "").rstrip("\r\n") for e in events[max(0, i - context):i] if e.get("type") == "context"]
+                after = [e["data"]["lines"].get("text", "").rstrip("\r\n") for e in events[i + 1:i + 1 + context] if e.get("type") == "context"]
+                entry["context"] = before + after
+            matches.append(entry)
             if len(matches) >= maximum:
                 break
         return {"engine": "ripgrep", "results": matches, "exit_code": result.returncode,
-                "truncated": len(matches) >= maximum}
+                "truncated": len(matches) >= maximum, "applied_excludes": applied}
+
+    def _search_python_file(self, target, query, case_sensitive, maximum, files_only, context, max_size, applied):
+        if files_only:
+            return {"engine": "python", "results": [{"path": str(target)}], "truncated": False, "applied_excludes": applied}
+        if query is None:
+            raise RuntimeFault("invalid_arguments", "Content search requires query")
+        try:
+            if target.stat().st_size > max_size:
+                return {"engine": "python", "results": [], "truncated": False, "applied_excludes": applied}
+        except OSError:
+            return {"engine": "python", "results": [], "truncated": False, "applied_excludes": applied}
+        return self._search_python(target.parent, query, [target.name], applied, case_sensitive, maximum, False, context, max_size, True)
 
     @staticmethod
-    def _search_python(root, query, includes, excludes, case_sensitive, maximum, files_only):
+    def _search_python(root, query, includes, excludes, case_sensitive, maximum, files_only, context, max_size, include_hidden):
         results = []
         for item in root.rglob("*"):
             if not item.is_file():
                 continue
             rel = item.relative_to(root).as_posix()
+            if not include_hidden and any(part.startswith(".") for part in rel.split("/")):
+                continue
+            try:
+                if item.stat().st_size > max_size:
+                    continue
+            except OSError:
+                continue
             if excludes and any(item.match(pattern) or Path(rel).match(pattern) for pattern in excludes):
                 continue
             if includes and not any(item.match(pattern) or Path(rel).match(pattern) for pattern in includes):
@@ -222,17 +313,27 @@ class Capabilities:
                 results.append({"path": str(item)})
             elif query is not None:
                 try:
-                    for number, line in enumerate(item.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+                    with item.open("rb") as handle:
+                        head = handle.read(8192)
+                        if b"\x00" in head:
+                            continue
+                        handle.seek(0)
+                        data = handle.read(max_size + 1)
+                    lines = data.decode("utf-8", "replace").splitlines()
+                    for number, line in enumerate(lines, 1):
                         haystack, needle = (line, query) if case_sensitive else (line.lower(), query.lower())
                         if needle in haystack:
-                            results.append({"path": str(item), "line": number, "text": line})
+                            entry = {"path": str(item), "line": number, "text": line}
+                            if context > 0:
+                                entry["context"] = lines[max(0, number - 1 - context):number - 1] + lines[number:min(len(lines), number + context)]
+                            results.append(entry)
                             if len(results) >= maximum:
                                 break
                 except OSError:
                     pass
             if len(results) >= maximum:
                 break
-        return {"engine": "python", "results": results, "truncated": len(results) >= maximum}
+        return {"engine": "python", "results": results, "truncated": len(results) >= maximum, "applied_excludes": excludes}
 
     def git(self, action, args=None, cwd=None):
         work = self.paths.resolve(cwd or self.cwd, access="read", must_exist=True)
