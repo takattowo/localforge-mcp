@@ -228,3 +228,4 @@ def test_process_gc_cap_evicts_oldest_exited(tmp_path):
     assert "ev-1" not in ids and "ev-2" in ids and "ev-3" in ids
     for pid in ("ev-2", "ev-3"):
         server.processes.stop(pid, True)
+def test_process_string_auto_enables_shell(tmp_path): server = make(tmp_path); p = server.processes.start("echo proc-shell-ok")["process_id"]; out = server.processes.read(p, wait_ms=5000); assert "proc-shell-ok" in "".join(c["text"] for c in out["chunks"]); server.processes.stop(p, True)
