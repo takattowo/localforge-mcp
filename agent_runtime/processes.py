@@ -96,7 +96,6 @@ class ProcessManager:
 
     def start(self, command, cwd=None, shell=False, env=None, process_id=None):
         work = self.paths.resolve(cwd or ".", access="read", must_exist=True)
-        shell = bool(shell or isinstance(command, str))
         self.policy.authorize_command(command, work, shell)
         if self._gc() >= int(self.cfg.max_processes):
             raise RuntimeFault("process_limit", f"Too many processes (max {self.cfg.max_processes})")
