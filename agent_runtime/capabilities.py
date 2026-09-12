@@ -9,6 +9,7 @@ import subprocess
 import tempfile
 import time
 from .errors import RuntimeFault
+from .state import StateStore
 from .security import command_for_spawn, redact, safe_environment
 
 def _fs_error(action, target, exc):
@@ -41,6 +42,14 @@ class Capabilities:
     def __init__(self, cfg, paths, policy, processes):
         self.cfg, self.paths, self.policy, self.processes = cfg, paths, policy, processes
         self.cwd = paths.workspace
+        self.store = StateStore(cfg.state_file) if cfg.state_file else None
+        if self.store is not None:
+            saved = self.store.load().get("cwd")
+            if saved:
+                try:
+                    self.cwd = self.paths.resolve(saved, access="read", must_exist=True)
+                except RuntimeFault:
+                    self.cwd = paths.workspace
 
     def workspace(self, action, path=None):
         if action == "get":
@@ -49,6 +58,8 @@ class Capabilities:
             self.cwd = self.paths.resolve(path, access="read", must_exist=True)
             if not self.cwd.is_dir():
                 raise RuntimeFault("not_directory", f"Not a directory: {self.cwd}")
+            if self.store is not None:
+                self.store.save_cwd(str(self.cwd))
             return self._workspace_info()
         raise RuntimeFault("invalid_action", "workspace action must be get or set_cwd")
 

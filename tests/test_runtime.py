@@ -229,3 +229,18 @@ def test_process_gc_cap_evicts_oldest_exited(tmp_path):
     for pid in ("ev-2", "ev-3"):
         server.processes.stop(pid, True)
 def test_process_string_auto_enables_shell(tmp_path): server = make(tmp_path); p = server.processes.start("echo proc-shell-ok")["process_id"]; out = server.processes.read(p, wait_ms=5000); assert "proc-shell-ok" in "".join(c["text"] for c in out["chunks"]); server.processes.stop(p, True)
+def test_cwd_persists_across_restart(tmp_path):
+    from agent_runtime.server import Server
+    from agent_runtime.config import Config
+    import json
+    (tmp_path / "sub").mkdir()
+    cfg_file = tmp_path / "cfg.json"
+    cfg_file.write_text(json.dumps({"workspace_root": str(tmp_path),
+        "allowed_read_roots": [str(tmp_path)], "allowed_write_roots": [str(tmp_path)]}))
+    first = Server(Config.load(str(cfg_file)))
+    first.cap.workspace("set_cwd", "sub")
+    second = Server(Config.load(str(cfg_file)))
+    assert second.cap.cwd == first.cap.cwd
+    (tmp_path / ".localforge-state.json").write_text("{corrupt")
+    third = Server(Config.load(str(cfg_file)))
+    assert str(third.cap.cwd) == str(tmp_path)

@@ -22,6 +22,8 @@ class Config:
     process_buffer_bytes: int = 4_000_000
     process_ttl_seconds: int = 3600
     max_processes: int = 50
+    state_file: str | None = None
+    config_path: str | None = None
     inherit_environment: list[str] = field(default_factory=lambda: [
         "PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "COMSPEC",
         "USERPROFILE", "APPDATA", "LOCALAPPDATA", "ProgramFiles", "ProgramFiles(x86)",
@@ -42,7 +44,9 @@ class Config:
             data["default_shell"] = data.pop("shell")
         data.pop("network_hosts", None)
         data.pop("approval_ttl_seconds", None)
+        data.pop("config_path", None)
         cfg = cls(**data)
+        cfg.config_path = str(Path(path).expanduser())
         cfg.workspace_root = str(Path(cfg.workspace_root).expanduser())
         if not cfg.allowed_read_roots:
             cfg.allowed_read_roots = [cfg.workspace_root]
@@ -55,4 +59,6 @@ class Config:
         for name in ("default_timeout_seconds", "max_capture_bytes", "max_file_read_bytes", "process_buffer_bytes", "process_ttl_seconds", "max_processes"):
             if int(getattr(cfg, name)) <= 0:
                 raise ValueError(f"{name} must be positive")
+        if not cfg.state_file:
+            cfg.state_file = str(Path(cfg.config_path).parent / ".localforge-state.json")
         return cfg
