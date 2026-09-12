@@ -1,7 +1,9 @@
 from __future__ import annotations
 import atexit
 import json
+import os
 import sys
+import time
 import traceback
 from . import __version__
 from .config import Config
@@ -12,26 +14,62 @@ from .capabilities import Capabilities
 
 PROTOCOL = "2024-11-05"
 SCHEMAS = {
-    "workspace": {"type": "object", "properties": {"action": {"enum": ["get", "set_cwd"]}, "path": {"type": "string"}}, "required": ["action"]},
+    "workspace": {"type": "object", "properties": {
+        "action": {"enum": ["get", "set_cwd"], "description": "get returns roots and Git root; set_cwd changes runtime directory."},
+        "path": {"type": "string", "description": "Directory for set_cwd, relative to cwd or absolute, must resolve inside read roots."}}, "required": ["action"]},
     "filesystem": {"type": "object", "properties": {
-        "action": {"enum": ["read", "list", "stat", "write", "replace_text", "mkdir", "delete", "move"]},
-        "path": {"type": "string"}, "content": {"type": "string"}, "destination": {"type": "string"},
-        "recursive": {"type": "boolean"}, "encoding": {"type": "string"}, "offset": {"type": "integer"},
-        "max_bytes": {"type": "integer"}, "old_text": {"type": "string"}, "new_text": {"type": "string"},
-        "expected_occurrences": {"type": "integer"}}, "required": ["action"]},
+        "action": {"enum": ["read", "list", "stat", "write", "replace_text", "mkdir", "delete", "move"], "description": "read defaults to byte mode; pass line_start/line_end for line mode. list is paginated."},
+        "path": {"type": "string", "description": "Target path, relative to cwd or absolute, must resolve inside the matching roots."},
+        "content": {"type": "string", "description": "Full file content for write."},
+        "destination": {"type": "string", "description": "Destination path for move."},
+        "recursive": {"type": "boolean", "description": "mkdir parents or recursive delete."},
+        "encoding": {"type": "string", "description": "Text encoding, default utf-8."},
+        "offset": {"type": "integer", "description": "Byte offset for legacy read mode; list page offset when action is list. Ignored in line mode."},
+        "max_bytes": {"type": "integer", "description": "Byte cap for legacy read mode."},
+        "old_text": {"type": "string", "description": "Exact text to find for replace_text."},
+        "new_text": {"type": "string", "description": "Replacement text for replace_text."},
+        "expected_occurrences": {"type": "integer", "description": "Required match count for replace_text, default 1."},
+        "line_start": {"type": "integer", "description": "1-based first line for line-mode read, default 1."},
+        "line_end": {"type": "integer", "description": "Inclusive last line for line-mode read, default end of file."},
+        "limit": {"type": "integer", "description": "Max list entries returned, default 200, clamped 1..1000."},
+        "glob": {"type": "array", "items": {"type": "string"}, "description": "Fnmatch filters on entry name for list."},
+        "include_hidden": {"type": "boolean", "description": "Include dotfiles in list, default false."}}, "required": ["action"]},
     "search": {"type": "object", "properties": {
-        "query": {"type": "string"}, "path": {"type": "string"}, "glob": {"type": "array", "items": {"type": "string"}},
-        "exclude": {"type": "array", "items": {"type": "string"}}, "case_sensitive": {"type": "boolean"},
-        "max_results": {"type": "integer"}, "files_only": {"type": "boolean"}, "fixed_string": {"type": "boolean"}}},
-    "git": {"type": "object", "properties": {"action": {"enum": ["status", "diff", "log", "show", "branch", "root", "run"]},
-        "args": {"type": "array", "items": {"type": "string"}}, "cwd": {"type": "string"}}, "required": ["action"]},
-    "execute": {"type": "object", "properties": {"command": {"oneOf": [{"type": "array", "items": {"type": "string"}}, {"type": "string"}]},
-        "cwd": {"type": "string"}, "timeout": {"type": "number"}, "shell": {"type": "boolean"}, "env": {"type": "object"}}, "required": ["command"]},
-    "process": {"type": "object", "properties": {"action": {"enum": ["start", "read", "write", "status", "list", "restart", "stop"]},
-        "process_id": {"type": "string"}, "command": {"oneOf": [{"type": "array", "items": {"type": "string"}}, {"type": "string"}]},
-        "cwd": {"type": "string"}, "shell": {"type": "boolean"}, "env": {"type": "object"}, "after": {"type": "integer"},
-        "limit_bytes": {"type": "integer"}, "wait_ms": {"type": "integer"}, "text": {"type": "string"},
-        "append_newline": {"type": "boolean"}, "force": {"type": "boolean"}}, "required": ["action"]},
+        "query": {"type": "string", "description": "Text to find; omit only with files_only."},
+        "path": {"type": "string", "description": "File or directory to search, relative to cwd or absolute."},
+        "glob": {"type": "array", "items": {"type": "string"}, "description": "Include patterns, fnmatch on repo-relative posix path."},
+        "exclude": {"type": "array", "items": {"type": "string"}, "description": "Extra excludes, unioned with built-in defaults."},
+        "case_sensitive": {"type": "boolean", "description": "Case-sensitive match, default false."},
+        "max_results": {"type": "integer", "description": "Result cap 1..5000, default 200."},
+        "files_only": {"type": "boolean", "description": "List matching filenames; takes no query."},
+        "fixed_string": {"type": "boolean", "description": "Literal match when true, regex when false, default true."},
+        "context_lines": {"type": "integer", "description": "Surrounding lines per match, clamped 0..5, ignored with files_only."},
+        "include_hidden": {"type": "boolean", "description": "Search hidden files, default false."},
+        "max_file_size_bytes": {"type": "integer", "description": "Skip larger files, default 1000000, must be positive."}}},
+    "git": {"type": "object", "properties": {
+        "action": {"enum": ["status", "diff", "log", "show", "branch", "root", "run"], "description": "Preset operation, or run for an arbitrary git argument array."},
+        "args": {"type": "array", "items": {"type": "string"}, "description": "Extra args appended to presets, or the full git args for run."},
+        "cwd": {"type": "string", "description": "Repository directory, defaults to runtime cwd."}}, "required": ["action"]},
+    "execute": {"type": "object", "properties": {
+        "command": {"description": "Command to run. Prefer an argv array. String commands automatically use the configured shell.", "oneOf": [{"type": "array", "items": {"type": "string"}}, {"type": "string"}]},
+        "cwd": {"type": "string", "description": "Working directory, defaults to runtime cwd."},
+        "timeout": {"type": "number", "description": "Timeout in seconds, not milliseconds."},
+        "shell": {"type": "boolean", "description": "Optional. String commands automatically enable the configured shell."},
+        "env": {"type": "object", "description": "Extra environment variables; denied names raise environment_denied."},
+        "input": {"type": "string", "description": "Optional stdin text, max 65536 chars."}}, "required": ["command"]},
+    "process": {"type": "object", "properties": {
+        "action": {"enum": ["start", "read", "write", "status", "list", "restart", "stop"], "description": "Process lifecycle action."},
+        "process_id": {"type": "string", "description": "Stable id; auto-generated when start omits it."},
+        "command": {"description": "Command to start. Prefer an argv array. String commands automatically use the configured shell.", "oneOf": [{"type": "array", "items": {"type": "string"}}, {"type": "string"}]},
+        "cwd": {"type": "string", "description": "Working directory, defaults to runtime cwd."},
+        "shell": {"type": "boolean", "description": "Optional. String commands automatically enable the configured shell."},
+        "env": {"type": "object", "description": "Extra environment variables; denied names raise environment_denied."},
+        "after": {"type": "integer", "description": "Log cursor from previous next_after for incremental reads."},
+        "limit_bytes": {"type": "integer", "description": "Max log bytes per read."},
+        "wait_ms": {"type": "integer", "description": "Wait in milliseconds for new output, max 60000."},
+        "text": {"type": "string", "description": "Stdin text for write."},
+        "append_newline": {"type": "boolean", "description": "Append newline to stdin write, default true."},
+        "force": {"type": "boolean", "description": "Force-kill the process tree on stop."}}, "required": ["action"]},
 }
 DESCRIPTIONS = {
     "workspace": "Inspect workspace and Git root, or change runtime current directory.",
@@ -55,6 +93,19 @@ class Server:
         return [{"name": name, "description": DESCRIPTIONS[name], "inputSchema": SCHEMAS[name]} for name in DESCRIPTIONS]
 
     def call(self, name, arguments):
+        start = time.monotonic()
+        fault = "ok"
+        try:
+            return self._dispatch(name, arguments)
+        except RuntimeFault as e:
+            fault = e.code
+            raise
+        finally:
+            if os.environ.get("LOCALFORGE_LOG") == "1":
+                elapsed = int((time.monotonic() - start) * 1000)
+                print(f"localforge tool={name} ms={elapsed} {fault}", file=sys.stderr)
+
+    def _dispatch(self, name, arguments):
         if name not in SCHEMAS:
             raise RuntimeFault("tool_not_found", f"Unknown tool: {name}")
         if not isinstance(arguments, dict):
