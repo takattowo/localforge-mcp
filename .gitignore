@@ -8,3 +8,4 @@ dist/
 localforge.json
 .localforge-state.json
 .superpowers/
+docs/superpowers/
