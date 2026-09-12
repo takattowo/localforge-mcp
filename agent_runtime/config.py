@@ -20,6 +20,8 @@ class Config:
     max_capture_bytes: int = 1_000_000
     max_file_read_bytes: int = 1_000_000
     process_buffer_bytes: int = 4_000_000
+    process_ttl_seconds: int = 3600
+    max_processes: int = 50
     inherit_environment: list[str] = field(default_factory=lambda: [
         "PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "COMSPEC",
         "USERPROFILE", "APPDATA", "LOCALAPPDATA", "ProgramFiles", "ProgramFiles(x86)",
@@ -50,7 +52,7 @@ class Config:
             raise ValueError(f"invalid mode: {cfg.mode}")
         if cfg.network not in NETWORK_MODES:
             raise ValueError("network must be 'disabled' or 'unrestricted'")
-        for name in ("default_timeout_seconds", "max_capture_bytes", "max_file_read_bytes", "process_buffer_bytes"):
+        for name in ("default_timeout_seconds", "max_capture_bytes", "max_file_read_bytes", "process_buffer_bytes", "process_ttl_seconds", "max_processes"):
             if int(getattr(cfg, name)) <= 0:
                 raise ValueError(f"{name} must be positive")
         return cfg

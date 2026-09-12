@@ -1,4 +1,5 @@
 from __future__ import annotations
+import codecs
 from collections import deque
 from dataclasses import dataclass, field
 import os
@@ -16,6 +17,7 @@ class Chunk:
     stream: str
     text: str
     at: float
+    raw_len: int = 0
 
 @dataclass
 class Managed:
@@ -50,26 +52,54 @@ class ProcessManager:
             env=safe_environment(self.cfg, env), **self._creation(),
         )
 
+    def _gc(self):
+        now = time.time()
+        ttl = int(self.cfg.process_ttl_seconds)
+        with self.lock:
+            live = {k: v for k, v in self.items.items()
+                    if v.proc.poll() is None or (now - v.started) < ttl}
+            if len(live) > int(self.cfg.max_processes):
+                exited = sorted(((k, v) for k, v in live.items() if v.proc.poll() is not None),
+                                key=lambda kv: kv[1].started)
+                drop = len(live) - int(self.cfg.max_processes)
+                for key, _ in exited[:drop]:
+                    live.pop(key, None)
+            self.items = live
+            active = sum(1 for v in self.items.values() if v.proc.poll() is None)
+            return active
+
     def _pump(self, item, pipe, stream):
+        decoder = codecs.getincrementaldecoder("utf-8")(errors="replace")
         try:
             while True:
                 data = os.read(pipe.fileno(), 4096)
                 if not data:
                     break
-                text = redact(data.decode("utf-8", "replace"))
+                text = decoder.decode(data)
+                if not text:
+                    continue
+                text = redact(text)
                 with item.lock:
-                    item.chunks.append(Chunk(item.next_seq, stream, text, time.time()))
+                    item.chunks.append(Chunk(item.next_seq, stream, text, time.time(), len(data)))
                     item.next_seq += 1
                     item.bytes += len(data)
                     while item.bytes > self.cfg.process_buffer_bytes and item.chunks:
                         old = item.chunks.popleft()
-                        item.bytes -= len(old.text.encode("utf-8", "replace"))
+                        item.bytes -= old.raw_len
         finally:
+            tail = decoder.decode(b"", final=True)
+            if tail:
+                with item.lock:
+                    item.chunks.append(Chunk(item.next_seq, stream, redact(tail), time.time(), 0))
+                    item.next_seq += 1
             pipe.close()
 
     def start(self, command, cwd=None, shell=False, env=None, process_id=None):
         work = self.paths.resolve(cwd or ".", access="read", must_exist=True)
+        shell = bool(shell or isinstance(command, str))
         self.policy.authorize_command(command, work, shell)
+        if self._gc() >= int(self.cfg.max_processes):
+            raise RuntimeFault("process_limit", f"Too many processes (max {self.cfg.max_processes})")
         pid = process_id or f"proc-{uuid.uuid4().hex[:10]}"
         with self.lock:
             if pid in self.items and self.items[pid].proc.poll() is None:
@@ -163,6 +193,7 @@ class ProcessManager:
         }
 
     def list(self):
+        self._gc()
         return [self.status(key) for key in list(self.items)]
 
     def _get(self, process_id):
