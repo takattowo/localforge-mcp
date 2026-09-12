@@ -1,5 +1,6 @@
 from __future__ import annotations
 from pathlib import Path
+import fnmatch
 import json
 import os
 import shutil
@@ -57,7 +58,8 @@ class Capabilities:
 
     def filesystem(self, action, path=".", content=None, destination=None, recursive=False,
                    encoding="utf-8", offset=0, max_bytes=None, expected_occurrences=None,
-                   old_text=None, new_text=None):
+                   old_text=None, new_text=None, line_start=None, line_end=None,
+                   limit=200, glob=None, include_hidden=False):
         access = "read" if action in {"read", "list", "stat"} else "write"
         must_exist = action not in {"write", "mkdir"}
         target = self.paths.resolve(path, cwd=self.cwd, access=access, must_exist=must_exist)
@@ -65,6 +67,24 @@ class Capabilities:
         if action == "read":
             if not target.is_file():
                 raise RuntimeFault("not_file", f"Not a file: {target}")
+            if line_start is not None or line_end is not None:
+                start = max(1, int(line_start or 1))
+                with target.open("rb") as handle:
+                    head = handle.read(8192)
+                    if b"\x00" in head:
+                        raise RuntimeFault("binary_file", "Binary file read is not supported")
+                try:
+                    text = target.read_text(encoding=encoding, errors="replace")
+                except OSError as e:
+                    _fs_error("read", target, e)
+                split = text.splitlines()
+                total = len(split)
+                end = min(int(line_end) if line_end is not None else total, total)
+                if end < start:
+                    raise RuntimeFault("invalid_arguments", "line_end must be >= line_start")
+                picked = [{"no": n, "text": line} for n, line in enumerate(split, 1) if start <= n <= end]
+                return {"path": str(target), "lines": picked, "line_start": start,
+                        "line_end": end, "total_lines": total, "truncated": total > end}
             cap = min(int(max_bytes or self.cfg.max_file_read_bytes), self.cfg.max_file_read_bytes)
             offset = max(0, int(offset))
             with target.open("rb") as handle:
@@ -79,15 +99,23 @@ class Capabilities:
         if action == "list":
             if not target.is_dir():
                 raise RuntimeFault("not_directory", f"Not a directory: {target}")
-            entries = []
+            lim = max(1, min(int(limit), 1000))
+            off = max(0, int(offset))
+            patterns = list(glob or [])
+            visible = []
             for item in sorted(target.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower())):
+                if not include_hidden and item.name.startswith("."):
+                    continue
+                if patterns and not any(fnmatch.fnmatch(item.name, p) for p in patterns):
+                    continue
                 try:
                     stat = item.stat()
-                    entries.append({"name": item.name, "path": str(item), "type": "dir" if item.is_dir() else "file",
+                    visible.append({"name": item.name, "path": str(item), "type": "dir" if item.is_dir() else "file",
                                     "size": stat.st_size if item.is_file() else None, "modified": stat.st_mtime})
                 except OSError as e:
-                    entries.append({"name": item.name, "path": str(item), "type": "unavailable", "error": str(e)})
-            return {"path": str(target), "entries": entries}
+                    visible.append({"name": item.name, "path": str(item), "type": "unavailable", "error": str(e)})
+            return {"path": str(target), "entries": visible[off:off + lim],
+                    "total": len(visible), "offset": off, "limit": lim}
         if action == "stat":
             try:
                 stat = target.stat()
