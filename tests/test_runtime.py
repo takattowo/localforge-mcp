@@ -244,3 +244,20 @@ def test_cwd_persists_across_restart(tmp_path):
     (tmp_path / ".localforge-state.json").write_text("{corrupt")
     third = Server(Config.load(str(cfg_file)))
     assert str(third.cap.cwd) == str(tmp_path)
+
+def test_stringified_array_rejected(tmp_path):
+    server = make(tmp_path)
+    with pytest.raises(RuntimeFault) as exc:
+        server.policy.authorize_command('["python", "-c", "print(1)"]', str(tmp_path), True)
+    assert exc.value.code == "invalid_arguments" and "array" in exc.value.message
+    ok = server.policy.authorize_command("[System.Console]::Beep()", str(tmp_path), True)
+    assert ok["shell"] is True
+
+def test_unknown_argument_suggests(tmp_path):
+    server = make(tmp_path)
+    with pytest.raises(RuntimeFault) as exc:
+        server.call("filesystem", {"action": "read", "path": "x", "old": "y"})
+    assert exc.value.code == "invalid_arguments" and "old_text" in exc.value.message
+    with pytest.raises(RuntimeFault) as exc2:
+        server.call("execute", {"command": ["x"], "bogus": 1})
+    assert "Valid arguments" in exc2.value.message and "command" in exc2.value.message

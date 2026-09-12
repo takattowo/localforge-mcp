@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.2.1
+
+- Stringified JSON arrays are rejected with guidance instead of failing in PowerShell.
+- Unknown tool arguments suggest close matches and list valid arguments.
+
 ## 1.2.0
 
 - Documented every tool schema field; fixed shell auto-enable and timeout-unit docs with per-tool examples.

@@ -6,7 +6,7 @@ LocalForge MCP gives an MCP client structured access to a real workspace, files,
 
 > Beta software with powerful host access. Read [Security model](#security-model) before use.
 
-Disclaimer: This is a small, quick project that was partially vibe-coded. While I used AI agents to assist with development, I personally reviewed, tested, and validated the code rather than relying on generated output without verification.
+**Disclaimer:** This is a small, quick project that was partially vibe-coded. While I used AI agents to assist with development, I personally reviewed, tested, and validated the code rather than relying on generated output without verification. This project is primarily for personal use, especially to make `Amazon Quick` more useful in my company and bring it closer to the experience of a real coding agent.
 
 ## Features
 

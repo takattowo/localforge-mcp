@@ -1,9 +1,21 @@
 from __future__ import annotations
 from pathlib import Path
 import fnmatch
+import json
 import os
 import re
 from .errors import RuntimeFault
+
+def _looks_like_argv(text):
+    stripped = text.strip()
+    if not (stripped.startswith("[") and stripped.endswith("]")):
+        return False
+    try:
+        value = json.loads(stripped)
+    except ValueError:
+        return False
+    return isinstance(value, list) and bool(value) and all(isinstance(x, str) for x in value)
+
 
 class PathPolicy:
     def __init__(self, cfg):
@@ -57,6 +69,10 @@ class Policy:
         if self.cfg.mode in {"READ_ONLY", "WORKSPACE"}:
             raise RuntimeFault("execution_denied", f"Mode {self.cfg.mode} does not allow process execution")
         if isinstance(command, str):
+            if _looks_like_argv(command):
+                raise RuntimeFault("invalid_arguments",
+                    "Command looks like a JSON array inside a string (the client stringified the array). "
+                    "Pass a real JSON array, or a plain shell command string.")
             if not shell:
                 raise RuntimeFault("invalid_command", "String commands require shell=true; use an argv array otherwise")
             if not self.cfg.allow_shell_commands:
