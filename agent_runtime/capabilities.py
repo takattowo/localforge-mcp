@@ -24,6 +24,16 @@ def _fs_error(action, target, exc):
         raise RuntimeFault("io_error", f"Filesystem error during {action}: {exc}") from exc
     raise
 
+
+def _clip(data: str, cap: int):
+    raw = data.encode("utf-8")
+    if len(raw) <= cap:
+        return data, False
+    cut = raw[:cap].decode("utf-8", "replace")
+    while len(cut.encode("utf-8")) > cap:
+        cut = cut[:-1]
+    return cut, True
+
 DEFAULT_EXCLUDES = [".git/**", ".venv/**", "__pycache__/**", "node_modules/**", ".hg/**",
                     "target/**", "dist/**", "build/**", "*.egg-info/**"]
 
@@ -391,16 +401,22 @@ class Capabilities:
             except ProcessLookupError:
                 pass
 
-    def execute(self, command, cwd=None, timeout=None, shell=False, env=None):
+    def execute(self, command, cwd=None, timeout=None, shell=False, env=None, input=None):
         work = self.paths.resolve(cwd or self.cwd, access="read", must_exist=True)
+        stdin_bytes = None
+        if input is not None:
+            if len(input) > 65536:
+                raise RuntimeFault("invalid_arguments", "input exceeds 65536 chars")
+            stdin_bytes = input.encode("utf-8")
         shell = bool(shell or isinstance(command, str))
         self.policy.authorize_command(command, work, shell)
         started = time.monotonic()
         proc = None
         try:
             proc = subprocess.Popen(command_for_spawn(self.cfg, command, shell), cwd=work, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                                    stdin=subprocess.PIPE if stdin_bytes is not None else None,
                                     env=safe_environment(self.cfg, env), **self._creation())
-            stdout, stderr = proc.communicate(timeout=float(timeout or self.cfg.default_timeout_seconds))
+            stdout, stderr = proc.communicate(input=stdin_bytes, timeout=float(timeout or self.cfg.default_timeout_seconds))
             error_type = None if proc.returncode == 0 else "process_exit"
         except subprocess.TimeoutExpired:
             self._kill_tree(proc)
@@ -412,7 +428,9 @@ class Capabilities:
                     "error_type": "process_start"}
         out, err = redact(stdout.decode("utf-8", "replace")), redact(stderr.decode("utf-8", "replace"))
         cap = self.cfg.max_capture_bytes
+        out, out_cut = _clip(out, cap)
+        err, err_cut = _clip(err, cap)
         return {"success": proc.returncode == 0 and error_type is None, "command": command, "cwd": str(work),
-                "exit_code": proc.returncode, "stdout": out[:cap], "stderr": err[:cap],
-                "stdout_truncated": len(out.encode("utf-8")) > cap, "stderr_truncated": len(err.encode("utf-8")) > cap,
+                "exit_code": proc.returncode, "stdout": out, "stderr": err,
+                "stdout_truncated": out_cut, "stderr_truncated": err_cut,
                 "duration_ms": int((time.monotonic() - started) * 1000), "error_type": error_type}
