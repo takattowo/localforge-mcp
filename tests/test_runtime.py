@@ -173,3 +173,16 @@ def test_list_pagination_and_read_lines(tmp_path):
     assert tail["line_end"] == 3 and tail["truncated"] is False
     with pytest.raises(RuntimeFault):
         server.cap.filesystem("read", "a.txt", line_start=3, line_end=2)
+
+
+def test_execute_truncation_bytes_and_input(tmp_path):
+    server = make(tmp_path, max_capture_bytes=10)
+    big = server.cap.execute([sys.executable, "-c", "print('é' * 20)"])
+    assert big["stdout_truncated"] is True
+    assert len(big["stdout"].encode("utf-8")) <= 10
+    big["stdout"].encode("utf-8").decode("utf-8")
+    echo = make(tmp_path).cap.execute(
+        [sys.executable, "-c", "import sys; print(sys.stdin.read())"], input="hello-stdin")
+    assert echo["success"] and "hello-stdin" in echo["stdout"]
+    with pytest.raises(RuntimeFault):
+        server.cap.execute([sys.executable, "-c", "pass"], input="x" * 65537)
