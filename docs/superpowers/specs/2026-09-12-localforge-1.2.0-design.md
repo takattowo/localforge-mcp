@@ -45,7 +45,7 @@ Backward-compatible new optional params: `context_lines` (default 0, max 5), `in
 - Numeric clamping (documented, no errors): `context_lines` clamped to 0..5, `max_results` already clamps 1..5000. Non-positive `max_file_size_bytes` -> `invalid_arguments`. `context_lines` is ignored when `files_only=true`.
 - ripgrep path: pass `--hidden` only when `include_hidden=true`; always add `-g !<pattern>` for applied excludes; add `-C <n>` when `context_lines > 0`; keep 60s timeout, document it.
 - Python fallback: same excludes, binary sniff (skip file if NUL byte in first 8192 bytes), size guard (skip files larger than `max_file_size_bytes`), same `context_lines` support, never read more than `max_file_size_bytes + 1` bytes per file. Glob semantics documented as fnmatch on repo-relative posix path (matches current implementation).
-- Response: existing keys unchanged (`engine`, `results`, `exit_code` for rg, `truncated`). Add `applied_excludes` (list actually used) to both engines. No new counts (rg cannot report skips cheaply; parity over precision).
+- Response: existing keys unchanged (`engine`, `results`, `exit_code` for rg, `truncated`). Add `applied_excludes` (list actually used) to both engines. When `context_lines > 0`, each content-match dict gains `context`: surrounding line texts, up to N before plus N after the match line (match line itself stays in `text`). `files_only` results never carry `context`. No other new keys.
 
 ### 3.4 Filesystem list pagination + filter (`agent_runtime/capabilities.py:63-74`)
 
