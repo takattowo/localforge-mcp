@@ -61,7 +61,8 @@ def test_execute_results_shell_timeout_large_env_and_network(tmp_path):
     assert ok["success"] and "ok" in ok["stdout"]
     shell = server.cap.execute("echo shell-ok", shell=True)
     assert shell["success"] and "shell-ok" in shell["stdout"]
-    with pytest.raises(RuntimeFault): server.cap.execute("echo invalid")
+    auto = server.cap.execute("echo invalid")
+    assert auto["success"] and "invalid" in auto["stdout"]
     bad = server.cap.execute([sys.executable, "-c", "raise SystemExit(7)"])
     assert bad["exit_code"] == 7 and bad["error_type"] == "process_exit"
     timeout = server.cap.execute([sys.executable, "-c", "import time;time.sleep(2)"], timeout=.05)
@@ -104,3 +105,18 @@ def test_git_when_available(tmp_path):
     assert server.cap.execute(["git", "init"])["success"]
     status = server.cap.git("status")
     assert status["success"] and "branch" in status["stdout"].lower()
+
+def test_shell_string_auto_enables_shell(tmp_path):
+    server = make(tmp_path)
+    ok = server.cap.execute("echo invalid")
+    assert ok["success"] and "invalid" in ok["stdout"]
+
+def test_filesystem_errors_are_structured(tmp_path):
+    server = make(tmp_path)
+    with pytest.raises(RuntimeFault) as missing:
+        server.cap.filesystem("stat", "no-such-file.txt")
+    assert missing.value.code == "path_not_found"
+    with pytest.raises(RuntimeFault) as bad_dest:
+        server.cap.filesystem("write", "ok.txt", "x")
+        server.cap.filesystem("move", "ok.txt", destination="no-such-dir/moved.txt")
+    assert bad_dest.value.code == "path_not_found"
