@@ -10,6 +10,19 @@ import time
 from .errors import RuntimeFault
 from .security import command_for_spawn, redact, safe_environment
 
+def _fs_error(action, target, exc):
+    if isinstance(exc, FileNotFoundError):
+        raise RuntimeFault("path_not_found", f"Path not found: {target}") from exc
+    if isinstance(exc, PermissionError):
+        raise RuntimeFault("permission_denied", f"Permission denied: {target}") from exc
+    if isinstance(exc, NotADirectoryError):
+        raise RuntimeFault("not_directory", f"Not a directory: {target}") from exc
+    if isinstance(exc, IsADirectoryError):
+        raise RuntimeFault("not_file", f"Not a file: {target}") from exc
+    if isinstance(exc, OSError):
+        raise RuntimeFault("io_error", f"Filesystem error during {action}: {exc}") from exc
+    raise
+
 class Capabilities:
     def __init__(self, cfg, paths, policy, processes):
         self.cfg, self.paths, self.policy, self.processes = cfg, paths, policy, processes
@@ -73,43 +86,66 @@ class Capabilities:
                     entries.append({"name": item.name, "path": str(item), "type": "unavailable", "error": str(e)})
             return {"path": str(target), "entries": entries}
         if action == "stat":
-            stat = target.stat()
+            try:
+                stat = target.stat()
+            except OSError as e:
+                _fs_error("stat", target, e)
             return {"path": str(target), "type": "dir" if target.is_dir() else "file",
                     "size": stat.st_size, "modified": stat.st_mtime, "created": stat.st_ctime}
         if action == "write":
             target.parent.mkdir(parents=True, exist_ok=True)
             data = content or ""
-            self._atomic_write(target, data, encoding)
+            try:
+                self._atomic_write(target, data, encoding)
+            except OSError as e:
+                _fs_error("write", target, e)
             return {"path": str(target), "bytes": len(data.encode(encoding))}
         if action == "replace_text":
             if not target.is_file():
                 raise RuntimeFault("not_file", f"Not a file: {target}")
             if old_text is None or new_text is None:
                 raise RuntimeFault("invalid_arguments", "replace_text requires old_text and new_text")
-            original = target.read_text(encoding=encoding)
+            try:
+                original = target.read_text(encoding=encoding)
+            except OSError as e:
+                _fs_error("replace_text", target, e)
             count = original.count(old_text)
             expected = 1 if expected_occurrences is None else int(expected_occurrences)
             if count != expected:
                 raise RuntimeFault("content_mismatch", f"Expected {expected} occurrence(s), found {count}")
             updated = original.replace(old_text, new_text)
-            self._atomic_write(target, updated, encoding)
+            try:
+                self._atomic_write(target, updated, encoding)
+            except OSError as e:
+                _fs_error("replace_text", target, e)
             return {"path": str(target), "replacements": count, "bytes": len(updated.encode(encoding))}
         if action == "mkdir":
-            target.mkdir(parents=recursive, exist_ok=True)
+            try:
+                target.mkdir(parents=recursive, exist_ok=True)
+            except OSError as e:
+                _fs_error("mkdir", target, e)
             return {"path": str(target)}
         if action == "delete":
-            count = sum(1 for _ in target.rglob("*")) + 1 if target.is_dir() else 1
-            if target.is_dir():
-                shutil.rmtree(target) if recursive else target.rmdir()
-            else:
-                target.unlink()
+            try:
+                count = sum(1 for _ in target.rglob("*")) + 1 if target.is_dir() else 1
+                if target.is_dir():
+                    shutil.rmtree(target) if recursive else target.rmdir()
+                else:
+                    target.unlink()
+            except OSError as e:
+                _fs_error("delete", target, e)
             return {"path": str(target), "deleted_items": count}
         if action == "move":
             if not destination:
                 raise RuntimeFault("invalid_arguments", "move requires destination")
             dest = self.paths.resolve(destination, cwd=self.cwd, access="write", must_exist=False)
             self.policy.authorize_path("move")
-            target.replace(dest)
+            if not dest.parent.exists():
+                raise RuntimeFault("path_not_found", f"Destination parent not found: {dest.parent}")
+            try:
+                target.replace(dest)
+            except OSError as e:
+                _fs_error("move", target, e)
             return {"source": str(target), "destination": str(dest)}
         raise RuntimeFault("invalid_action", f"Unknown filesystem action: {action}")
 
@@ -228,6 +264,7 @@ class Capabilities:
 
     def execute(self, command, cwd=None, timeout=None, shell=False, env=None):
         work = self.paths.resolve(cwd or self.cwd, access="read", must_exist=True)
+        shell = bool(shell or isinstance(command, str))
         self.policy.authorize_command(command, work, shell)
         started = time.monotonic()
         proc = None
