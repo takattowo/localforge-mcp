@@ -23,9 +23,9 @@ class StateStore:
 
     def save_cwd(self, cwd):
         payload = {"version": VERSION, "cwd": str(cwd)}
-        self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_name(self.path.name + f".tmp-{os.getpid()}")
         try:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
             tmp.write_text(json.dumps(payload), encoding="utf-8")
             os.replace(tmp, self.path)
         except OSError as e:
