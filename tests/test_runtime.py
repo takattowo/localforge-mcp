@@ -132,3 +132,24 @@ def test_call_logs_to_stderr_only(tmp_path, capsys):
     captured = capsys.readouterr()
     assert "tool=workspace" in captured.err and "ok" in captured.err
     assert captured.out == ""
+
+def test_search_defaults_and_guards(tmp_path, monkeypatch):
+    import shutil
+    server = make(tmp_path)
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "hit.py").write_text("line one\nUserService here\nline three\nline four\n")
+    (tmp_path / ".venv").mkdir()
+    (tmp_path / ".venv" / "skip.py").write_text("UserService vendored\n")
+    (tmp_path / "big.py").write_bytes(b"x" * (1_000_000 + 10) + b"UserService\n")
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    content = server.cap.search("UserService")
+    paths = [r["path"] for r in content["results"]]
+    assert any(str(tmp_path / "src" / "hit.py") in p for p in paths)
+    assert not any(".venv" in p for p in paths)
+    assert not any("big.py" in p for p in paths)
+    assert ".git/**" in content["applied_excludes"]
+    ctx = server.cap.search("UserService", path="src/hit.py", context_lines=1)
+    assert ctx["results"][0]["line"] == 2
+    assert "line one" in ctx["results"][0]["context"]
+    with pytest.raises(RuntimeFault):
+        server.cap.search("UserService", files_only=True)
