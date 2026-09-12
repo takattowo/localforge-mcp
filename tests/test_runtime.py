@@ -153,3 +153,23 @@ def test_search_defaults_and_guards(tmp_path, monkeypatch):
     assert "line one" in ctx["results"][0]["context"]
     with pytest.raises(RuntimeFault):
         server.cap.search("UserService", files_only=True)
+
+
+def test_list_pagination_and_read_lines(tmp_path):
+    server = make(tmp_path)
+    for name in ["b.txt", "a.txt", ".hidden", "c.py"]:
+        (tmp_path / name).write_text(f"contents of {name}\nsecond line\nthird line\n")
+    page = server.cap.filesystem("list", ".", limit=2)
+    assert page["total"] == 3 and len(page["entries"]) == 2 and page["offset"] == 0
+    assert all(e["name"] != ".hidden" for e in page["entries"])
+    shown = server.cap.filesystem("list", ".", include_hidden=True)
+    assert shown["total"] == 4
+    only_py = server.cap.filesystem("list", ".", glob=["*.py"])
+    assert only_py["total"] == 1 and only_py["entries"][0]["name"] == "c.py"
+    lines = server.cap.filesystem("read", "a.txt", line_start=2, line_end=3)
+    assert [l["no"] for l in lines["lines"]] == [2, 3]
+    assert lines["total_lines"] == 3 and lines["truncated"] is False
+    tail = server.cap.filesystem("read", "a.txt", line_start=3)
+    assert tail["line_end"] == 3 and tail["truncated"] is False
+    with pytest.raises(RuntimeFault):
+        server.cap.filesystem("read", "a.txt", line_start=3, line_end=2)
