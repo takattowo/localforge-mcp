@@ -186,3 +186,45 @@ def test_execute_truncation_bytes_and_input(tmp_path):
     assert echo["success"] and "hello-stdin" in echo["stdout"]
     with pytest.raises(RuntimeFault):
         server.cap.execute([sys.executable, "-c", "pass"], input="x" * 65537)
+
+
+def _wait_exit(server, pid, timeout=15):
+    import time
+    end = time.monotonic() + timeout
+    while time.monotonic() < end:
+        if server.processes.status(pid)["exit_code"] is not None:
+            return
+        time.sleep(0.05)
+    raise AssertionError(f"{pid} did not exit in time")
+
+def test_process_gate_limit(tmp_path):
+    server = make(tmp_path, process_ttl_seconds=1000, max_processes=1)
+    sleeper = server.processes.start(
+        [sys.executable, "-c", "import time; time.sleep(30)"], process_id="lim-1")["process_id"]
+    try:
+        with pytest.raises(RuntimeFault) as limited:
+            server.processes.start([sys.executable, "-c", "print('x')"], process_id="lim-2")
+        assert limited.value.code == "process_limit"
+    finally:
+        server.processes.stop(sleeper, True)
+
+def test_process_gc_ttl_prune(tmp_path):
+    import time
+    server = make(tmp_path, process_ttl_seconds=1, max_processes=10)
+    old = server.processes.start([sys.executable, "-c", "print('done')"], process_id="prune-old")["process_id"]
+    _wait_exit(server, old)
+    time.sleep(1.2)
+    ids = [p["process_id"] for p in server.processes.list()]
+    assert "prune-old" not in ids
+
+def test_process_gc_cap_evicts_oldest_exited(tmp_path):
+    server = make(tmp_path, process_ttl_seconds=1000, max_processes=2)
+    quick = [sys.executable, "-c", "print('done')"]
+    for pid in ("ev-1", "ev-2"):
+        server.processes.start(quick, process_id=pid)
+        _wait_exit(server, pid)
+    server.processes.start(quick, process_id="ev-3")
+    ids = [p["process_id"] for p in server.processes.list()]
+    assert "ev-1" not in ids and "ev-2" in ids and "ev-3" in ids
+    for pid in ("ev-2", "ev-3"):
+        server.processes.stop(pid, True)
