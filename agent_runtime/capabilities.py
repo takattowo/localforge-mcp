@@ -45,7 +45,7 @@ class Capabilities:
         self.store = StateStore(cfg.state_file) if cfg.state_file else None
         if self.store is not None:
             saved = self.store.load().get("cwd")
-            if saved:
+            if isinstance(saved, str) and saved:
                 try:
                     self.cwd = self.paths.resolve(saved, access="read", must_exist=True)
                 except RuntimeFault:
@@ -145,9 +145,9 @@ class Capabilities:
             return {"path": str(target), "type": "dir" if target.is_dir() else "file",
                     "size": stat.st_size, "modified": stat.st_mtime, "created": stat.st_ctime}
         if action == "write":
-            target.parent.mkdir(parents=True, exist_ok=True)
             data = content or ""
             try:
+                target.parent.mkdir(parents=True, exist_ok=True)
                 self._atomic_write(target, data, encoding)
             except OSError as e:
                 _fs_error("write", target, e)
@@ -295,7 +295,7 @@ class Capabilities:
             return {"engine": "ripgrep", "results": [{"path": str(target)}], "exit_code": 0, "truncated": False, "applied_excludes": applied}
         if query is None:
             raise RuntimeFault("invalid_arguments", "Content search requires query")
-        command = ["rg", "--json"]
+        command = [rg, "--json"]
         if fixed_string:
             command.append("-F")
         if not case_sensitive:
@@ -305,26 +305,13 @@ class Capabilities:
         command += [query, str(target)]
         result = subprocess.run(command, capture_output=True, text=True, errors="replace", timeout=60,
                                 env=safe_environment(self.cfg))
-        matches = []
         events = []
         for line in result.stdout.splitlines():
             try:
                 events.append(json.loads(line))
             except ValueError:
                 continue
-        for i, event in enumerate(events):
-            if event.get("type") != "match":
-                continue
-            data = event["data"]
-            entry = {"path": data["path"].get("text"), "line": data["line_number"],
-                     "text": data["lines"].get("text", "").rstrip("\r\n")}
-            if context > 0:
-                before = [e["data"]["lines"].get("text", "").rstrip("\r\n") for e in events[max(0, i - context):i] if e.get("type") == "context"]
-                after = [e["data"]["lines"].get("text", "").rstrip("\r\n") for e in events[i + 1:i + 1 + context] if e.get("type") == "context"]
-                entry["context"] = before + after
-            matches.append(entry)
-            if len(matches) >= maximum:
-                break
+        matches = self._rg_matches(events, maximum, context)
         return {"engine": "ripgrep", "results": matches, "exit_code": result.returncode,
                 "truncated": len(matches) >= maximum, "applied_excludes": applied}
 
