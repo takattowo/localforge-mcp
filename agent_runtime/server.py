@@ -1,7 +1,9 @@
 from __future__ import annotations
 import atexit
+import difflib
 import json
 import os
+import re
 import sys
 import time
 import traceback
@@ -92,6 +94,32 @@ class Server:
     def tools(self):
         return [{"name": name, "description": DESCRIPTIONS[name], "inputSchema": SCHEMAS[name]} for name in DESCRIPTIONS]
 
+    ARG_KEYS = {
+        "workspace": ("action", "path"),
+        "filesystem": ("action", "path", "content", "destination", "recursive", "encoding", "offset",
+                        "max_bytes", "old_text", "new_text", "expected_occurrences", "line_start",
+                        "line_end", "limit", "glob", "include_hidden"),
+        "search": ("query", "path", "glob", "exclude", "case_sensitive", "max_results", "files_only",
+                   "fixed_string", "context_lines", "include_hidden", "max_file_size_bytes"),
+        "git": ("action", "args", "cwd"),
+        "execute": ("command", "cwd", "timeout", "shell", "env", "input"),
+        "process": ("action", "process_id", "command", "cwd", "shell", "env", "after", "limit_bytes",
+                    "wait_ms", "text", "append_newline", "force"),
+    }
+
+    @classmethod
+    def _unknown_arg_fault(cls, name, exc):
+        match = re.search(r"unexpected keyword argument '([^']+)'", str(exc))
+        if not match or name not in cls.ARG_KEYS:
+            raise exc
+        unknown = match.group(1)
+        valid = cls.ARG_KEYS[name]
+        hints = difflib.get_close_matches(unknown, valid, n=2, cutoff=0.6)
+        message = f"Unknown argument '{unknown}'. Valid arguments: {', '.join(valid)}."
+        if hints:
+            message += f" Did you mean '{hints[0]}'?"
+        return RuntimeFault("invalid_arguments", message)
+
     def call(self, name, arguments):
         start = time.monotonic()
         fault = "ok"
@@ -100,6 +128,10 @@ class Server:
         except RuntimeFault as e:
             fault = e.code
             raise
+        except TypeError as e:
+            enriched = self._unknown_arg_fault(name, e)
+            fault = enriched.code
+            raise enriched from e
         finally:
             if os.environ.get("LOCALFORGE_LOG") == "1":
                 elapsed = int((time.monotonic() - start) * 1000)
