@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.3.0
+
+- New filesystem apply_patch action for unified-diff edits with dry-run validation.
+- Patch application normalizes line endings to LF.
+
 ## 1.2.1
 
 - Stringified JSON arrays are rejected with guidance instead of failing in PowerShell.
