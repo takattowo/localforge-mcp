@@ -261,3 +261,43 @@ def test_unknown_argument_suggests(tmp_path):
     with pytest.raises(RuntimeFault) as exc2:
         server.call("execute", {"command": ["x"], "bogus": 1})
     assert "Valid arguments" in exc2.value.message and "command" in exc2.value.message
+
+def test_apply_patch_modify_and_create(tmp_path):
+    server = make(tmp_path)
+    (tmp_path / "a.txt").write_text("one\ntwo\nthree\n")
+    diff = ("--- a/a.txt\n+++ b/a.txt\n@@ -1,3 +1,3 @@ header\n one\n-two\n+TWO\n three\n"
+            "--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1,2 @@\n+hello\n+world\n")
+    out = server.cap.filesystem("apply_patch", ".", patch=diff)
+    assert len(out["files"]) == 2
+    assert (tmp_path / "a.txt").read_text().splitlines() == ["one", "TWO", "three"]
+    assert (tmp_path / "new.txt").read_text().splitlines() == ["hello", "world"]
+
+def test_apply_patch_atomic_on_mismatch(tmp_path):
+    server = make(tmp_path)
+    (tmp_path / "a.txt").write_text("one\ntwo\n")
+    (tmp_path / "b.txt").write_text("other\n")
+    diff = ("--- a/a.txt\n+++ b/a.txt\n@@ -1,2 +1,2 @@\n one\n-two\n+TWO\n"
+            "--- a/b.txt\n+++ b/b.txt\n@@ -1 +1 @@\n-missing\n+hit\n")
+    with pytest.raises(RuntimeFault) as exc:
+        server.cap.filesystem("apply_patch", ".", patch=diff)
+    assert exc.value.code == "content_mismatch" and "b.txt" in exc.value.message
+    assert (tmp_path / "a.txt").read_text().splitlines() == ["one", "two"]
+
+def test_apply_patch_rejects_escape_delete_and_garbage(tmp_path):
+    server = make(tmp_path)
+    with pytest.raises(RuntimeFault):
+        server.cap.filesystem("apply_patch", ".", patch="--- a/../x\n+++ b/../x\n@@ -0,0 +1 @@\n+q\n")
+    (tmp_path / "gone.txt").write_text("x\n")
+    with pytest.raises(RuntimeFault) as exc:
+        server.cap.filesystem("apply_patch", ".", patch="--- a/gone.txt\n+++ /dev/null\n@@ -1 +0,0 @@\n-x\n")
+    assert exc.value.code == "invalid_arguments"
+    assert (tmp_path / "gone.txt").exists()
+    with pytest.raises(RuntimeFault):
+        server.cap.filesystem("apply_patch", ".", patch="garbage")
+
+def test_apply_patch_no_trailing_newline(tmp_path):
+    server = make(tmp_path)
+    (tmp_path / "a.txt").write_bytes(b"one\ntwo")
+    diff = "--- a/a.txt\n+++ b/a.txt\n@@ -1,2 +1,2 @@\n one\n-two\n+TWO\n\\ No newline at end of file\n"
+    server.cap.filesystem("apply_patch", ".", patch=diff)
+    assert (tmp_path / "a.txt").read_text() == "one\nTWO"
