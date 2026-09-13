@@ -20,7 +20,7 @@ SCHEMAS = {
         "action": {"enum": ["get", "set_cwd"], "description": "get returns roots and Git root; set_cwd changes runtime directory."},
         "path": {"type": "string", "description": "Directory for set_cwd, relative to cwd or absolute, must resolve inside read roots."}}, "required": ["action"]},
     "filesystem": {"type": "object", "properties": {
-        "action": {"enum": ["read", "list", "stat", "write", "replace_text", "mkdir", "delete", "move"], "description": "read defaults to byte mode; pass line_start/line_end for line mode. list is paginated."},
+        "action": {"enum": ["read", "list", "stat", "write", "replace_text", "apply_patch", "mkdir", "delete", "move"], "description": "read defaults to byte mode; pass line_start/line_end for line mode. list is paginated. apply_patch takes a unified diff string."},
         "path": {"type": "string", "description": "Target path, relative to cwd or absolute. Reads need read roots, writes need write roots."},
         "content": {"type": "string", "description": "Full replacement content for write; overwrites the file."},
         "destination": {"type": "string", "description": "Destination path for move; parent directory must exist."},
@@ -35,7 +35,8 @@ SCHEMAS = {
         "line_end": {"type": "integer", "description": "Inclusive last line for line-mode read, default end of file."},
         "limit": {"type": "integer", "description": "Max list entries returned, default 200, clamped 1..1000."},
         "glob": {"type": "array", "items": {"type": "string"}, "description": "Fnmatch filters on entry name for list."},
-        "include_hidden": {"type": "boolean", "description": "Include dotfiles in list, default false."}}, "required": ["action"]},
+        "include_hidden": {"type": "boolean", "description": "Include dotfiles in list, default false."},
+        "patch": {"type": "string", "description": "Unified diff for apply_patch: modify or create files, exact context, all-or-nothing."}}, "required": ["action"]},
     "search": {"type": "object", "properties": {
         "query": {"type": "string", "description": "Text or regex to find; omit only with files_only."},
         "path": {"type": "string", "description": "File or directory to search, relative to cwd or absolute."},
@@ -98,7 +99,7 @@ class Server:
         "workspace": ("action", "path"),
         "filesystem": ("action", "path", "content", "destination", "recursive", "encoding", "offset",
                         "max_bytes", "old_text", "new_text", "expected_occurrences", "line_start",
-                        "line_end", "limit", "glob", "include_hidden"),
+                        "line_end", "limit", "glob", "include_hidden", "patch"),
         "search": ("query", "path", "glob", "exclude", "case_sensitive", "max_results", "files_only",
                    "fixed_string", "context_lines", "include_hidden", "max_file_size_bytes"),
         "git": ("action", "args", "cwd"),

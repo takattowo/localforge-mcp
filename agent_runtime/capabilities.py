@@ -9,6 +9,8 @@ import subprocess
 import tempfile
 import time
 from .errors import RuntimeFault
+from .patch import build_new as build_patched
+from .patch import parse as parse_diff
 from .state import StateStore
 from .security import command_for_spawn, redact, safe_environment
 
@@ -80,7 +82,7 @@ class Capabilities:
     def filesystem(self, action, path=".", content=None, destination=None, recursive=False,
                    encoding="utf-8", offset=0, max_bytes=None, expected_occurrences=None,
                    old_text=None, new_text=None, line_start=None, line_end=None,
-                   limit=200, glob=None, include_hidden=False):
+                   limit=200, glob=None, include_hidden=False, patch=None):
         access = "read" if action in {"read", "list", "stat"} else "write"
         must_exist = action not in {"write", "mkdir"}
         target = self.paths.resolve(path, cwd=self.cwd, access=access, must_exist=must_exist)
@@ -171,6 +173,44 @@ class Capabilities:
             except OSError as e:
                 _fs_error("replace_text", target, e)
             return {"path": str(target), "replacements": count, "bytes": len(updated.encode(encoding))}
+        if action == "apply_patch":
+            if patch is None:
+                raise RuntimeFault("invalid_arguments", "apply_patch requires patch")
+            if not target.is_dir():
+                raise RuntimeFault("not_directory", f"Patch base is not a directory: {target}")
+            self.policy.authorize_path("apply_patch")
+            planned = []
+            for fp in parse_diff(patch):
+                rel = fp.new_path if fp.new_path != "/dev/null" else fp.old_path
+                dest = self.paths.resolve(rel, cwd=target, access="write", must_exist=False)
+                creating = fp.old_path == "/dev/null"
+                if creating:
+                    if dest.exists():
+                        raise RuntimeFault("invalid_arguments", f"Patch creates existing file: {dest}")
+                    original = ""
+                else:
+                    if not dest.exists():
+                        raise RuntimeFault("path_not_found", f"Path not found: {dest}")
+                    if not dest.is_file():
+                        raise RuntimeFault("not_file", f"Not a file: {dest}")
+                    try:
+                        raw = dest.read_bytes()
+                    except OSError as e:
+                        _fs_error("apply_patch", dest, e)
+                    if b"\x00" in raw[:8192]:
+                        raise RuntimeFault("binary_file", "Binary file patch is not supported")
+                    original = raw.decode(encoding, "replace")
+                planned.append((dest, build_patched(original, fp, rel), creating))
+            results = []
+            for dest, updated, creating in planned:
+                try:
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    self._atomic_write(dest, updated, encoding)
+                except OSError as e:
+                    _fs_error("apply_patch", dest, e)
+                results.append({"path": str(dest), "created": creating,
+                                "bytes": len(updated.encode(encoding))})
+            return {"base": str(target), "files": results}
         if action == "mkdir":
             try:
                 target.mkdir(parents=recursive, exist_ok=True)
