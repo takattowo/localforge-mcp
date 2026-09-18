@@ -3,6 +3,7 @@ from pathlib import Path
 import fnmatch
 import json
 import os
+import re
 import shutil
 import signal
 import subprocess
@@ -258,9 +259,8 @@ class Capabilities:
                 raise RuntimeFault("invalid_arguments", "move requires destination")
             dest = self.paths.resolve(destination, cwd=self.cwd, access="write", must_exist=False)
             self.policy.authorize_path("move")
-            if not dest.parent.exists():
-                raise RuntimeFault("path_not_found", f"Destination parent not found: {dest.parent}")
             try:
+                dest.parent.mkdir(parents=True, exist_ok=True)
                 target.replace(dest)
             except OSError as e:
                 _fs_error("move", target, e)
@@ -293,12 +293,12 @@ class Capabilities:
         if root.is_file():
             if rg:
                 return self._search_rg_file(rg, root, query, case_sensitive, maximum, files_only, fixed_string, context, applied)
-            return self._search_python_file(root, query, case_sensitive, maximum, files_only, context, int(max_file_size_bytes), applied)
+            return self._search_python_file(root, query, case_sensitive, maximum, files_only, fixed_string, context, int(max_file_size_bytes), applied)
         if not root.is_dir():
             raise RuntimeFault("not_directory", f"Not a directory: {root}")
         if rg:
             return self._search_rg(rg, root, query, glob or [], applied, case_sensitive, maximum, files_only, fixed_string, context, bool(include_hidden))
-        return self._search_python(root, query, glob or [], applied, case_sensitive, maximum, files_only, context, int(max_file_size_bytes), bool(include_hidden))
+        return self._search_python(root, query, glob or [], applied, case_sensitive, maximum, files_only, fixed_string, context, int(max_file_size_bytes), bool(include_hidden))
 
     @staticmethod
     def _rg_error(result, cap=500):
@@ -400,7 +400,7 @@ class Capabilities:
             out["error"] = err
         return out
 
-    def _search_python_file(self, target, query, case_sensitive, maximum, files_only, context, max_size, applied):
+    def _search_python_file(self, target, query, case_sensitive, maximum, files_only, fixed_string, context, max_size, applied):
         if files_only:
             return {"engine": "python", "results": [{"path": str(target)}], "truncated": False, "applied_excludes": applied}
         if query is None:
@@ -410,11 +410,21 @@ class Capabilities:
                 return {"engine": "python", "results": [], "truncated": False, "applied_excludes": applied}
         except OSError:
             return {"engine": "python", "results": [], "truncated": False, "applied_excludes": applied}
-        return self._search_python(target.parent, query, [target.name], applied, case_sensitive, maximum, False, context, max_size, True)
+        return self._search_python(target.parent, query, [target.name], applied, case_sensitive, maximum, False, fixed_string, context, max_size, True)
 
     @staticmethod
-    def _search_python(root, query, includes, excludes, case_sensitive, maximum, files_only, context, max_size, include_hidden):
+    def _compile_fallback(query, fixed_string, case_sensitive):
+        if fixed_string:
+            return None
+        try:
+            return re.compile(query, 0 if case_sensitive else re.IGNORECASE)
+        except re.error as e:
+            raise RuntimeFault("invalid_arguments", f"Invalid regex: {e}") from e
+
+    @staticmethod
+    def _search_python(root, query, includes, excludes, case_sensitive, maximum, files_only, fixed_string, context, max_size, include_hidden):
         results = []
+        pattern = Capabilities._compile_fallback(query, fixed_string, case_sensitive) if query is not None else None
         for item in root.rglob("*"):
             if not item.is_file():
                 continue
@@ -442,8 +452,13 @@ class Capabilities:
                         data = handle.read(max_size + 1)
                     lines = data.decode("utf-8", "replace").splitlines()
                     for number, line in enumerate(lines, 1):
-                        haystack, needle = (line, query) if case_sensitive else (line.lower(), query.lower())
-                        if needle in haystack:
+                        if pattern is not None:
+                            matched = pattern.search(line) is not None
+                        elif case_sensitive:
+                            matched = query in line
+                        else:
+                            matched = query.lower() in line.lower()
+                        if matched:
                             entry = {"path": str(item), "line": number, "text": line}
                             if context > 0:
                                 entry["context"] = lines[max(0, number - 1 - context):number - 1] + lines[number:min(len(lines), number + context)]

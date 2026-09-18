@@ -76,8 +76,11 @@ class PathPolicy:
         return p
 
 class Policy:
-    NETWORK_TOOLS = {"curl", "curl.exe", "wget", "git", "npm", "npm.cmd", "npx", "npx.cmd", "pnpm", "pnpm.cmd", "yarn", "yarn.cmd", "pip", "pip3", "python", "python.exe", "py", "docker", "docker.exe"}
+    NETWORK_TOOLS = {"curl", "curl.exe", "wget", "git", "npm", "npm.cmd", "npx", "npx.cmd", "pnpm", "pnpm.cmd", "yarn", "yarn.cmd", "pip", "pip3", "python", "python.exe", "py", "docker", "docker.exe", "gh", "gh.exe"}
     NETWORK_MARKERS = ("install", "fetch", "pull", "push", "clone", "http://", "https://")
+    # gh subcommands almost always hit the GitHub API; only local-only
+    # invocations are exempt from network classification.
+    GH_LOCAL_ONLY = ("--version", "--help", "auth status")
 
     def __init__(self, cfg, paths):
         self.cfg, self.paths = cfg, paths
@@ -102,7 +105,11 @@ class Policy:
         else:
             raise RuntimeFault("invalid_command", "Command must be a non-empty string or string array")
         exe = Path(head.strip('"')).name.lower()
-        network = exe in self.NETWORK_TOOLS and any(x in display.lower() for x in self.NETWORK_MARKERS)
+        lowered = display.lower()
+        if exe in {"gh", "gh.exe"}:
+            network = not any(marker in lowered for marker in self.GH_LOCAL_ONLY)
+        else:
+            network = exe in self.NETWORK_TOOLS and any(x in lowered for x in self.NETWORK_MARKERS)
         if network and self.cfg.network == "disabled":
             raise RuntimeFault("network_denied", "Recognized network command blocked by configuration")
         return {"command": display, "cwd": str(cwd), "shell": shell, "network_classified": network}
