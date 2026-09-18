@@ -373,3 +373,11 @@ def test_default_env_inherits_programdata(tmp_path):
     from agent_runtime.config import Config
     cfg = Config(str(tmp_path))
     assert "ProgramData" in cfg.inherit_environment
+
+
+def test_empty_output_failure_explains_itself(tmp_path):
+    server = make(tmp_path)
+    bad = server.cap.execute([sys.executable, "-c", "raise SystemExit(7)"])
+    assert bad["exit_code"] == 7 and "no output captured" in bad["stderr"]
+    ok = server.cap.execute([sys.executable, "-c", "print('ok')"])
+    assert "no output captured" not in ok["stderr"]
