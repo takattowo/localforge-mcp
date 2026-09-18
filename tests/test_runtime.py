@@ -116,10 +116,9 @@ def test_filesystem_errors_are_structured(tmp_path):
     with pytest.raises(RuntimeFault) as missing:
         server.cap.filesystem("stat", "no-such-file.txt")
     assert missing.value.code == "path_not_found"
-    with pytest.raises(RuntimeFault) as bad_dest:
-        server.cap.filesystem("write", "ok.txt", "x")
-        server.cap.filesystem("move", "ok.txt", destination="no-such-dir/moved.txt")
-    assert bad_dest.value.code == "path_not_found"
+    server.cap.filesystem("write", "ok.txt", "x")
+    server.cap.filesystem("move", "ok.txt", destination="new-dir/moved.txt")
+    assert (tmp_path / "new-dir" / "moved.txt").read_text() == "x"
 
 def test_call_logs_to_stderr_only(tmp_path, capsys):
     import os
@@ -373,6 +372,33 @@ def test_default_env_inherits_programdata(tmp_path):
     from agent_runtime.config import Config
     cfg = Config(str(tmp_path))
     assert "ProgramData" in cfg.inherit_environment
+
+
+def test_gh_counts_as_network(tmp_path):
+    server = make(tmp_path)
+    ok = server.policy.authorize_command(["gh", "pr", "list"], str(tmp_path))
+    assert ok["network_classified"] is True
+    local = server.policy.authorize_command(["gh", "--version"], str(tmp_path))
+    assert local["network_classified"] is False
+    offline = make(tmp_path, network="disabled")
+    with pytest.raises(RuntimeFault) as exc:
+        offline.cap.execute(["gh", "pr", "list"])
+    assert exc.value.code == "network_denied"
+
+
+def test_python_fallback_honors_regex(tmp_path, monkeypatch):
+    import shutil
+    server = make(tmp_path)
+    (tmp_path / "src").mkdir()
+    (tmp_path / "src" / "hit.py").write_text("line one\nUserService here\nline three\n")
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    found = server.cap.search("User.*here", fixed_string=False)
+    assert found["engine"] == "python" and len(found["results"]) == 1
+    literal = server.cap.search("User.*here")
+    assert literal["results"] == []
+    with pytest.raises(RuntimeFault) as exc:
+        server.cap.search("(unclosed", fixed_string=False)
+    assert exc.value.code == "invalid_arguments"
 
 
 def test_empty_output_failure_explains_itself(tmp_path):

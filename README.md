@@ -170,6 +170,17 @@ Use `run` with an argument array for other operations:
 {"action":"run","args":["add","src/app.py"]}
 ```
 
+### GitHub via `gh` CLI
+
+There is no GitHub API tool; use `gh` through `execute` (one-time `gh auth login` on the box — tokens cannot ride `env` overrides by design, and stored credentials work since processes run as your user):
+
+```json
+{"command":["gh","pr","create","--title","x","--body","y"]}
+{"command":["gh","issue","list","--limit","20"]}
+```
+
+Prefer `gh ... --json <fields>` for machine-readable output. Note `gh` counts as network activity when `network` is `disabled`.
+
 ### `execute`
 
 Prefer argument arrays:
