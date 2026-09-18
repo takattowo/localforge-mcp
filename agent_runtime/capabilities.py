@@ -12,7 +12,7 @@ from .errors import RuntimeFault
 from .patch import build_new as build_patched
 from .patch import parse as parse_diff
 from .state import StateStore
-from .security import command_for_spawn, redact, safe_environment
+from .security import coerce_command, command_for_spawn, redact, safe_environment
 
 def _fs_error(action, target, exc):
     if isinstance(exc, FileNotFoundError):
@@ -83,6 +83,29 @@ class Capabilities:
                    encoding="utf-8", offset=0, max_bytes=None, expected_occurrences=None,
                    old_text=None, new_text=None, line_start=None, line_end=None,
                    limit=200, glob=None, include_hidden=False, patch=None):
+        if action == "copy":
+            if not destination:
+                raise RuntimeFault("invalid_arguments", "copy requires destination")
+            src = self.paths.resolve(path, cwd=self.cwd, access="read", must_exist=True)
+            dest = self.paths.resolve(destination, cwd=self.cwd, access="write", must_exist=False)
+            self.policy.authorize_path("copy")
+            try:
+                if src.is_file():
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copy2(src, dest)
+                    return {"source": str(src), "destination": str(dest), "bytes": dest.stat().st_size}
+                if src.is_dir():
+                    if not recursive:
+                        raise RuntimeFault("invalid_arguments", "copying a directory requires recursive=true")
+                    if dest.exists():
+                        raise RuntimeFault("invalid_arguments", f"Copy destination already exists: {dest}")
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copytree(src, dest)
+                    count = sum(1 for _ in dest.rglob("*")) + 1
+                    return {"source": str(src), "destination": str(dest), "copied_items": count}
+            except OSError as e:
+                _fs_error("copy", src, e)
+            raise RuntimeFault("not_file", f"Not a file or directory: {src}")
         access = "read" if action in {"read", "list", "stat"} else "write"
         must_exist = action not in {"write", "mkdir"}
         target = self.paths.resolve(path, cwd=self.cwd, access=access, must_exist=must_exist)
@@ -421,6 +444,17 @@ class Capabilities:
         subcommand = list(args or []) if action == "run" else presets.get(action)
         if subcommand is None:
             raise RuntimeFault("invalid_action", f"Unknown git action: {action}")
+        if action == "run" and subcommand and subcommand[0] == "add":
+            pathspec = [a for a in subcommand[1:] if not a.startswith("-") or a in {"-A", "."}]
+            if any(a in {"-A", "--all", "."} for a in subcommand[1:]):
+                raise RuntimeFault("invalid_arguments",
+                    "Broad git add blocked (add -A / --all / . stages secrets and scratch dirs). "
+                    "Stage explicit files instead, e.g. git add src/app.py.")
+            for spec in pathspec:
+                lowered = spec.lower()
+                if lowered.endswith((".pfx", ".p12", ".pem", ".key")) or Path(spec).name.lower() in {"sects.txt"}:
+                    raise RuntimeFault("secret_file",
+                        f"Refusing to stage a likely secret: {spec}. Private keys must never enter git history.")
         return self.execute(["git", "-C", str(work)] + subcommand + ([] if action == "run" else list(args or [])), cwd=str(work))
 
     @staticmethod
@@ -441,6 +475,7 @@ class Capabilities:
 
     def execute(self, command, cwd=None, timeout=None, shell=False, env=None, input=None):
         work = self.paths.resolve(cwd or self.cwd, access="read", must_exist=True)
+        command = coerce_command(command)
         stdin_bytes = None
         if input is not None:
             if len(input) > 65536:

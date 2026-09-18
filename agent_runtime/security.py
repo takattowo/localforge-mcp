@@ -17,6 +17,24 @@ def _looks_like_argv(text):
     return isinstance(value, list) and bool(value) and all(isinstance(x, str) for x in value)
 
 
+def coerce_command(command):
+    """Parse a stringified JSON argv array back into a real argv list.
+
+    Some MCP hosts serialize the command array into a JSON string before
+    sending. Passing that string to a shell breaks quoting, so coerce it
+    back to a list. Returns the original command when it is not a
+    stringified argv array.
+    """
+    if isinstance(command, str) and _looks_like_argv(command):
+        try:
+            value = json.loads(command.strip())
+        except ValueError:
+            return command
+        if isinstance(value, list) and bool(value) and all(isinstance(x, str) for x in value):
+            return value
+    return command
+
+
 class PathPolicy:
     def __init__(self, cfg):
         self.cfg = cfg
@@ -51,7 +69,10 @@ class PathPolicy:
             raise RuntimeFault("path_denied", f"Denied path: {p}")
         roots = self.read_roots if access == "read" else self.write_roots
         if self.cfg.mode != "FULL_ACCESS" and not self._within(p, roots):
-            raise RuntimeFault("path_outside_roots", f"Path outside {access} roots: {p}")
+            cfg_path = getattr(self.cfg, "config_path", None) or "localforge.json"
+            raise RuntimeFault("path_outside_roots",
+                f"Path outside {access} roots: {p}. "
+                f"Add it to allowed_{access}_roots in {cfg_path} then restart MCP (toggle connection off/on).")
         return p
 
 class Policy:
@@ -68,11 +89,8 @@ class Policy:
     def authorize_command(self, command, cwd, shell=False):
         if self.cfg.mode in {"READ_ONLY", "WORKSPACE"}:
             raise RuntimeFault("execution_denied", f"Mode {self.cfg.mode} does not allow process execution")
+        command = coerce_command(command)
         if isinstance(command, str):
-            if _looks_like_argv(command):
-                raise RuntimeFault("invalid_arguments",
-                    "Command looks like a JSON array inside a string (the client stringified the array). "
-                    "Pass a real JSON array, or a plain shell command string.")
             if not shell:
                 raise RuntimeFault("invalid_command", "String commands require shell=true; use an argv array otherwise")
             if not self.cfg.allow_shell_commands:
@@ -122,5 +140,29 @@ def safe_environment(cfg, overrides=None):
     return result
 
 _SECRET = re.compile(r"(?i)(token|secret|password|api[_-]?key)(\s*[:=]\s*)([^\s,;]+)")
+
+_CODE_REF = re.compile(r"^[A-Za-z_]\w*(\.\w+)+$")
+
+def _looks_like_code(value):
+    """True when a redaction candidate is code, not a credential.
+
+    execute output often contains source listings (e.g. Get-Content of a
+    config class). Redacting `Password = OverrideSecret(` or
+    `secret = cfg.Secret` destroys the listing while hiding nothing.
+    Skip call expressions, dotted code references, and common literals.
+    Long blobs (tokens, base64 certs) still redact.
+    """
+    if "(" in value or ")" in value:
+        return True
+    if _CODE_REF.match(value):
+        return True
+    if value.strip("\"'").lower() in {"null", "true", "false", "none", ""}:
+        return True
+    return len(value.strip("\"'")) < 4
+
 def redact(text):
-    return _SECRET.sub(lambda m: m.group(1) + m.group(2) + "[REDACTED]", text)
+    def _sub(m):
+        if _looks_like_code(m.group(3)):
+            return m.group(0)
+        return m.group(1) + m.group(2) + "[REDACTED]"
+    return _SECRET.sub(_sub, text)
