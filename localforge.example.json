@@ -14,7 +14,8 @@
   "max_processes": 50,
   "inherit_environment": [
     "PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "COMSPEC",
-    "USERPROFILE", "APPDATA", "LOCALAPPDATA", "ProgramFiles", "ProgramFiles(x86)"
+    "USERPROFILE", "APPDATA", "LOCALAPPDATA", "ProgramFiles", "ProgramFiles(x86)",
+    "ProgramData"
   ],
   "deny_environment": [
     "*TOKEN*", "*SECRET*", "*PASSWORD*", "*KEY*", "AWS_*", "AZURE_*", "GITHUB_*", "NPM_TOKEN"

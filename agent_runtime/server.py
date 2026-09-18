@@ -20,11 +20,11 @@ SCHEMAS = {
         "action": {"enum": ["get", "set_cwd"], "description": "get returns roots and Git root; set_cwd changes runtime directory."},
         "path": {"type": "string", "description": "Directory for set_cwd, relative to cwd or absolute, must resolve inside read roots."}}, "required": ["action"]},
     "filesystem": {"type": "object", "properties": {
-        "action": {"enum": ["read", "list", "stat", "write", "replace_text", "apply_patch", "mkdir", "delete", "move"], "description": "read defaults to byte mode; pass line_start/line_end for line mode. list is paginated. apply_patch takes a unified diff string."},
+        "action": {"enum": ["read", "list", "stat", "write", "replace_text", "apply_patch", "mkdir", "delete", "move", "copy"], "description": "read defaults to byte mode; pass line_start/line_end for line mode. list is paginated. apply_patch takes a unified diff string. copy duplicates a file (or a directory with recursive=true) without shell quoting issues."},
         "path": {"type": "string", "description": "Target path, relative to cwd or absolute. Reads need read roots, writes need write roots."},
         "content": {"type": "string", "description": "Full replacement content for write; overwrites the file."},
-        "destination": {"type": "string", "description": "Destination path for move; parent directory must exist."},
-        "recursive": {"type": "boolean", "description": "true creates parent dirs for mkdir, deletes non-empty dirs for delete."},
+        "destination": {"type": "string", "description": "Destination path for move/copy; copy creates missing parent dirs, move requires the parent to exist."},
+        "recursive": {"type": "boolean", "description": "true creates parent dirs for mkdir, deletes non-empty dirs for delete, copies directories for copy."},
         "encoding": {"type": "string", "description": "Text encoding, default utf-8."},
         "offset": {"type": "integer", "description": "Byte offset for legacy read mode; list page offset when action is list. Ignored in line mode."},
         "max_bytes": {"type": "integer", "description": "Byte cap for legacy read mode."},
@@ -76,7 +76,7 @@ SCHEMAS = {
 }
 DESCRIPTIONS = {
     "workspace": "Inspect workspace and Git root, or change runtime current directory.",
-    "filesystem": "Policy-checked real filesystem operations: line or byte reads, paginated lists, atomic writes, guarded text replacement.",
+    "filesystem": "Policy-checked real filesystem operations: line or byte reads, paginated lists, atomic writes, guarded text replacement, policy-checked copy.",
     "search": "Repository text or filename search with glob filters, default ignores, and context lines.",
     "git": "Common structured Git operations plus a generic argument-array action.",
     "execute": "Run a bounded foreground process with structured output; argv arrays preferred.",
