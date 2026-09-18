@@ -9,7 +9,7 @@ import threading
 import time
 import uuid
 from .errors import RuntimeFault
-from .security import command_for_spawn, redact, safe_environment
+from .security import coerce_command, command_for_spawn, redact, safe_environment
 
 @dataclass
 class Chunk:
@@ -96,6 +96,7 @@ class ProcessManager:
 
     def start(self, command, cwd=None, shell=False, env=None, process_id=None):
         work = self.paths.resolve(cwd or ".", access="read", must_exist=True)
+        command = coerce_command(command)
         shell = bool(shell or isinstance(command, str))
         self.policy.authorize_command(command, work, shell)
         if self._gc() >= int(self.cfg.max_processes):

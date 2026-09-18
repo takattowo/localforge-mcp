@@ -151,9 +151,9 @@ A blank terminal means the server is waiting for newline-delimited JSON-RPC inpu
 ### `filesystem`
 
 - `list`, `stat`, `read`
-- `write`, `replace_text`, `apply_patch`, `mkdir`, `move`, `delete`
+- `write`, `replace_text`, `apply_patch`, `mkdir`, `move`, `delete`, `copy`
 
-`read` supports byte offset and bounded output. `replace_text` defaults to exactly one expected occurrence, preventing accidental broad replacements. `apply_patch` takes a unified diff for multi-hunk or multi-file edits: exact context, validated end-to-end before anything is written, all-or-nothing. Prefer it over writing plus executing a script to edit code.
+`read` supports byte offset and bounded output. `replace_text` defaults to exactly one expected occurrence, preventing accidental broad replacements. `apply_patch` takes a unified diff for multi-hunk or multi-file edits: exact context, validated end-to-end before anything is written, all-or-nothing. Prefer it over writing plus executing a script to edit code. `copy` duplicates a file (or a directory with `recursive`) under policy checks — prefer it over shell copy commands, which mis-handle bracketed filenames like `[KB1] - doc.pdf` without `-LiteralPath`.
 
 ### `search`
 
@@ -162,6 +162,7 @@ Search text or filenames recursively with include/exclude globs, case control, f
 ### `git`
 
 Presets: `status`, `diff`, `log`, `show`, `branch`, and `root`.
+Broad `git add -A` / `--all` / `.` is blocked (stage explicit files instead), as is staging private keys (`*.pfx`, `*.p12`, `*.pem`, `*.key`).
 
 Use `run` with an argument array for other operations:
 

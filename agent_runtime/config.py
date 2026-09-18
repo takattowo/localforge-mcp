@@ -27,6 +27,7 @@ class Config:
     inherit_environment: list[str] = field(default_factory=lambda: [
         "PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "COMSPEC",
         "USERPROFILE", "APPDATA", "LOCALAPPDATA", "ProgramFiles", "ProgramFiles(x86)",
+        "ProgramData",
     ])
     deny_environment: list[str] = field(default_factory=lambda: [
         "*TOKEN*", "*SECRET*", "*PASSWORD*", "*KEY*", "AWS_*", "AZURE_*",

@@ -245,13 +245,19 @@ def test_cwd_persists_across_restart(tmp_path):
     third = Server(Config.load(str(cfg_file)))
     assert str(third.cap.cwd) == str(tmp_path)
 
-def test_stringified_array_rejected(tmp_path):
+def test_stringified_array_coerced(tmp_path):
+    import json
     server = make(tmp_path)
-    with pytest.raises(RuntimeFault) as exc:
-        server.policy.authorize_command('["python", "-c", "print(1)"]', str(tmp_path), True)
-    assert exc.value.code == "invalid_arguments" and "array" in exc.value.message
-    ok = server.policy.authorize_command("[System.Console]::Beep()", str(tmp_path), True)
+    payload = json.dumps([sys.executable, "-c", "print(1)"])
+    ok = server.policy.authorize_command(payload, str(tmp_path), True)
     assert ok["shell"] is True
+    run = server.cap.execute(payload)
+    assert run["success"] and "1" in run["stdout"]
+    proc = server.processes.start(payload)
+    assert proc["process_id"]
+    server.processes.stop(proc["process_id"], True)
+    plain = server.policy.authorize_command("[System.Console]::Beep()", str(tmp_path), True)
+    assert plain["shell"] is True
 
 def test_unknown_argument_suggests(tmp_path):
     server = make(tmp_path)
@@ -301,3 +307,69 @@ def test_apply_patch_no_trailing_newline(tmp_path):
     diff = "--- a/a.txt\n+++ b/a.txt\n@@ -1,2 +1,2 @@\n one\n-two\n+TWO\n\\ No newline at end of file\n"
     server.cap.filesystem("apply_patch", ".", patch=diff)
     assert (tmp_path / "a.txt").read_text() == "one\nTWO"
+
+
+def test_filesystem_copy_file_and_bracket_name(tmp_path):
+    server = make(tmp_path)
+    (tmp_path / "[KBMISC001] - note.pdf").write_bytes(b"%PDF-1.6 fake")
+    out = server.cap.filesystem("copy", "[KBMISC001] - note.pdf", destination="staged/copy.pdf")
+    assert (tmp_path / "staged" / "copy.pdf").read_bytes() == b"%PDF-1.6 fake"
+    assert out["bytes"] == len(b"%PDF-1.6 fake")
+    with pytest.raises(RuntimeFault):
+        server.cap.filesystem("copy", "[KBMISC001] - note.pdf")
+    readonly = make(tmp_path, "READ_ONLY")
+    with pytest.raises(RuntimeFault):
+        readonly.cap.filesystem("copy", "staged/copy.pdf", destination="elsewhere.pdf")
+
+
+def test_filesystem_copy_dir_needs_recursive(tmp_path):
+    server = make(tmp_path)
+    (tmp_path / "srcdir").mkdir()
+    (tmp_path / "srcdir" / "f.txt").write_text("data")
+    with pytest.raises(RuntimeFault):
+        server.cap.filesystem("copy", "srcdir", destination="destdir")
+    out = server.cap.filesystem("copy", "srcdir", destination="destdir", recursive=True)
+    assert (tmp_path / "destdir" / "f.txt").read_text() == "data"
+    assert out["copied_items"] >= 2
+
+
+def test_redact_keeps_code_redacts_secrets():
+    from agent_runtime.security import redact
+    code = "SharepointCertificatePassword = OverrideSecret(\n    body, \"sharepoint_certificate_password\", current.SharepointCertificatePassword),"
+    assert redact(code) == code
+    dotted = "secret = cfg.Secret"
+    assert redact(dotted) == dotted
+    assert redact("Secret=hunter2-secret-value") == "Secret=[REDACTED]"
+    assert redact("password = null") == "password = null"
+
+
+def test_git_guards_broad_add_and_secrets(tmp_path):
+    server = make(tmp_path)
+    for spec in (["add", "-A"], ["add", "--all"], ["add", "."]):
+        with pytest.raises(RuntimeFault) as exc:
+            server.cap.git("run", args=spec)
+        assert exc.value.code == "invalid_arguments" and "explicit" in exc.value.message
+    with pytest.raises(RuntimeFault) as exc2:
+        server.cap.git("run", args=["add", "certs/sp-ingest.pfx"])
+    assert exc2.value.code == "secret_file"
+
+
+def test_path_outside_roots_is_actionable(tmp_path):
+    from agent_runtime.config import Config
+    from agent_runtime.server import Server
+    outside = tmp_path.parent / (tmp_path.name + "-outside")
+    outside.mkdir(exist_ok=True)
+    cfg = Config(str(tmp_path), mode="DEVELOPMENT", allowed_read_roots=[str(tmp_path)],
+                 allowed_write_roots=[str(tmp_path)], inherit_environment=["PATH"],
+                 default_shell="cmd" if os.name == "nt" else "sh")
+    server = Server(cfg)
+    with pytest.raises(RuntimeFault) as exc:
+        server.cap.filesystem("read", str(outside))
+    assert exc.value.code == "path_outside_roots"
+    assert "allowed_read_roots" in exc.value.message and "restart" in exc.value.message.lower()
+
+
+def test_default_env_inherits_programdata(tmp_path):
+    from agent_runtime.config import Config
+    cfg = Config(str(tmp_path))
+    assert "ProgramData" in cfg.inherit_environment
