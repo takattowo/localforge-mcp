@@ -1,6 +1,11 @@
 # Changelog
 
-## 1.4.1
+## 1.4.2
+
+- gh CLI counts as network activity (except local-only invocations), closing the network-disabled bypass.
+- Python search fallback honors regex when fixed_string is false, with invalid-pattern errors.
+- filesystem move creates missing parent dirs like copy and write.
+- README documents the GitHub-via-gh pattern: one-time gh auth login, --json output.
 
 - replace_text rejects identical old/new text and points at expected_occurrences on count mismatch.
 - Search surfaces ripgrep's stderr when it exits with an error instead of returning bare empty results.
