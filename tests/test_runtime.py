@@ -381,3 +381,38 @@ def test_empty_output_failure_explains_itself(tmp_path):
     assert bad["exit_code"] == 7 and "no output captured" in bad["stderr"]
     ok = server.cap.execute([sys.executable, "-c", "print('ok')"])
     assert "no output captured" not in ok["stderr"]
+
+
+def test_replace_text_rejects_identical_and_hints_count(tmp_path):
+    server = make(tmp_path)
+    server.cap.filesystem("write", "a.txt", "hello")
+    with pytest.raises(RuntimeFault) as exc:
+        server.cap.filesystem("replace_text", "a.txt", old_text="hello", new_text="hello")
+    assert exc.value.code == "invalid_arguments" and "identical" in exc.value.message
+    (tmp_path / "b.txt").write_text("x x")
+    with pytest.raises(RuntimeFault) as exc2:
+        server.cap.filesystem("replace_text", "b.txt", old_text="x", new_text="y")
+    assert exc2.value.code == "content_mismatch" and "expected_occurrences" in exc2.value.message
+    server.cap.filesystem("replace_text", "b.txt", old_text="x", new_text="y", expected_occurrences=2)
+    assert (tmp_path / "b.txt").read_text() == "y y"
+
+
+def test_search_surfaces_rg_errors(tmp_path, monkeypatch):
+    import shutil
+    import subprocess
+    server = make(tmp_path)
+    (tmp_path / "a.txt").write_text("hello\n")
+    monkeypatch.setattr(shutil, "which", lambda name: "rg" if name == "rg" else None)
+    real_run = subprocess.run
+    def fake_error(*args, **kwargs):
+        class R:
+            returncode = 2
+            stdout = ""
+            stderr = "rg: regex parse error (line 1)"
+        return R()
+    monkeypatch.setattr(subprocess, "run", fake_error)
+    try:
+        out = server.cap.search("UserService")
+    finally:
+        monkeypatch.setattr(subprocess, "run", real_run)
+    assert out["results"] == [] and "regex parse error" in out.get("error", "")
