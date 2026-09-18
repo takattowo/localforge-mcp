@@ -194,6 +194,8 @@ For SSH, prefer key auth with fail-fast flags so prompts never hang the call:
 
 Two Windows gotchas: keys under Downloads usually have permissive ACLs, which ssh rejects (`Permissions ... are too open`) — fix with `icacls key.pem /inheritance:r /grant:r "$env:USERNAME:F"`. And ssh requires `%ProgramData%` in the environment (inherited by default since 1.4.0); without it ssh dies instantly with exit 255 and no output.
 
+Complex quoting (multi-line PowerShell with `$vars`, nested `python -c`, bracketed paths) breaks when passed as a command string. Write the script with `filesystem write` to a temp file, then run it by path (`powershell -ExecutionPolicy Bypass -File script.ps1`, `python script.py`). Prefer `filesystem copy` over shell copy commands.
+
 ### `process`
 
 Actions: `start`, `read`, `write`, `status`, `list`, `restart`, and `stop`.

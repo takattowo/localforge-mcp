@@ -182,6 +182,8 @@ class Capabilities:
                 raise RuntimeFault("not_file", f"Not a file: {target}")
             if old_text is None or new_text is None:
                 raise RuntimeFault("invalid_arguments", "replace_text requires old_text and new_text")
+            if old_text == new_text:
+                raise RuntimeFault("invalid_arguments", "old_text and new_text are identical; nothing would change")
             try:
                 original = target.read_text(encoding=encoding)
             except OSError as e:
@@ -189,7 +191,8 @@ class Capabilities:
             count = original.count(old_text)
             expected = 1 if expected_occurrences is None else int(expected_occurrences)
             if count != expected:
-                raise RuntimeFault("content_mismatch", f"Expected {expected} occurrence(s), found {count}")
+                raise RuntimeFault("content_mismatch", f"Expected {expected} occurrence(s), found {count}. "
+                    "Pass expected_occurrences to replace all of them at once.")
             updated = original.replace(old_text, new_text)
             try:
                 self._atomic_write(target, updated, encoding)
@@ -297,6 +300,13 @@ class Capabilities:
             return self._search_rg(rg, root, query, glob or [], applied, case_sensitive, maximum, files_only, fixed_string, context, bool(include_hidden))
         return self._search_python(root, query, glob or [], applied, case_sensitive, maximum, files_only, context, int(max_file_size_bytes), bool(include_hidden))
 
+    @staticmethod
+    def _rg_error(result, cap=500):
+        if result.returncode in (0, 1):
+            return None
+        text = (result.stderr or "").strip()
+        return text[:cap] if text else f"ripgrep exited with code {result.returncode}"
+
     def _search_rg(self, rg, root, query, includes, excludes, case_sensitive, maximum, files_only, fixed_string, context, include_hidden):
         command = [rg]
         if include_hidden:
@@ -310,9 +320,13 @@ class Capabilities:
             result = subprocess.run(command, capture_output=True, text=True, errors="replace", timeout=60,
                                     env=safe_environment(self.cfg))
             paths = result.stdout.splitlines()
-            return {"engine": "ripgrep", "results": [{"path": p} for p in paths[:maximum]],
+            out = {"engine": "ripgrep", "results": [{"path": p} for p in paths[:maximum]],
                     "exit_code": result.returncode, "truncated": len(paths) > maximum,
                     "applied_excludes": excludes}
+            err = self._rg_error(result)
+            if err is not None:
+                out["error"] = err
+            return out
         if query is None:
             raise RuntimeFault("invalid_arguments", "Content search requires query")
         command += ["--json"]
@@ -332,8 +346,12 @@ class Capabilities:
             except ValueError:
                 continue
         matches = self._rg_matches(events, maximum, context)
-        return {"engine": "ripgrep", "results": matches, "exit_code": result.returncode,
+        out = {"engine": "ripgrep", "results": matches, "exit_code": result.returncode,
                 "truncated": len(matches) >= maximum, "applied_excludes": excludes}
+        err = self._rg_error(result)
+        if err is not None:
+            out["error"] = err
+        return out
 
     @staticmethod
     def _rg_matches(events, maximum, context):
@@ -375,8 +393,12 @@ class Capabilities:
             except ValueError:
                 continue
         matches = self._rg_matches(events, maximum, context)
-        return {"engine": "ripgrep", "results": matches, "exit_code": result.returncode,
-                "truncated": len(matches) >= maximum, "applied_excludes": applied}
+        out = {"engine": "ripgrep", "results": matches, "exit_code": result.returncode,
+                "truncated": len(matches) >= maximum, "applied_excludes": excludes}
+        err = self._rg_error(result)
+        if err is not None:
+            out["error"] = err
+        return out
 
     def _search_python_file(self, target, query, case_sensitive, maximum, files_only, context, max_size, applied):
         if files_only:
