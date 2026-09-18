@@ -500,6 +500,9 @@ class Capabilities:
                     "stdout": "", "stderr": str(e), "duration_ms": int((time.monotonic() - started) * 1000),
                     "error_type": "process_start"}
         out, err = redact(stdout.decode("utf-8", "replace")), redact(stderr.decode("utf-8", "replace"))
+        if not out and not err and (proc.returncode != 0 or error_type is not None):
+            err = ("[no output captured on stdout/stderr; the child may have written directly "
+                   "to the console or died during startup (e.g. missing environment)]")
         cap = self.cfg.max_capture_bytes
         out, out_cut = _clip(out, cap)
         err, err_cut = _clip(err, cap)

@@ -186,6 +186,14 @@ String commands automatically use the configured shell:
 
 Pass `shell` explicitly only to force array commands through the shell. Argument arrays bypass shell parsing and stay preferred.
 
+For SSH, prefer key auth with fail-fast flags so prompts never hang the call:
+
+```json
+{"command":["ssh","-i","C:\\Keys\\deploy.pem","-o","BatchMode=yes","-o","StrictHostKeyChecking=accept-new","-o","ConnectTimeout=15","ubuntu@host","docker ps"]}
+```
+
+Two Windows gotchas: keys under Downloads usually have permissive ACLs, which ssh rejects (`Permissions ... are too open`) — fix with `icacls key.pem /inheritance:r /grant:r "$env:USERNAME:F"`. And ssh requires `%ProgramData%` in the environment (inherited by default since 1.4.0); without it ssh dies instantly with exit 255 and no output.
+
 ### `process`
 
 Actions: `start`, `read`, `write`, `status`, `list`, `restart`, and `stop`.

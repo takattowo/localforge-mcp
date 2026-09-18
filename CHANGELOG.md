@@ -1,6 +1,15 @@
 # Changelog
 
-## 1.3.0
+## 1.4.0
+
+- New filesystem copy action for policy-checked file and directory copies without shell quoting issues.
+- Stringified JSON argv arrays are now coerced back to arrays instead of rejected.
+- path_outside_roots errors name the config key and the restart step.
+- Secret redaction no longer mangles code listings (call expressions, dotted references, literals).
+- git run blocks broad `add -A` / `--all` / `.` and refuses to stage private keys.
+- Inherit `%ProgramData%` by default; without it OpenSSH for Windows dies instantly with exit 255 and no output.
+- Empty-output failures now say so instead of returning blank streams.
+- SSH usage notes: fail-fast flags and the Downloads key-permission fix.
 
 - New filesystem apply_patch action for unified-diff edits with dry-run validation.
 - Patch application normalizes line endings to LF.
