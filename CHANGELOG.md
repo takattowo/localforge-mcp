@@ -1,6 +1,10 @@
 # Changelog
 
-## 1.4.0
+## 1.4.1
+
+- replace_text rejects identical old/new text and points at expected_occurrences on count mismatch.
+- Search surfaces ripgrep's stderr when it exits with an error instead of returning bare empty results.
+- README documents the write-script-then-run pattern for complex shell quoting.
 
 - New filesystem copy action for policy-checked file and directory copies without shell quoting issues.
 - Stringified JSON argv arrays are now coerced back to arrays instead of rejected.
