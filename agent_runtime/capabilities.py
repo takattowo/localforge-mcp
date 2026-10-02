@@ -394,7 +394,7 @@ class Capabilities:
                 continue
         matches = self._rg_matches(events, maximum, context)
         out = {"engine": "ripgrep", "results": matches, "exit_code": result.returncode,
-                "truncated": len(matches) >= maximum, "applied_excludes": excludes}
+                "truncated": len(matches) >= maximum, "applied_excludes": applied}
         err = self._rg_error(result)
         if err is not None:
             out["error"] = err

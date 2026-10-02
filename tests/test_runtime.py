@@ -442,3 +442,15 @@ def test_search_surfaces_rg_errors(tmp_path, monkeypatch):
     finally:
         monkeypatch.setattr(subprocess, "run", real_run)
     assert out["results"] == [] and "regex parse error" in out.get("error", "")
+
+
+def test_search_single_file_with_rg(tmp_path):
+    import shutil
+    if shutil.which("rg") is None:
+        pytest.skip("rg unavailable")
+    server = make(tmp_path)
+    (tmp_path / "a.txt").write_text("hello UserService\n")
+    out = server.cap.search("UserService", path="a.txt")
+    assert out["engine"] == "ripgrep"
+    assert len(out["results"]) == 1 and out["results"][0]["line"] == 1
+    assert ".git/**" in out["applied_excludes"]
