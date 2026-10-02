@@ -454,3 +454,25 @@ def test_search_single_file_with_rg(tmp_path):
     assert out["engine"] == "ripgrep"
     assert len(out["results"]) == 1 and out["results"][0]["line"] == 1
     assert ".git/**" in out["applied_excludes"]
+
+
+def test_execute_timeout_above_default_warns(tmp_path):
+    server = make(tmp_path)
+    over = float(server.cfg.default_timeout_seconds) + 20
+    out = server.cap.execute([sys.executable, "-c", "print('ok')"], timeout=over)
+    assert out["success"] and "ok" in out["stdout"]
+    assert "process" in out.get("warning", "")
+
+
+def test_execute_timeout_at_default_has_no_warning(tmp_path):
+    server = make(tmp_path)
+    out = server.cap.execute([sys.executable, "-c", "print('ok')"],
+                             timeout=float(server.cfg.default_timeout_seconds))
+    assert out["success"] and "warning" not in out
+
+
+def test_execute_schema_steers_long_waits_to_process(tmp_path):
+    tools = {t["name"]: t for t in make(tmp_path).tools()}
+    assert "process" in tools["execute"]["description"]
+    props = tools["execute"]["inputSchema"]["properties"]
+    assert "process" in props["timeout"]["description"]

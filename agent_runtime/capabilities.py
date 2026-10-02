@@ -522,11 +522,12 @@ class Capabilities:
         self.policy.authorize_command(command, work, shell)
         started = time.monotonic()
         proc = None
+        effective_timeout = float(timeout or self.cfg.default_timeout_seconds)
         try:
             proc = subprocess.Popen(command_for_spawn(self.cfg, command, shell), cwd=work, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                     stdin=subprocess.PIPE if stdin_bytes is not None else None,
                                     env=safe_environment(self.cfg, env), **self._creation())
-            stdout, stderr = proc.communicate(input=stdin_bytes, timeout=float(timeout or self.cfg.default_timeout_seconds))
+            stdout, stderr = proc.communicate(input=stdin_bytes, timeout=effective_timeout)
             error_type = None if proc.returncode == 0 else "process_exit"
         except subprocess.TimeoutExpired:
             self._kill_tree(proc)
@@ -543,7 +544,13 @@ class Capabilities:
         cap = self.cfg.max_capture_bytes
         out, out_cut = _clip(out, cap)
         err, err_cut = _clip(err, cap)
-        return {"success": proc.returncode == 0 and error_type is None, "command": command, "cwd": str(work),
+        result = {"success": proc.returncode == 0 and error_type is None, "command": command, "cwd": str(work),
                 "exit_code": proc.returncode, "stdout": out, "stderr": err,
                 "stdout_truncated": out_cut, "stderr_truncated": err_cut,
                 "duration_ms": int((time.monotonic() - started) * 1000), "error_type": error_type}
+        if timeout is not None and effective_timeout > float(self.cfg.default_timeout_seconds):
+            result["warning"] = (
+                "timeout exceeds the configured default "
+                f"({self.cfg.default_timeout_seconds} s); long foreground waits risk "
+                "gateway/outpost timeouts and block the server — use the process tool for waits and polling.")
+        return result
