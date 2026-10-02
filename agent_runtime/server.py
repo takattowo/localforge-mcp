@@ -56,7 +56,7 @@ SCHEMAS = {
     "execute": {"type": "object", "properties": {
         "command": {"description": "Command to run. Prefer an argv array: no shell parsing, no quoting bugs. A string runs through the configured default_shell, so match its syntax.", "oneOf": [{"type": "array", "items": {"type": "string"}}, {"type": "string"}]},
         "cwd": {"type": "string", "description": "Working directory, defaults to runtime cwd."},
-        "timeout": {"type": "number", "description": "Timeout in seconds, not milliseconds."},
+        "timeout": {"type": "number", "description": "Timeout in seconds, not milliseconds. Long foreground waits risk gateway/outpost timeouts and block the server; use the process tool for waits and polling."},
         "shell": {"type": "boolean", "description": "Rarely needed. Strings auto-enable the shell; set true only to force an argv array through the shell for pipes and operators."},
         "env": {"type": "object", "description": "Extra environment variables; denied names raise environment_denied."},
         "input": {"type": "string", "description": "Optional stdin text, max 65536 chars."}}, "required": ["command"]},
@@ -79,7 +79,7 @@ DESCRIPTIONS = {
     "filesystem": "Policy-checked real filesystem operations: line or byte reads, paginated lists, atomic writes, guarded text replacement, policy-checked copy.",
     "search": "Repository text or filename search with glob filters, default ignores, and context lines.",
     "git": "Common structured Git operations plus a generic argument-array action.",
-    "execute": "Run a bounded foreground process with structured output; argv arrays preferred.",
+    "execute": "Run a bounded foreground process with structured output; argv arrays preferred. For long waits or polling, use the process tool instead of a long-timeout execute.",
     "process": "Manage long-running processes with stable IDs, split streams, cursors, stdin, restart, and tree stop.",
 }
 
