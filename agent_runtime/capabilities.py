@@ -363,14 +363,18 @@ class Capabilities:
         optional label; failures are isolated per entry.
         """
         if not isinstance(searches, list) or not searches:
-            raise RuntimeFault("invalid_arguments", "multi_search requires a non-empty searches array")
+            raise RuntimeFault("invalid_arguments",
+                               "multi_search requires a non-empty searches array, "
+                               "e.g. {\"searches\": [{\"query\": \"todo\"}]}")
         if len(searches) > MAX_BATCH_SEARCHES:
             raise RuntimeFault("invalid_arguments",
                                f"multi_search accepts at most {MAX_BATCH_SEARCHES} searches")
         specs = []
         for index, spec in enumerate(searches):
             if not isinstance(spec, dict):
-                raise RuntimeFault("invalid_arguments", f"searches[{index}] must be an object")
+                raise RuntimeFault("invalid_arguments",
+                                   f"searches[{index}] must be an object with "
+                                   "the search tool's arguments")
             specs.append(dict(spec))
         results: list[dict] = [None] * len(specs)
 
