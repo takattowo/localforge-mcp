@@ -1,4 +1,6 @@
 from __future__ import annotations
+import contextlib
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import fnmatch
 import json
@@ -8,6 +10,7 @@ import shutil
 import signal
 import subprocess
 import tempfile
+import threading
 import time
 from .errors import RuntimeFault
 from .patch import build_new as build_patched
@@ -41,28 +44,67 @@ def _clip(data: str, cap: int):
 DEFAULT_EXCLUDES = [".git/**", ".venv/**", "__pycache__/**", "node_modules/**", ".hg/**",
                     "target/**", "dist/**", "build/**", "*.egg-info/**"]
 
+MAX_BATCH_SEARCHES = 16
+BATCH_SEARCH_WORKERS = 8
+
 class Capabilities:
     def __init__(self, cfg, paths, policy, processes):
         self.cfg, self.paths, self.policy, self.processes = cfg, paths, policy, processes
-        self.cwd = paths.workspace
+        self._cwd_lock = threading.Lock()
+        self._cwd = paths.workspace
+        self._path_locks = {}
+        self._path_locks_guard = threading.Lock()
         self.store = StateStore(cfg.state_file) if cfg.state_file else None
         if self.store is not None:
             saved = self.store.load().get("cwd")
             if isinstance(saved, str) and saved:
                 try:
-                    self.cwd = self.paths.resolve(saved, access="read", must_exist=True)
+                    self._cwd = self.paths.resolve(saved, access="read", must_exist=True)
                 except RuntimeFault:
-                    self.cwd = paths.workspace
+                    self._cwd = paths.workspace
+
+    @property
+    def cwd(self):
+        with self._cwd_lock:
+            return self._cwd
+
+    def _path_lock(self, target):
+        key = str(target)
+        with self._path_locks_guard:
+            lock = self._path_locks.get(key)
+            if lock is None:
+                lock = threading.Lock()
+                self._path_locks[key] = lock
+            return lock
+
+    @contextlib.contextmanager
+    def _locked_paths(self, targets):
+        """Serialize mutations on the same path; distinct paths stay parallel.
+
+        Mirrors how CLI agents serialize edits to one file while editing
+        several files at once. Locks are acquired in sorted path order so
+        concurrent mutations of overlapping path sets cannot deadlock.
+        """
+        entries = sorted({str(t): self._path_lock(t) for t in targets}.items())
+        for _, lock in entries:
+            lock.acquire()
+        try:
+            yield
+        finally:
+            for _, lock in reversed(entries):
+                lock.release()
 
     def workspace(self, action, path=None):
         if action == "get":
             return self._workspace_info()
         if action == "set_cwd":
-            self.cwd = self.paths.resolve(path, access="read", must_exist=True)
-            if not self.cwd.is_dir():
-                raise RuntimeFault("not_directory", f"Not a directory: {self.cwd}")
+            resolved = self.paths.resolve(path, access="read", must_exist=True)
+            if not resolved.is_dir():
+                raise RuntimeFault("not_directory", f"Not a directory: {resolved}")
+            with self._cwd_lock:
+                self._cwd = resolved
             if self.store is not None:
-                self.store.save_cwd(str(self.cwd))
+                self.store.save_cwd(str(resolved))
             return self._workspace_info()
         raise RuntimeFault("invalid_action", "workspace action must be get or set_cwd")
 
@@ -72,6 +114,7 @@ class Capabilities:
             result = subprocess.run(
                 ["git", "-C", str(self.cwd), "rev-parse", "--show-toplevel"],
                 capture_output=True, text=True, timeout=5,
+                stdin=subprocess.DEVNULL,
                 env=safe_environment(self.cfg),
             )
             if result.returncode == 0:
@@ -90,22 +133,23 @@ class Capabilities:
             src = self.paths.resolve(path, cwd=self.cwd, access="read", must_exist=True)
             dest = self.paths.resolve(destination, cwd=self.cwd, access="write", must_exist=False)
             self.policy.authorize_path("copy")
-            try:
-                if src.is_file():
-                    dest.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copy2(src, dest)
-                    return {"source": str(src), "destination": str(dest), "bytes": dest.stat().st_size}
-                if src.is_dir():
-                    if not recursive:
-                        raise RuntimeFault("invalid_arguments", "copying a directory requires recursive=true")
-                    if dest.exists():
-                        raise RuntimeFault("invalid_arguments", f"Copy destination already exists: {dest}")
-                    dest.parent.mkdir(parents=True, exist_ok=True)
-                    shutil.copytree(src, dest)
-                    count = sum(1 for _ in dest.rglob("*")) + 1
-                    return {"source": str(src), "destination": str(dest), "copied_items": count}
-            except OSError as e:
-                _fs_error("copy", src, e)
+            with self._locked_paths([src, dest]):
+                try:
+                    if src.is_file():
+                        dest.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copy2(src, dest)
+                        return {"source": str(src), "destination": str(dest), "bytes": dest.stat().st_size}
+                    if src.is_dir():
+                        if not recursive:
+                            raise RuntimeFault("invalid_arguments", "copying a directory requires recursive=true")
+                        if dest.exists():
+                            raise RuntimeFault("invalid_arguments", f"Copy destination already exists: {dest}")
+                        dest.parent.mkdir(parents=True, exist_ok=True)
+                        shutil.copytree(src, dest)
+                        count = sum(1 for _ in dest.rglob("*")) + 1
+                        return {"source": str(src), "destination": str(dest), "copied_items": count}
+                except OSError as e:
+                    _fs_error("copy", src, e)
             raise RuntimeFault("not_file", f"Not a file or directory: {src}")
         access = "read" if action in {"read", "list", "stat"} else "write"
         must_exist = action not in {"write", "mkdir"}
@@ -172,11 +216,12 @@ class Capabilities:
                     "size": stat.st_size, "modified": stat.st_mtime, "created": stat.st_ctime}
         if action == "write":
             data = content or ""
-            try:
-                target.parent.mkdir(parents=True, exist_ok=True)
-                self._atomic_write(target, data, encoding)
-            except OSError as e:
-                _fs_error("write", target, e)
+            with self._locked_paths([target]):
+                try:
+                    target.parent.mkdir(parents=True, exist_ok=True)
+                    self._atomic_write(target, data, encoding)
+                except OSError as e:
+                    _fs_error("write", target, e)
             return {"path": str(target), "bytes": len(data.encode(encoding))}
         if action == "replace_text":
             if not target.is_file():
@@ -185,20 +230,21 @@ class Capabilities:
                 raise RuntimeFault("invalid_arguments", "replace_text requires old_text and new_text")
             if old_text == new_text:
                 raise RuntimeFault("invalid_arguments", "old_text and new_text are identical; nothing would change")
-            try:
-                original = target.read_text(encoding=encoding)
-            except OSError as e:
-                _fs_error("replace_text", target, e)
-            count = original.count(old_text)
-            expected = 1 if expected_occurrences is None else int(expected_occurrences)
-            if count != expected:
-                raise RuntimeFault("content_mismatch", f"Expected {expected} occurrence(s), found {count}. "
-                    "Pass expected_occurrences to replace all of them at once.")
-            updated = original.replace(old_text, new_text)
-            try:
-                self._atomic_write(target, updated, encoding)
-            except OSError as e:
-                _fs_error("replace_text", target, e)
+            with self._locked_paths([target]):
+                try:
+                    original = target.read_text(encoding=encoding)
+                except OSError as e:
+                    _fs_error("replace_text", target, e)
+                count = original.count(old_text)
+                expected = 1 if expected_occurrences is None else int(expected_occurrences)
+                if count != expected:
+                    raise RuntimeFault("content_mismatch", f"Expected {expected} occurrence(s), found {count}. "
+                        "Pass expected_occurrences to replace all of them at once.")
+                updated = original.replace(old_text, new_text)
+                try:
+                    self._atomic_write(target, updated, encoding)
+                except OSError as e:
+                    _fs_error("replace_text", target, e)
             return {"path": str(target), "replacements": count, "bytes": len(updated.encode(encoding))}
         if action == "apply_patch":
             if patch is None:
@@ -206,64 +252,72 @@ class Capabilities:
             if not target.is_dir():
                 raise RuntimeFault("not_directory", f"Patch base is not a directory: {target}")
             self.policy.authorize_path("apply_patch")
-            planned = []
-            for fp in parse_diff(patch):
+            entries = list(parse_diff(patch))
+            planned_paths = []
+            for fp in entries:
                 rel = fp.new_path if fp.new_path != "/dev/null" else fp.old_path
-                dest = self.paths.resolve(rel, cwd=target, access="write", must_exist=False)
-                creating = fp.old_path == "/dev/null"
-                if creating:
-                    if dest.exists():
-                        raise RuntimeFault("invalid_arguments", f"Patch creates existing file: {dest}")
-                    original = ""
-                else:
-                    if not dest.exists():
-                        raise RuntimeFault("path_not_found", f"Path not found: {dest}")
-                    if not dest.is_file():
-                        raise RuntimeFault("not_file", f"Not a file: {dest}")
+                planned_paths.append((fp, rel, self.paths.resolve(
+                    rel, cwd=target, access="write", must_exist=False)))
+            with self._locked_paths([dest for _, _, dest in planned_paths]):
+                planned = []
+                for fp, rel, dest in planned_paths:
+                    creating = fp.old_path == "/dev/null"
+                    if creating:
+                        if dest.exists():
+                            raise RuntimeFault("invalid_arguments", f"Patch creates existing file: {dest}")
+                        original = ""
+                    else:
+                        if not dest.exists():
+                            raise RuntimeFault("path_not_found", f"Path not found: {dest}")
+                        if not dest.is_file():
+                            raise RuntimeFault("not_file", f"Not a file: {dest}")
+                        try:
+                            raw = dest.read_bytes()
+                        except OSError as e:
+                            _fs_error("apply_patch", dest, e)
+                        if b"\x00" in raw[:8192]:
+                            raise RuntimeFault("binary_file", "Binary file patch is not supported")
+                        original = raw.decode(encoding, "replace")
+                    planned.append((dest, build_patched(original, fp, rel), creating))
+                results = []
+                for dest, updated, creating in planned:
                     try:
-                        raw = dest.read_bytes()
+                        dest.parent.mkdir(parents=True, exist_ok=True)
+                        self._atomic_write(dest, updated, encoding)
                     except OSError as e:
                         _fs_error("apply_patch", dest, e)
-                    if b"\x00" in raw[:8192]:
-                        raise RuntimeFault("binary_file", "Binary file patch is not supported")
-                    original = raw.decode(encoding, "replace")
-                planned.append((dest, build_patched(original, fp, rel), creating))
-            results = []
-            for dest, updated, creating in planned:
-                try:
-                    dest.parent.mkdir(parents=True, exist_ok=True)
-                    self._atomic_write(dest, updated, encoding)
-                except OSError as e:
-                    _fs_error("apply_patch", dest, e)
-                results.append({"path": str(dest), "created": creating,
-                                "bytes": len(updated.encode(encoding))})
+                    results.append({"path": str(dest), "created": creating,
+                                    "bytes": len(updated.encode(encoding))})
             return {"base": str(target), "files": results}
         if action == "mkdir":
-            try:
-                target.mkdir(parents=recursive, exist_ok=True)
-            except OSError as e:
-                _fs_error("mkdir", target, e)
+            with self._locked_paths([target]):
+                try:
+                    target.mkdir(parents=recursive, exist_ok=True)
+                except OSError as e:
+                    _fs_error("mkdir", target, e)
             return {"path": str(target)}
         if action == "delete":
-            try:
-                count = sum(1 for _ in target.rglob("*")) + 1 if target.is_dir() else 1
-                if target.is_dir():
-                    shutil.rmtree(target) if recursive else target.rmdir()
-                else:
-                    target.unlink()
-            except OSError as e:
-                _fs_error("delete", target, e)
+            with self._locked_paths([target]):
+                try:
+                    count = sum(1 for _ in target.rglob("*")) + 1 if target.is_dir() else 1
+                    if target.is_dir():
+                        shutil.rmtree(target) if recursive else target.rmdir()
+                    else:
+                        target.unlink()
+                except OSError as e:
+                    _fs_error("delete", target, e)
             return {"path": str(target), "deleted_items": count}
         if action == "move":
             if not destination:
                 raise RuntimeFault("invalid_arguments", "move requires destination")
             dest = self.paths.resolve(destination, cwd=self.cwd, access="write", must_exist=False)
             self.policy.authorize_path("move")
-            try:
-                dest.parent.mkdir(parents=True, exist_ok=True)
-                target.replace(dest)
-            except OSError as e:
-                _fs_error("move", target, e)
+            with self._locked_paths([target, dest]):
+                try:
+                    dest.parent.mkdir(parents=True, exist_ok=True)
+                    target.replace(dest)
+                except OSError as e:
+                    _fs_error("move", target, e)
             return {"source": str(target), "destination": str(dest)}
         raise RuntimeFault("invalid_action", f"Unknown filesystem action: {action}")
 
@@ -300,6 +354,42 @@ class Capabilities:
             return self._search_rg(rg, root, query, glob or [], applied, case_sensitive, maximum, files_only, fixed_string, context, bool(include_hidden))
         return self._search_python(root, query, glob or [], applied, case_sensitive, maximum, files_only, fixed_string, context, int(max_file_size_bytes), bool(include_hidden))
 
+    def multi_search(self, searches):
+        """Run several independent searches in parallel within one tool call.
+
+        Clients that issue one tool call per model round-trip use this to
+        fan out multiple queries without paying a round-trip per search.
+        Each entry takes the same arguments as the search tool plus an
+        optional label; failures are isolated per entry.
+        """
+        if not isinstance(searches, list) or not searches:
+            raise RuntimeFault("invalid_arguments", "multi_search requires a non-empty searches array")
+        if len(searches) > MAX_BATCH_SEARCHES:
+            raise RuntimeFault("invalid_arguments",
+                               f"multi_search accepts at most {MAX_BATCH_SEARCHES} searches")
+        specs = []
+        for index, spec in enumerate(searches):
+            if not isinstance(spec, dict):
+                raise RuntimeFault("invalid_arguments", f"searches[{index}] must be an object")
+            specs.append(dict(spec))
+        results: list[dict] = [None] * len(specs)
+
+        def run(index, spec):
+            label = spec.pop("label", None)
+            try:
+                results[index] = {"index": index, "label": label, **self.search(**spec)}
+            except Exception as e:
+                payload = e.as_dict() if isinstance(e, RuntimeFault) else {
+                    "code": "invalid_arguments", "message": str(e)}
+                results[index] = {"index": index, "label": label, "error": payload}
+
+        workers = min(len(specs), BATCH_SEARCH_WORKERS)
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(run, index, spec) for index, spec in enumerate(specs)]
+            for future in futures:
+                future.result()
+        return {"results": results}
+
     @staticmethod
     def _rg_error(result, cap=500):
         if result.returncode in (0, 1):
@@ -318,6 +408,7 @@ class Capabilities:
         if files_only:
             command += ["--files", str(root)]
             result = subprocess.run(command, capture_output=True, text=True, errors="replace", timeout=60,
+                                    stdin=subprocess.DEVNULL,
                                     env=safe_environment(self.cfg))
             paths = result.stdout.splitlines()
             out = {"engine": "ripgrep", "results": [{"path": p} for p in paths[:maximum]],
@@ -338,6 +429,7 @@ class Capabilities:
             command += ["-C", str(context)]
         command += [query, str(root)]
         result = subprocess.run(command, capture_output=True, text=True, errors="replace", timeout=60,
+                                stdin=subprocess.DEVNULL,
                                 env=safe_environment(self.cfg))
         events = []
         for line in result.stdout.splitlines():
@@ -385,6 +477,7 @@ class Capabilities:
             command += ["-C", str(context)]
         command += [query, str(target)]
         result = subprocess.run(command, capture_output=True, text=True, errors="replace", timeout=60,
+                                stdin=subprocess.DEVNULL,
                                 env=safe_environment(self.cfg))
         events = []
         for line in result.stdout.splitlines():
@@ -525,7 +618,7 @@ class Capabilities:
         effective_timeout = float(timeout or self.cfg.default_timeout_seconds)
         try:
             proc = subprocess.Popen(command_for_spawn(self.cfg, command, shell), cwd=work, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                    stdin=subprocess.PIPE if stdin_bytes is not None else None,
+                                    stdin=subprocess.PIPE if stdin_bytes is not None else subprocess.DEVNULL,
                                     env=safe_environment(self.cfg, env), **self._creation())
             stdout, stderr = proc.communicate(input=stdin_bytes, timeout=effective_timeout)
             error_type = None if proc.returncode == 0 else "process_exit"
