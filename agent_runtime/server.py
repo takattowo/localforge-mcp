@@ -18,6 +18,17 @@ from .capabilities import Capabilities
 
 PROTOCOL = "2024-11-05"
 MAX_BATCH_CALLS = 16
+
+def _bare_tool_name(name):
+    """Strip a host prefix from a tool name.
+
+    Hosts may expose tools under prefixed names such as
+    "Birb_localforge_mcp__search". Local tool names never
+    contain "__", so the segment after the last "__" is the
+    tool this server knows.
+    """
+    return name.split("__")[-1] if "__" in name else name
+
 SCHEMAS = {
     "workspace": {"type": "object", "properties": {
         "action": {"enum": ["get", "set_cwd"], "description": "get returns roots and Git root; set_cwd changes runtime directory."},
@@ -78,7 +89,7 @@ SCHEMAS = {
         "force": {"type": "boolean", "description": "Force-kill the process tree on stop."}}, "required": ["action"]},
     "multi_search": {"type": "object", "properties": {
         "searches": {"type": "array", "minItems": 1, "maxItems": 16,
-            "description": "Up to 16 independent searches run in parallel. Each entry takes the same arguments as the search tool, plus an optional label echoed back with its results.",
+            "description": "Up to 16 independent searches run in parallel, e.g. [{\"query\": \"UserService\", \"glob\": [\"*.py\"]}, {\"query\": \"TODO\", \"files_only\": true}]. Each entry takes the same arguments as the search tool, plus an optional label echoed back with its results.",
             "items": {"type": "object", "properties": {
                 "label": {"type": "string", "description": "Optional label echoed back to identify this search in the results."},
                 "query": {"type": "string", "description": "Text or regex to find; omit only with files_only."},
@@ -95,12 +106,13 @@ SCHEMAS = {
         }, "required": ["searches"]},
     "batch": {"type": "object", "properties": {
         "calls": {"type": "array", "minItems": 1, "maxItems": 16,
-            "description": "Tool calls to run in parallel. Each entry names a tool and its arguments, exactly as a tools/call request.",
+            "description": "Tool calls to run in parallel, e.g. [{\"tool\": \"search\", \"arguments\": {\"query\": \"todo\"}}, {\"tool\": \"git\", \"arguments\": {\"action\": \"status\"}}].",
             "items": {"type": "object", "properties": {
                 "tool": {"type": "string", "description": "Tool to run: workspace, filesystem, search, multi_search, git, execute, or process."},
                 "arguments": {"type": "object", "description": "Arguments for the tool; same shape as a tools/call request."},
-                "label": {"type": "string", "description": "Optional label echoed back with this call's result."}}}},
-            }, "required": ["calls"]},
+                "label": {"type": "string", "description": "Optional label echoed back with this call's result."}},
+                "required": ["tool"]}},
+        }, "required": ["calls"]},
 }
 DESCRIPTIONS = {
     "workspace": "Inspect workspace and Git root, or change runtime current directory.",
@@ -109,8 +121,8 @@ DESCRIPTIONS = {
     "git": "Common structured Git operations plus a generic argument-array action.",
     "execute": "Run a bounded foreground process with structured output; argv arrays preferred. For long waits or polling, use the process tool instead of a long-timeout execute. Do not edit files with it; prefer the filesystem write, replace_text, or apply_patch actions.",
     "process": "Manage long-running processes with stable IDs, split streams, cursors, stdin, restart, and tree stop. For file edits, prefer the filesystem write, replace_text, or apply_patch actions.",
-    "multi_search": "Run up to 16 independent searches in one call; each entry takes the same arguments as the search tool. Fan out several queries in a single round-trip instead of one search per call; a failing entry is reported per-entry without failing the batch.",
-    "batch": "Run up to 16 tool calls in one call, in parallel, exactly as the host would dispatch them. Each entry names a tool and its arguments; distinct paths run concurrently while edits to the same file serialize. A failing call is reported per-call without failing the batch.",
+    "multi_search": "Run up to 16 independent searches in one call, e.g. {\"searches\": [{\"query\": \"UserService\", \"glob\": [\"*.py\"], \"label\": \"users\"}, {\"query\": \"TODO\", \"files_only\": true}]}. Each entry takes the same arguments as the search tool. A failing entry is reported per-entry without failing the batch.",
+    "batch": "Run up to 16 tool calls in one call, in parallel, e.g. {\"calls\": [{\"tool\": \"search\", \"arguments\": {\"query\": \"todo\"}}, {\"tool\": \"git\", \"arguments\": {\"action\": \"status\"}}]}. Each entry names a tool and its arguments; tool names may carry the host prefix (Birb_localforge_mcp__search). Distinct paths run concurrently while edits to the same file serialize. A failing call is reported per-call without failing the batch.",
 }
 
 class Server:
@@ -221,7 +233,10 @@ class Server:
         without failing the batch.
         """
         if not isinstance(calls, list) or not calls:
-            raise RuntimeFault("invalid_arguments", "batch requires a non-empty calls array")
+            raise RuntimeFault("invalid_arguments",
+                               "batch requires a non-empty calls array, "
+                               "e.g. {\"calls\": [{\"tool\": \"search\", "
+                               "\"arguments\": {\"query\": \"todo\"}}]}")
         if len(calls) > MAX_BATCH_CALLS:
             raise RuntimeFault("invalid_arguments",
                                f"batch accepts at most {MAX_BATCH_CALLS} calls")
@@ -229,12 +244,14 @@ class Server:
         for index, call in enumerate(calls):
             if not isinstance(call, dict) or not isinstance(call.get("tool"), str):
                 raise RuntimeFault("invalid_arguments",
-                                   f"calls[{index}] must be an object with a 'tool' name")
+                                   f"calls[{index}] must be an object with a "
+                                   "'tool' name and an optional 'arguments' object")
             arguments = call.get("arguments") or {}
             if not isinstance(arguments, dict):
                 raise RuntimeFault("invalid_arguments",
                                    f"calls[{index}] arguments must be an object")
-            specs.append((index, call["tool"], dict(arguments), call.get("label")))
+            specs.append((index, _bare_tool_name(call["tool"]), dict(arguments),
+                          call.get("label")))
         results: list[dict] = [None] * len(specs)
 
         def run(index, name, arguments, label):

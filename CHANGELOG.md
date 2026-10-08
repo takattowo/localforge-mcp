@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.5.1
+
+- `batch` accepts host-prefixed tool names (e.g. `Birb_localforge_mcp__search`) in call entries; the prefix is stripped before dispatch, so batches no longer fail with tool_not_found when the model uses the names it was given.
+- `batch` and `multi_search` validation errors now carry a concrete JSON example of the expected shape, so a model that probes them with an empty array learns the correct call in one round-trip instead of abandoning the tool.
+- `batch`/`multi_search` schemas and descriptions include inline examples; batch call entries require `tool` in the JSON schema.
+
 ## 1.5.0
 
 - Concurrent tool execution: JSON-RPC requests are handled on a bounded thread pool (`max_concurrency`, default 8), so pipelined tool calls run in parallel instead of queueing behind the slowest search or execute.

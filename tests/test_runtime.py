@@ -522,6 +522,19 @@ def test_multi_search_validates_input(tmp_path):
     with pytest.raises(RuntimeFault) as shape:
         server.call("multi_search", {"searches": ["oops"]})
     assert shape.value.code == "invalid_arguments"
+    with pytest.raises(RuntimeFault) as teach:
+        server.call("multi_search", {"searches": []})
+    assert '"query"' in teach.value.message
+
+
+def test_multi_search_entries_take_labels(tmp_path):
+    server = make(tmp_path)
+    out = server.call("multi_search", {"searches": [
+        {"query": "todo", "label": "todos"},
+        {"query": "fixme"},
+    ]})
+    assert out["results"][0]["label"] == "todos"
+    assert out["results"][1]["label"] is None
 
 
 def test_tool_calls_execute_concurrently(tmp_path):
@@ -590,6 +603,23 @@ def test_batch_validates_shape(tmp_path):
     with pytest.raises(RuntimeFault) as args:
         server.call("batch", {"calls": [{"tool": "workspace", "arguments": "get"}]})
     assert args.value.code == "invalid_arguments"
+    with pytest.raises(RuntimeFault) as teach:
+        server.call("batch", {"calls": []})
+    assert '"tool"' in teach.value.message
+
+
+def test_batch_accepts_host_prefixed_tool_names(tmp_path):
+    server = make(tmp_path)
+    (tmp_path / "a.txt").write_text("alpha\n", encoding="utf-8")
+    out = server.call("batch", {"calls": [
+        {"tool": "Birb_localforge_mcp__search",
+         "arguments": {"query": "alpha", "path": str(tmp_path)},
+         "label": "prefixed"},
+    ]})
+    entry = out["results"][0]
+    assert "result" in entry, entry
+    assert entry["label"] == "prefixed"
+    assert entry["result"]["results"][0]["text"] == "alpha"
 
 
 def test_batch_edits_distinct_files_in_parallel(tmp_path):
