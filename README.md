@@ -13,12 +13,15 @@ LocalForge MCP gives an MCP client structured access to a real workspace, files,
 - Workspace root, current directory, and Git-root discovery.
 - Real filesystem list, stat, bounded read, atomic write, guarded text replacement, move, mkdir, and delete operations.
 - Ripgrep-backed code and filename search with Python fallback.
+- Batched `multi_search`: up to 16 parallel searches in one round-trip.
+- Batched `batch`: run any mix of tool calls in parallel in one round-trip.
 - Structured Git operations plus generic Git argument arrays.
 - Foreground execution with separate stdout/stderr, timeout, truncation, duration, and exit metadata.
 - Long-running process IDs, incremental split-stream logs, stdin, status, restart, stop, and process-tree cleanup.
 - Canonical path checks with separate read/write roots and denied paths.
 - Explicit environment inheritance, secret-name filtering, and basic output redaction.
-- Six stable MCP tools rather than many command wrappers.
+- Concurrent tool execution: pipelined tool calls run in parallel instead of queueing behind the slowest call; edits to the same file serialize while distinct files edit in parallel.
+- Eight stable MCP tools rather than many command wrappers.
 - No runtime approval tool; approval remains the responsibility of the MCP host such as Amazon Quick.
 
 ## Requirements
@@ -159,6 +162,33 @@ A blank terminal means the server is waiting for newline-delimited JSON-RPC inpu
 
 Search text or filenames recursively with include/exclude globs, case control, fixed-string or regex matching, and result limits.
 
+### `multi_search`
+
+Run up to 16 independent searches in one call. Each entry takes the same arguments as `search` (plus an optional `label` echoed back with its results), and all entries execute in parallel. Use it to fan out several queries in a single round-trip instead of one `search` per call — especially useful with clients that issue one tool call per turn. A failing entry is reported per-entry (`error`) without failing the whole batch.
+
+```json
+{"searches": [
+  {"query": "UserService", "glob": ["*.py"], "label": "users"},
+  {"query": "TODO", "files_only": true, "label": "todos"}
+]}
+```
+
+Responses are matched to requests by id, so when a client sends several tool calls in one turn they run concurrently and may complete in any order. Tune the worker count with `max_concurrency` (default 8).
+
+### `batch`
+
+Run up to 16 tool calls of any type in one call, in parallel — the closest match to how a CLI agent dispatches several tools in a single turn. Each entry names a tool and its arguments exactly as a `tools/call` request, with an optional `label` echoed back. Distinct paths run concurrently; edits to the same file serialize on that path (a second edit sees a stale base and fails with `content_mismatch` rather than overwriting). A failing call is reported per-call (`error`) without failing the batch. Nested `batch` calls are rejected.
+
+```json
+{"calls": [
+  {"tool": "filesystem", "arguments": {"action": "read", "path": "src/app.py"}, "label": "app"},
+  {"tool": "search", "arguments": {"query": "UserService", "glob": ["*.py"]}, "label": "users"},
+  {"tool": "git", "arguments": {"action": "status"}, "label": "git"}
+]}
+```
+
+Prefer `filesystem write`, `replace_text`, and `apply_patch` for file edits over shelling out to python or shell commands: they are atomic, policy-checked, and give structured errors. `execute` and `process` are for running programs, builds, and tests — those legitimately write files as the current user.
+
 ### `git`
 
 Presets: `status`, `diff`, `log`, `show`, `branch`, and `root`.
@@ -249,7 +279,7 @@ Supported `default_shell` values:
 - `cmd`
 - `sh`
 
-`execute.timeout` is seconds. `process.wait_ms` is milliseconds (max 60000). `limit_bytes`, `max_bytes`, and `max_file_read_bytes` are bytes. `filesystem offset` is a byte offset in legacy read mode; use `line_start`/`line_end` for line mode.
+`execute.timeout` is seconds. `process.wait_ms` is milliseconds (max 60000). `limit_bytes`, `max_bytes`, and `max_file_read_bytes` are bytes. `filesystem offset` is a byte offset in legacy read mode; use `line_start`/`line_end` for line mode. `max_concurrency` bounds how many tool calls run in parallel (default 8).
 
 ## Security model
 

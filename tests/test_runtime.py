@@ -21,7 +21,7 @@ def test_mcp_protocol(tmp_path):
     assert init["result"]["protocolVersion"] == "2024-11-05"
     assert init["result"]["serverInfo"]["name"] == "localforge-mcp"
     tools = server.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})["result"]["tools"]
-    assert {item["name"] for item in tools} == {"workspace", "filesystem", "search", "git", "execute", "process"}
+    assert {item["name"] for item in tools} == {"workspace", "filesystem", "search", "multi_search", "batch", "git", "execute", "process"}
     assert server.handle({"jsonrpc": "2.0", "method": "notifications/initialized"}) is None
     assert server.handle({"jsonrpc": "2.0", "method": "unknown-notification"}) is None
     assert server.handle({"jsonrpc": "2.0", "id": 3, "method": "bogus"})["error"]["code"] == -32601
@@ -476,3 +476,172 @@ def test_execute_schema_steers_long_waits_to_process(tmp_path):
     assert "process" in tools["execute"]["description"]
     props = tools["execute"]["inputSchema"]["properties"]
     assert "process" in props["timeout"]["description"]
+
+
+def test_multi_search_runs_queries_in_one_call(tmp_path):
+    server = make(tmp_path)
+    (tmp_path / "a.txt").write_text("alpha beta\n")
+    (tmp_path / "b.txt").write_text("gamma delta\n")
+    out = server.call("multi_search", {"searches": [
+        {"query": "alpha", "label": "first"},
+        {"query": "delta", "glob": ["b.txt"]},
+    ]})
+    assert len(out["results"]) == 2
+    first, second = out["results"]
+    assert first["index"] == 0 and first["label"] == "first"
+    assert first["results"][0]["text"] == "alpha beta"
+    assert second["index"] == 1 and second["label"] is None
+    assert str(tmp_path / "b.txt") in second["results"][0]["path"]
+
+
+def test_multi_search_isolates_failures(tmp_path):
+    server = make(tmp_path)
+    (tmp_path / "a.txt").write_text("alpha\n")
+    out = server.call("multi_search", {"searches": [
+        {"query": "alpha"},
+        {"query": "beta", "max_file_size_bytes": 0},
+        {"files_only": True, "glob": ["*.txt"]},
+    ]})
+    ok, bad, files = out["results"]
+    assert ok["results"][0]["text"] == "alpha"
+    assert bad["error"]["code"] == "invalid_arguments"
+    assert files["results"]
+
+
+def test_multi_search_validates_input(tmp_path):
+    server = make(tmp_path)
+    with pytest.raises(RuntimeFault) as empty:
+        server.call("multi_search", {"searches": []})
+    assert empty.value.code == "invalid_arguments"
+    with pytest.raises(RuntimeFault) as missing:
+        server.call("multi_search", {})
+    assert "searches" in missing.value.message
+    with pytest.raises(RuntimeFault) as many:
+        server.call("multi_search", {"searches": [{"query": "x"}] * 17})
+    assert many.value.code == "invalid_arguments" and "16" in many.value.message
+    with pytest.raises(RuntimeFault) as shape:
+        server.call("multi_search", {"searches": ["oops"]})
+    assert shape.value.code == "invalid_arguments"
+
+
+def test_tool_calls_execute_concurrently(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    server = make(tmp_path)
+    slow = [sys.executable, "-c", "import time; time.sleep(1); print('done')"]
+    started = time.monotonic()
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(server.call, "execute", {"command": slow}) for _ in range(2)]
+        results = [future.result() for future in futures]
+    elapsed = time.monotonic() - started
+    assert all(result["success"] and "done" in result["stdout"] for result in results)
+    assert elapsed < 1.9, f"tool calls serialized: {elapsed:.2f}s"
+
+
+def test_batch_runs_calls_in_one_round_trip(tmp_path):
+    server = make(tmp_path)
+    (tmp_path / "a.txt").write_text("alpha\n")
+    slow = [sys.executable, "-c", "import time; time.sleep(1); print('done')"]
+    started = time.monotonic()
+    out = server.call("batch", {"calls": [
+        {"tool": "execute", "arguments": {"command": slow}, "label": "slow-1"},
+        {"tool": "execute", "arguments": {"command": slow}, "label": "slow-2"},
+        {"tool": "search", "arguments": {"query": "alpha", "path": str(tmp_path)},
+         "label": "find"},
+    ]})
+    elapsed = time.monotonic() - started
+    assert len(out["results"]) == 3
+    slow_one, slow_two, find = out["results"]
+    assert slow_one["index"] == 0 and slow_one["tool"] == "execute"
+    assert slow_one["label"] == "slow-1" and "done" in slow_one["result"]["stdout"]
+    assert slow_two["label"] == "slow-2" and "done" in slow_two["result"]["stdout"]
+    assert find["result"]["results"][0]["text"] == "alpha"
+    assert elapsed < 1.9, f"batch calls serialized: {elapsed:.2f}s"
+
+
+def test_batch_isolates_failures(tmp_path):
+    server = make(tmp_path)
+    out = server.call("batch", {"calls": [
+        {"tool": "search", "arguments": {"query": "x"}},
+        {"tool": "execute", "arguments": {"command": [sys.executable, "-c", "raise SystemExit(7)"]}},
+        {"tool": "bogus", "arguments": {}},
+        {"tool": "batch", "arguments": {"calls": []}},
+    ]})
+    ok, exit7, unknown, nested = out["results"]
+    assert "results" in ok["result"]
+    assert exit7["result"]["exit_code"] == 7
+    assert unknown["error"]["code"] == "tool_not_found"
+    assert nested["error"]["code"] == "invalid_arguments"
+
+
+def test_batch_validates_shape(tmp_path):
+    server = make(tmp_path)
+    with pytest.raises(RuntimeFault) as empty:
+        server.call("batch", {"calls": []})
+    assert empty.value.code == "invalid_arguments"
+    with pytest.raises(RuntimeFault) as missing:
+        server.call("batch", {})
+    assert "calls" in missing.value.message
+    with pytest.raises(RuntimeFault) as many:
+        server.call("batch", {"calls": [{"tool": "workspace", "arguments": {"action": "get"}}] * 17})
+    assert many.value.code == "invalid_arguments" and "16" in many.value.message
+    with pytest.raises(RuntimeFault) as shape:
+        server.call("batch", {"calls": ["oops"]})
+    assert shape.value.code == "invalid_arguments"
+    with pytest.raises(RuntimeFault) as args:
+        server.call("batch", {"calls": [{"tool": "workspace", "arguments": "get"}]})
+    assert args.value.code == "invalid_arguments"
+
+
+def test_batch_edits_distinct_files_in_parallel(tmp_path):
+    server = make(tmp_path)
+    names = ["a.txt", "b.txt", "c.txt"]
+    for name in names:
+        (tmp_path / name).write_text(f"old {name}\n")
+    out = server.call("batch", {"calls": [
+        {"tool": "filesystem", "arguments": {"action": "replace_text", "path": name,
+            "old_text": f"old {name}", "new_text": f"new {name}"}}
+        for name in names
+    ]})
+    assert all("result" in call and "replacements" in call["result"] for call in out["results"])
+    for name in names:
+        assert (tmp_path / name).read_text() == f"new {name}\n"
+
+
+def test_concurrent_edits_same_file_serialize(tmp_path):
+    from concurrent.futures import ThreadPoolExecutor
+    server = make(tmp_path)
+    (tmp_path / "a.txt").write_text("one\n")
+
+    def edit(word):
+        return server.call("filesystem", {"action": "replace_text", "path": "a.txt",
+            "old_text": "one", "new_text": word})
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        futures = [pool.submit(edit, "two"), pool.submit(edit, "three")]
+        outcomes = []
+        for future in futures:
+            try:
+                outcomes.append(("ok", future.result()))
+            except RuntimeFault as e:
+                outcomes.append(("fault", e.code))
+    assert (tmp_path / "a.txt").read_text() in ("two\n", "three\n")
+    ok = [outcome for outcome in outcomes if outcome[0] == "ok"]
+    faults = [outcome for outcome in outcomes if outcome[0] == "fault"]
+    assert len(ok) == 1 and len(faults) == 1 and faults[0][1] == "content_mismatch"
+
+
+def test_tool_descriptions_steer_file_edits_off_execute(tmp_path):
+    tools = {t["name"]: t for t in make(tmp_path).tools()}
+    for name in ("execute", "process", "filesystem"):
+        assert "filesystem" in tools[name]["description"]
+        assert "replace_text" in tools[name]["description"]
+
+
+def test_execute_child_gets_closed_stdin(tmp_path):
+    # Children must never inherit the MCP control channel (stdin):
+    # a child reading stdin would consume the JSON-RPC request stream,
+    # and on Windows an inherited control pipe can hang the child.
+    server = make(tmp_path)
+    out = server.cap.execute(
+        [sys.executable, "-c", "import sys; print(repr(sys.stdin.read()))"])
+    assert out["success"] and "''" in out["stdout"]

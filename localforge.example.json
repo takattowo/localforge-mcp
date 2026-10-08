@@ -12,6 +12,7 @@
   "process_buffer_bytes": 4000000,
   "process_ttl_seconds": 3600,
   "max_processes": 50,
+  "max_concurrency": 8,
   "inherit_environment": [
     "PATH", "PATHEXT", "SYSTEMROOT", "WINDIR", "TEMP", "TMP", "COMSPEC",
     "USERPROFILE", "APPDATA", "LOCALAPPDATA", "ProgramFiles", "ProgramFiles(x86)",

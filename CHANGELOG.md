@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.5.0
+
+- Concurrent tool execution: JSON-RPC requests are handled on a bounded thread pool (`max_concurrency`, default 8), so pipelined tool calls run in parallel instead of queueing behind the slowest search or execute.
+- New `batch` tool: run up to 16 tool calls of any type in one round-trip, with per-call error isolation, labels, and same-path write serialization.
+- New `multi_search` tool: run up to 16 independent searches in one round-trip, with per-entry error isolation and optional labels.
+- Filesystem mutations (write, replace_text, apply_patch, copy, move, mkdir, delete) now lock the target path, so concurrent edits to one file serialize like a CLI agent instead of silently overwriting each other.
+- execute children no longer inherit the MCP control channel: stdin is /dev/null unless input is passed. An inherited control pipe could hang the child on Windows, and a child reading stdin would consume the JSON-RPC request stream. Same for the ripgrep, git rev-parse, and taskkill helpers.
+- Runtime cwd is now lock-guarded for concurrent `set_cwd`; state-file temp names are unique per writer thread.
+- Tool descriptions steer file edits to the filesystem write/replace_text/apply_patch actions instead of shelling out to python or shell commands.
+
 ## 1.4.2
 
 - gh CLI counts as network activity (except local-only invocations), closing the network-disabled bypass.

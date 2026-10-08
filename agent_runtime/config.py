@@ -22,6 +22,7 @@ class Config:
     process_buffer_bytes: int = 4_000_000
     process_ttl_seconds: int = 3600
     max_processes: int = 50
+    max_concurrency: int = 8
     state_file: str | None = None
     config_path: str | None = None
     inherit_environment: list[str] = field(default_factory=lambda: [
@@ -57,7 +58,7 @@ class Config:
             raise ValueError(f"invalid mode: {cfg.mode}")
         if cfg.network not in NETWORK_MODES:
             raise ValueError("network must be 'disabled' or 'unrestricted'")
-        for name in ("default_timeout_seconds", "max_capture_bytes", "max_file_read_bytes", "process_buffer_bytes", "process_ttl_seconds", "max_processes"):
+        for name in ("default_timeout_seconds", "max_capture_bytes", "max_file_read_bytes", "process_buffer_bytes", "process_ttl_seconds", "max_processes", "max_concurrency"):
             if int(getattr(cfg, name)) <= 0:
                 raise ValueError(f"{name} must be positive")
         if not cfg.state_file:

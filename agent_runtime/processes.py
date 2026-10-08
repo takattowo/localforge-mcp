@@ -159,7 +159,7 @@ class ProcessManager:
             command = ["taskkill", "/PID", str(item.proc.pid), "/T"]
             if force:
                 command.append("/F")
-            subprocess.run(command, capture_output=True, timeout=15)
+            subprocess.run(command, capture_output=True, stdin=subprocess.DEVNULL, timeout=15)
         else:
             try:
                 os.killpg(item.proc.pid, signal.SIGKILL if force else signal.SIGTERM)

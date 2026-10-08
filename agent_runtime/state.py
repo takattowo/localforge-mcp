@@ -2,6 +2,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import threading
 from pathlib import Path
 
 VERSION = 1
@@ -23,7 +24,7 @@ class StateStore:
 
     def save_cwd(self, cwd):
         payload = {"version": VERSION, "cwd": str(cwd)}
-        tmp = self.path.with_name(self.path.name + f".tmp-{os.getpid()}")
+        tmp = self.path.with_name(self.path.name + f".tmp-{os.getpid()}-{threading.get_ident()}")
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
             tmp.write_text(json.dumps(payload), encoding="utf-8")

@@ -6,7 +6,9 @@ import os
 import re
 import sys
 import time
+import threading
 import traceback
+from concurrent.futures import ThreadPoolExecutor
 from . import __version__
 from .config import Config
 from .errors import RuntimeFault
@@ -15,6 +17,7 @@ from .processes import ProcessManager
 from .capabilities import Capabilities
 
 PROTOCOL = "2024-11-05"
+MAX_BATCH_CALLS = 16
 SCHEMAS = {
     "workspace": {"type": "object", "properties": {
         "action": {"enum": ["get", "set_cwd"], "description": "get returns roots and Git root; set_cwd changes runtime directory."},
@@ -73,14 +76,41 @@ SCHEMAS = {
         "text": {"type": "string", "description": "Stdin text for write."},
         "append_newline": {"type": "boolean", "description": "Append newline to stdin write, default true."},
         "force": {"type": "boolean", "description": "Force-kill the process tree on stop."}}, "required": ["action"]},
+    "multi_search": {"type": "object", "properties": {
+        "searches": {"type": "array", "minItems": 1, "maxItems": 16,
+            "description": "Up to 16 independent searches run in parallel. Each entry takes the same arguments as the search tool, plus an optional label echoed back with its results.",
+            "items": {"type": "object", "properties": {
+                "label": {"type": "string", "description": "Optional label echoed back to identify this search in the results."},
+                "query": {"type": "string", "description": "Text or regex to find; omit only with files_only."},
+                "path": {"type": "string", "description": "File or directory to search, relative to cwd or absolute."},
+                "glob": {"type": "array", "items": {"type": "string"}, "description": "Include patterns, fnmatch on repo-relative posix path."},
+                "exclude": {"type": "array", "items": {"type": "string"}, "description": "Extra excludes; built-ins (.git, .venv, node_modules, etc.) always apply."},
+                "case_sensitive": {"type": "boolean", "description": "Case-sensitive match, default false."},
+                "max_results": {"type": "integer", "description": "Result cap 1..5000, default 200."},
+                "files_only": {"type": "boolean", "description": "List matching filenames; takes no query."},
+                "fixed_string": {"type": "boolean", "description": "Literal match when true, regex when false, default true."},
+                "context_lines": {"type": "integer", "description": "Surrounding lines per match, clamped 0..5, ignored with files_only."},
+                "include_hidden": {"type": "boolean", "description": "Search hidden files, default false."},
+                "max_file_size_bytes": {"type": "integer", "description": "Skip larger files, default 1000000, must be positive."}}}},
+        }, "required": ["searches"]},
+    "batch": {"type": "object", "properties": {
+        "calls": {"type": "array", "minItems": 1, "maxItems": 16,
+            "description": "Tool calls to run in parallel. Each entry names a tool and its arguments, exactly as a tools/call request.",
+            "items": {"type": "object", "properties": {
+                "tool": {"type": "string", "description": "Tool to run: workspace, filesystem, search, multi_search, git, execute, or process."},
+                "arguments": {"type": "object", "description": "Arguments for the tool; same shape as a tools/call request."},
+                "label": {"type": "string", "description": "Optional label echoed back with this call's result."}}}},
+            }, "required": ["calls"]},
 }
 DESCRIPTIONS = {
     "workspace": "Inspect workspace and Git root, or change runtime current directory.",
-    "filesystem": "Policy-checked real filesystem operations: line or byte reads, paginated lists, atomic writes, guarded text replacement, policy-checked copy.",
+    "filesystem": "Policy-checked real filesystem operations: line or byte reads, paginated lists, atomic writes, guarded text replacement, policy-checked copy. Prefer write, replace_text, and apply_patch for file edits instead of shelling out to python or shell commands.",
     "search": "Repository text or filename search with glob filters, default ignores, and context lines.",
     "git": "Common structured Git operations plus a generic argument-array action.",
-    "execute": "Run a bounded foreground process with structured output; argv arrays preferred. For long waits or polling, use the process tool instead of a long-timeout execute.",
-    "process": "Manage long-running processes with stable IDs, split streams, cursors, stdin, restart, and tree stop.",
+    "execute": "Run a bounded foreground process with structured output; argv arrays preferred. For long waits or polling, use the process tool instead of a long-timeout execute. Do not edit files with it; prefer the filesystem write, replace_text, or apply_patch actions.",
+    "process": "Manage long-running processes with stable IDs, split streams, cursors, stdin, restart, and tree stop. For file edits, prefer the filesystem write, replace_text, or apply_patch actions.",
+    "multi_search": "Run up to 16 independent searches in one call; each entry takes the same arguments as the search tool. Fan out several queries in a single round-trip instead of one search per call; a failing entry is reported per-entry without failing the batch.",
+    "batch": "Run up to 16 tool calls in one call, in parallel, exactly as the host would dispatch them. Each entry names a tool and its arguments; distinct paths run concurrently while edits to the same file serialize. A failing call is reported per-call without failing the batch.",
 }
 
 class Server:
@@ -90,7 +120,13 @@ class Server:
         self.policy = Policy(cfg, self.paths)
         self.processes = ProcessManager(cfg, self.paths, self.policy)
         self.cap = Capabilities(cfg, self.paths, self.policy, self.processes)
-        atexit.register(self.processes.cleanup)
+        self.pool = ThreadPoolExecutor(max_workers=int(cfg.max_concurrency),
+                                       thread_name_prefix="localforge")
+        atexit.register(self.cleanup)
+
+    def cleanup(self):
+        self.processes.cleanup()
+        self.pool.shutdown(wait=False)
 
     def tools(self):
         return [{"name": name, "description": DESCRIPTIONS[name], "inputSchema": SCHEMAS[name]} for name in DESCRIPTIONS]
@@ -106,6 +142,8 @@ class Server:
         "execute": ("command", "cwd", "timeout", "shell", "env", "input"),
         "process": ("action", "process_id", "command", "cwd", "shell", "env", "after", "limit_bytes",
                     "wait_ms", "text", "append_newline", "force"),
+        "multi_search": ("searches",),
+        "batch": ("calls",),
     }
 
     @classmethod
@@ -150,6 +188,8 @@ class Server:
         if name == "workspace": return self.cap.workspace(**args)
         if name == "filesystem": return self.cap.filesystem(**args)
         if name == "search": return self.cap.search(**args)
+        if name == "multi_search": return self.cap.multi_search(**args)
+        if name == "batch": return self.batch(**args)
         if name == "git": return self.cap.git(**args)
         if name == "execute": return self.cap.execute(**args)
         action = args.pop("action")
@@ -170,6 +210,54 @@ class Server:
         if action == "restart": return self.processes.restart(args["process_id"])
         if action == "stop": return self.processes.stop(args.pop("process_id"), **args)
         raise RuntimeFault("invalid_action", f"Unknown process action: {action}")
+
+    def batch(self, calls):
+        """Run several tool calls in parallel within one tool call.
+
+        Mirrors how CLI agents dispatch multiple tools per turn:
+        the client spends one round-trip and gets every result back.
+        Distinct paths run concurrently; edits to the same file
+        serialize on that path. A failing call is reported per-call
+        without failing the batch.
+        """
+        if not isinstance(calls, list) or not calls:
+            raise RuntimeFault("invalid_arguments", "batch requires a non-empty calls array")
+        if len(calls) > MAX_BATCH_CALLS:
+            raise RuntimeFault("invalid_arguments",
+                               f"batch accepts at most {MAX_BATCH_CALLS} calls")
+        specs = []
+        for index, call in enumerate(calls):
+            if not isinstance(call, dict) or not isinstance(call.get("tool"), str):
+                raise RuntimeFault("invalid_arguments",
+                                   f"calls[{index}] must be an object with a 'tool' name")
+            arguments = call.get("arguments") or {}
+            if not isinstance(arguments, dict):
+                raise RuntimeFault("invalid_arguments",
+                                   f"calls[{index}] arguments must be an object")
+            specs.append((index, call["tool"], dict(arguments), call.get("label")))
+        results: list[dict] = [None] * len(specs)
+
+        def run(index, name, arguments, label):
+            if name == "batch":
+                results[index] = {"index": index, "tool": name, "label": label,
+                                  "error": {"code": "invalid_arguments",
+                                            "message": "batch cannot nest batch calls"}}
+                return
+            try:
+                results[index] = {"index": index, "tool": name, "label": label,
+                                  "result": self.call(name, arguments)}
+            except Exception as e:
+                payload = e.as_dict() if isinstance(e, RuntimeFault) else {
+                    "code": "internal_error", "message": str(e)}
+                results[index] = {"index": index, "tool": name, "label": label,
+                                  "error": payload}
+
+        workers = min(len(specs), max(1, int(self.cfg.max_concurrency)))
+        with ThreadPoolExecutor(max_workers=workers) as pool:
+            futures = [pool.submit(run, *spec) for spec in specs]
+            for future in futures:
+                future.result()
+        return {"results": results}
 
     def handle(self, request):
         if not isinstance(request, dict) or request.get("jsonrpc") != "2.0" or not isinstance(request.get("method"), str):
@@ -199,34 +287,64 @@ class Server:
             return None
         return {"jsonrpc": "2.0", "id": request_id, "result": result}
 
+    def run_stdio(self):
+        """Serve newline-delimited JSON-RPC on stdio with concurrent tool calls.
+
+        Each request is handled on the shared thread pool, so pipelined
+        tools/call requests run in parallel instead of queueing behind the
+        slowest call. Responses are matched to requests by id, so completion
+        order does not matter; stdout writes are serialized per response.
+        """
+        write_lock = threading.Lock()
+
+        def _write(response):
+            with write_lock:
+                sys.stdout.write(json.dumps(response, separators=(",", ":")) + "\n")
+                sys.stdout.flush()
+
+        def _handle(raw):
+            request_id = None
+            try:
+                request = json.loads(raw)
+                request_id = request.get("id") if isinstance(request, dict) else None
+                response = self.handle(request)
+            except json.JSONDecodeError:
+                response = {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Parse error"}}
+            except ValueError as e:
+                response = {"jsonrpc": "2.0", "id": request_id, "error": {"code": -32600, "message": str(e)}}
+            except RuntimeFault as e:
+                response = {"jsonrpc": "2.0", "id": request_id, "result": {
+                    "content": [{"type": "text", "text": json.dumps(e.as_dict())}], "isError": True}}
+            except TypeError as e:
+                response = {"jsonrpc": "2.0", "id": request_id, "result": {
+                    "content": [{"type": "text", "text": json.dumps({"code": "invalid_arguments", "message": str(e)})}], "isError": True}}
+            except Exception:
+                print(traceback.format_exc(), file=sys.stderr)
+                response = {"jsonrpc": "2.0", "id": request_id, "error": {"code": -32603, "message": "Internal error"}}
+            if response is not None:
+                _write(response)
+
+        try:
+            for raw in sys.stdin.buffer:
+                self.pool.submit(_handle, raw)
+        except BaseException:
+            # Abnormal exit (e.g. Ctrl+C): stop taking work and exit
+            # without waiting for in-flight tool calls.
+            self.pool.shutdown(wait=False, cancel_futures=True)
+            raise
+        # Clean EOF: let in-flight calls finish so their responses
+        # are written before the server exits.
+        self.pool.shutdown(wait=True)
+
+
 def main():
     try:
         server = Server(Config.load())
     except Exception as e:
         print(f"configuration error: {e}", file=sys.stderr)
         raise SystemExit(2)
-    for raw in sys.stdin.buffer:
-        request_id = None
-        try:
-            request = json.loads(raw)
-            request_id = request.get("id") if isinstance(request, dict) else None
-            response = server.handle(request)
-        except json.JSONDecodeError:
-            response = {"jsonrpc": "2.0", "id": None, "error": {"code": -32700, "message": "Parse error"}}
-        except ValueError as e:
-            response = {"jsonrpc": "2.0", "id": request_id, "error": {"code": -32600, "message": str(e)}}
-        except RuntimeFault as e:
-            response = {"jsonrpc": "2.0", "id": request_id, "result": {
-                "content": [{"type": "text", "text": json.dumps(e.as_dict())}], "isError": True}}
-        except TypeError as e:
-            response = {"jsonrpc": "2.0", "id": request_id, "result": {
-                "content": [{"type": "text", "text": json.dumps({"code": "invalid_arguments", "message": str(e)})}], "isError": True}}
-        except Exception:
-            print(traceback.format_exc(), file=sys.stderr)
-            response = {"jsonrpc": "2.0", "id": request_id, "error": {"code": -32603, "message": "Internal error"}}
-        if response is not None:
-            sys.stdout.write(json.dumps(response, separators=(",", ":")) + "\n")
-            sys.stdout.flush()
+    server.run_stdio()
+
 
 if __name__ == "__main__":
     main()
