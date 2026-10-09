@@ -10,6 +10,7 @@ VERSION = 1
 class StateStore:
     def __init__(self, path):
         self.path = Path(path)
+        self._lock = threading.Lock()
 
     def load(self):
         try:
@@ -23,17 +24,29 @@ class StateStore:
         return data
 
     def save_cwd(self, cwd):
-        payload = {"version": VERSION, "cwd": str(cwd)}
-        tmp = self.path.with_name(self.path.name + f".tmp-{os.getpid()}-{threading.get_ident()}")
-        try:
-            self.path.parent.mkdir(parents=True, exist_ok=True)
-            tmp.write_text(json.dumps(payload), encoding="utf-8")
-            os.replace(tmp, self.path)
-        except OSError as e:
-            print(f"localforge: state write failed: {e}", file=sys.stderr)
-        finally:
+        self._save({"cwd": str(cwd)})
+
+    def save_todos(self, todos):
+        self._save({"todos": todos})
+
+    def _save(self, updates):
+        # One lock for every writer (cwd, todos): a plain
+        # read-modify-write from two threads could otherwise drop
+        # the other key on the floor.
+        with self._lock:
+            data = self.load()
+            data.update(updates)
+            payload = {"version": VERSION, **data}
+            tmp = self.path.with_name(self.path.name + f".tmp-{os.getpid()}-{threading.get_ident()}")
             try:
-                if tmp.exists():
-                    tmp.unlink()
-            except OSError:
-                pass
+                self.path.parent.mkdir(parents=True, exist_ok=True)
+                tmp.write_text(json.dumps(payload), encoding="utf-8")
+                os.replace(tmp, self.path)
+            except OSError as e:
+                print(f"localforge: state write failed: {e}", file=sys.stderr)
+            finally:
+                try:
+                    if tmp.exists():
+                        tmp.unlink()
+                except OSError:
+                    pass
