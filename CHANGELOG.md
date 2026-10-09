@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.6.0
+
+- New `todo` tool: persistent task list (get, add, update, delete, clear) backed by the state file, so agent task tracking survives server restarts; in-memory only when no state file is configured.
+- New `filesystem` action `multi_edit`: several exact replacements in one file, applied in order and validated end-to-end before a single atomic write. A failing edit leaves the file untouched — a coherent multi-part change never lands half-applied.
+- Tolerant argument aliases: the dispatch layer renames common model guesses before dispatch — `old`/`find`→`old_text`, `new`/`replacement`→`new_text`, `text`→`content`, `file`/`target`→`path`, `start`/`end`→`line_start`/`line_end`, `dest`→`destination`, `pattern`→`query` (search), `cmd`→`command` (execute/process), `id`→`process_id`, `dir`→`path` (workspace). A canonical name always wins when both are sent.
+- `multi_search` entries accept the search tool's aliases.
+- State-file writes are now serialized and merge per key: a concurrent `set_cwd` and todo update can no longer drop each other's state.
+- New `QUICK.md`: copy-paste agent operating rules for Amazon Quick — batch-first dispatch, filesystem-first edits, an exhaustive no-shell-editing prohibition naming every channel (`execute`, `process`, `python`, scripts, `sed`, redirection), `process` for long waits, and `todo` for task tracking.
+- `agent_runtime.__version__` now matches `pyproject.toml` (it had drifted to 1.5.0).
+
 ## 1.5.1
 
 - `batch` accepts host-prefixed tool names (e.g. `Birb_localforge_mcp__search`) in call entries; the prefix is stripped before dispatch, so batches no longer fail with tool_not_found when the model uses the names it was given.

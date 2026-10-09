@@ -15,13 +15,16 @@ LocalForge MCP gives an MCP client structured access to a real workspace, files,
 - Ripgrep-backed code and filename search with Python fallback.
 - Batched `multi_search`: up to 16 parallel searches in one round-trip.
 - Batched `batch`: run any mix of tool calls in parallel in one round-trip.
+- `multi_edit`: several exact replacements per file in one call, validated end-to-end and written atomically.
+- Tolerant argument aliases (`old`→`old_text`, `replacement`→`new_text`, `text`→`content`, `file`→`path`, `pattern`→`query`, `cmd`→`command`, and more), so mis-remembered parameter names do not cost a failed round-trip.
+- Persistent `todo` tool: TodoWrite-style task list backed by the state file; survives restarts.
 - Structured Git operations plus generic Git argument arrays.
 - Foreground execution with separate stdout/stderr, timeout, truncation, duration, and exit metadata.
 - Long-running process IDs, incremental split-stream logs, stdin, status, restart, stop, and process-tree cleanup.
 - Canonical path checks with separate read/write roots and denied paths.
 - Explicit environment inheritance, secret-name filtering, and basic output redaction.
 - Concurrent tool execution: pipelined tool calls run in parallel instead of queueing behind the slowest call; edits to the same file serialize while distinct files edit in parallel.
-- Eight stable MCP tools rather than many command wrappers.
+- Nine stable MCP tools rather than many command wrappers.
 - No runtime approval tool; approval remains the responsibility of the MCP host such as Amazon Quick.
 
 ## Requirements
@@ -40,11 +43,15 @@ localforge-mcp/
 │   ├── capabilities.py
 │   ├── config.py
 │   ├── errors.py
+│   ├── patch.py
 │   ├── processes.py
 │   ├── security.py
-│   └── server.py
+│   ├── server.py
+│   ├── state.py
+│   └── todos.py
 ├── tests/
 ├── localforge.example.json
+├── QUICK.md
 ├── pyproject.toml
 ├── CHANGELOG.md
 ├── CONTRIBUTING.md
@@ -131,6 +138,8 @@ LOCALFORGE_CONFIG=D:\Repositories\localforge-mcp\localforge.json
 
 Set startup timeout to `60` seconds, save, then toggle the MCP connection off and on after configuration changes.
 
+**Agent prompt:** paste the rules in [`QUICK.md`](QUICK.md) into the connection's agent/system prompt. They steer the model to batch-first dispatch, filesystem-first edits, and `process` for long waits — the behaviors that make Quick feel like a CLI coding agent.
+
 The older environment variable `WIN_AGENT_RUNTIME_CONFIG` remains accepted for compatibility.
 
 ## Manual smoke test
@@ -156,7 +165,9 @@ A blank terminal means the server is waiting for newline-delimited JSON-RPC inpu
 - `list`, `stat`, `read`
 - `write`, `replace_text`, `apply_patch`, `mkdir`, `move`, `delete`, `copy`
 
-`read` supports byte offset and bounded output. `replace_text` defaults to exactly one expected occurrence, preventing accidental broad replacements. `apply_patch` takes a unified diff for multi-hunk or multi-file edits: exact context, validated end-to-end before anything is written, all-or-nothing. Prefer it over writing plus executing a script to edit code. `copy` duplicates a file (or a directory with `recursive`) under policy checks — prefer it over shell copy commands, which mis-handle bracketed filenames like `[KB1] - doc.pdf` without `-LiteralPath`.
+`read` supports byte offset and bounded output. `replace_text` defaults to exactly one expected occurrence, preventing accidental broad replacements. `multi_edit` applies several exact replacements to one file in order — the whole set is validated before anything is written, so a failing edit leaves the file untouched; prefer it for multi-part changes to a single file. `apply_patch` takes a unified diff for multi-hunk or multi-file edits: exact context, validated end-to-end before anything is written, all-or-nothing. Prefer it over writing plus executing a script to edit code. `copy` duplicates a file (or a directory with `recursive`) under policy checks — prefer it over shell copy commands, which mis-handle bracketed filenames like `[KB1] - doc.pdf` without `-LiteralPath`.
+
+Argument names are tolerant: the server accepts common model guesses as aliases — `old`/`find` for `old_text`, `new`/`replacement` for `new_text`, `text` for `content`, `file`/`target` for `path`, `start`/`end` for `line_start`/`line_end`, `dest` for `destination`, `pattern` for `query` (search), `cmd` for `command` (execute/process), `id` for `process_id`, and `dir` for `path` (workspace). A canonical name always wins when both are sent.
 
 ### `search`
 
@@ -187,7 +198,19 @@ Run up to 16 tool calls of any type in one call, in parallel — the closest mat
 ]}
 ```
 
-Prefer `filesystem write`, `replace_text`, and `apply_patch` for file edits over shelling out to python or shell commands: they are atomic, policy-checked, and give structured errors. `execute` and `process` are for running programs, builds, and tests — those legitimately write files as the current user.
+Prefer `filesystem write`, `replace_text`, `multi_edit`, and `apply_patch` for file edits over shelling out to python or shell commands: they are atomic, policy-checked, and give structured errors. `execute` and `process` are for running programs, builds, and tests — those legitimately write files as the current user.
+
+### `todo`
+
+Persistent task list (TodoWrite-style) with `get`, `add`, `update`, `delete`, and `clear`.
+
+```json
+{"action":"add","title":"Fix login bug"}
+{"action":"update","id":1,"status":"in_progress"}
+{"action":"get"}
+```
+
+Keep it current across turns: add before starting work, mark `in_progress` while working and `completed` when done, delete stale entries. State is stored next to the config (`.localforge-state.json`) and survives server restarts; without a state file it is in-memory only.
 
 ### `git`
 

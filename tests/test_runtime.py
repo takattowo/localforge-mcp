@@ -21,7 +21,7 @@ def test_mcp_protocol(tmp_path):
     assert init["result"]["protocolVersion"] == "2024-11-05"
     assert init["result"]["serverInfo"]["name"] == "localforge-mcp"
     tools = server.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})["result"]["tools"]
-    assert {item["name"] for item in tools} == {"workspace", "filesystem", "search", "multi_search", "batch", "git", "execute", "process"}
+    assert {item["name"] for item in tools} == {"workspace", "filesystem", "search", "multi_search", "batch", "git", "execute", "process", "todo"}
     assert server.handle({"jsonrpc": "2.0", "method": "notifications/initialized"}) is None
     assert server.handle({"jsonrpc": "2.0", "method": "unknown-notification"}) is None
     assert server.handle({"jsonrpc": "2.0", "id": 3, "method": "bogus"})["error"]["code"] == -32601
@@ -261,8 +261,9 @@ def test_stringified_array_coerced(tmp_path):
 def test_unknown_argument_suggests(tmp_path):
     server = make(tmp_path)
     with pytest.raises(RuntimeFault) as exc:
-        server.call("filesystem", {"action": "read", "path": "x", "old": "y"})
-    assert exc.value.code == "invalid_arguments" and "old_text" in exc.value.message
+        server.call("filesystem", {"action": "read", "path": "x", "bogus": "y"})
+    assert exc.value.code == "invalid_arguments" and "Valid arguments" in exc.value.message
+    assert "old_text" in exc.value.message
     with pytest.raises(RuntimeFault) as exc2:
         server.call("execute", {"command": ["x"], "bogus": 1})
     assert "Valid arguments" in exc2.value.message and "command" in exc2.value.message
@@ -675,3 +676,154 @@ def test_execute_child_gets_closed_stdin(tmp_path):
     out = server.cap.execute(
         [sys.executable, "-c", "import sys; print(repr(sys.stdin.read()))"])
     assert out["success"] and "''" in out["stdout"]
+
+
+def test_multi_edit_applies_all_edits(tmp_path):
+    server = make(tmp_path)
+    (tmp_path / "app.py").write_text("def old_one():\n    pass\n\ndef old_two():\n    pass\n")
+    out = server.cap.filesystem("multi_edit", "app.py", edits=[
+        {"old_text": "old_one", "new_text": "new_one"},
+        {"old_text": "old_two", "new_text": "new_two"},
+    ])
+    assert [e["replacements"] for e in out["edits"]] == [1, 1]
+    assert (tmp_path / "app.py").read_text() == \
+        "def new_one():\n    pass\n\ndef new_two():\n    pass\n"
+
+
+def test_multi_edit_all_or_nothing(tmp_path):
+    server = make(tmp_path)
+    (tmp_path / "app.py").write_text("alpha beta\n")
+    with pytest.raises(RuntimeFault) as exc:
+        server.cap.filesystem("multi_edit", "app.py", edits=[
+            {"old_text": "alpha", "new_text": "ALPHA"},
+            {"old_text": "missing", "new_text": "x"},
+        ])
+    assert exc.value.code == "content_mismatch" and "edits[1]" in exc.value.message
+    assert (tmp_path / "app.py").read_text() == "alpha beta\n"
+
+
+def test_multi_edit_validates_shape_counts_and_order(tmp_path):
+    server = make(tmp_path)
+    (tmp_path / "a.txt").write_text("x x\n")
+    with pytest.raises(RuntimeFault) as empty:
+        server.cap.filesystem("multi_edit", "a.txt", edits=[])
+    assert empty.value.code == "invalid_arguments" and "edits" in empty.value.message
+    with pytest.raises(RuntimeFault) as shape:
+        server.cap.filesystem("multi_edit", "a.txt", edits=[{"old_text": "x"}])
+    assert shape.value.code == "invalid_arguments"
+    with pytest.raises(RuntimeFault) as ident:
+        server.cap.filesystem("multi_edit", "a.txt",
+                              edits=[{"old_text": "x", "new_text": "x"}])
+    assert ident.value.code == "invalid_arguments" and "identical" in ident.value.message
+    with pytest.raises(RuntimeFault) as count:
+        server.cap.filesystem("multi_edit", "a.txt",
+                              edits=[{"old_text": "x", "new_text": "y"}])
+    assert count.value.code == "content_mismatch" and "expected_occurrences" in count.value.message
+    server.cap.filesystem("multi_edit", "a.txt",
+                          edits=[{"old_text": "x", "new_text": "y", "expected_occurrences": 2}])
+    assert (tmp_path / "a.txt").read_text() == "y y\n"
+    # Edits apply in order against the evolving content.
+    (tmp_path / "b.txt").write_text("one two\n")
+    server.cap.filesystem("multi_edit", "b.txt", edits=[
+        {"old_text": "one", "new_text": "1"},
+        {"old_text": "two", "new_text": "2"},
+    ])
+    assert (tmp_path / "b.txt").read_text() == "1 2\n"
+
+
+def test_multi_edit_edits_one_file_per_call_in_batch(tmp_path):
+    server = make(tmp_path)
+    (tmp_path / "a.txt").write_text("old one and old two\n")
+    out = server.call("batch", {"calls": [
+        {"tool": "filesystem", "arguments": {"action": "multi_edit", "path": "a.txt",
+            "edits": [{"old_text": "old one", "new_text": "new one"},
+                      {"old_text": "old two", "new_text": "new two"}]}},
+    ]})
+    assert "result" in out["results"][0]
+    assert (tmp_path / "a.txt").read_text() == "new one and new two\n"
+
+
+def test_argument_aliases_renamed_before_dispatch(tmp_path):
+    server = make(tmp_path)
+    server.call("filesystem", {"action": "write", "file": "a.txt", "text": "hello world"})
+    assert (tmp_path / "a.txt").read_text() == "hello world"
+    server.call("filesystem", {"action": "replace_text", "file": "a.txt",
+                               "old": "hello", "replacement": "hi"})
+    assert (tmp_path / "a.txt").read_text() == "hi world"
+    found = server.call("search", {"pattern": "hi", "path": str(tmp_path)})
+    assert found["results"][0]["text"] == "hi world"
+    run = server.call("execute", {"cmd": [sys.executable, "-c", "print('aliased')"]})
+    assert run["success"] and "aliased" in run["stdout"]
+    info = server.call("workspace", {"action": "get", "dir": str(tmp_path)})
+    assert info["cwd"] == str(tmp_path)
+
+
+def test_aliases_never_override_canonical_names(tmp_path):
+    server = make(tmp_path)
+    server.cap.filesystem("write", "a.txt", "one two")
+    server.call("filesystem", {"action": "replace_text", "path": "a.txt",
+                               "file": "b.txt", "old_text": "one", "new_text": "1",
+                               "old": "two", "new": "2"})
+    # Canonical path/old_text/new_text win; the aliases are ignored.
+    assert (tmp_path / "a.txt").read_text() == "1 two"
+    assert not (tmp_path / "b.txt").exists()
+
+
+def test_multi_search_entries_accept_aliases(tmp_path):
+    server = make(tmp_path)
+    (tmp_path / "a.txt").write_text("alpha\n")
+    out = server.call("multi_search", {"searches": [{"pattern": "alpha", "label": "p"}]})
+    assert out["results"][0]["results"][0]["text"] == "alpha"
+
+
+def test_todo_lifecycle_and_persistence(tmp_path):
+    import json
+    cfg_file = tmp_path / "cfg.json"
+    cfg_file.write_text(json.dumps({"workspace_root": str(tmp_path),
+        "allowed_read_roots": [str(tmp_path)], "allowed_write_roots": [str(tmp_path)]}))
+    first = Server(Config.load(str(cfg_file)))
+    assert first.call("todo", {"action": "get"})["todos"] == []
+    added = first.call("todo", {"action": "add", "title": "Fix login"})
+    assert added["id"] == 1 and added["status"] == "pending"
+    first.call("todo", {"action": "add", "title": "Write tests"})
+    first.call("todo", {"action": "update", "id": 1, "status": "in_progress"})
+    listed = first.call("todo", {"action": "get"})["todos"]
+    assert [t["id"] for t in listed] == [1, 2]
+    assert listed[0]["status"] == "in_progress"
+    second = Server(Config.load(str(cfg_file)))
+    restored = second.call("todo", {"action": "get"})["todos"]
+    assert [t["title"] for t in restored] == ["Fix login", "Write tests"]
+    renamed = second.call("todo", {"action": "update", "id": 2, "title": "More tests"})
+    assert renamed["title"] == "More tests"
+    deleted = second.call("todo", {"action": "delete", "id": 1})
+    assert deleted["deleted"] is True
+    cleared = second.call("todo", {"action": "clear"})
+    assert cleared["cleared"] == 1
+    assert second.call("todo", {"action": "get"})["todos"] == []
+
+
+def test_todo_validation_errors(tmp_path):
+    server = make(tmp_path)
+    with pytest.raises(RuntimeFault) as blank:
+        server.call("todo", {"action": "add", "title": "   "})
+    assert blank.value.code == "invalid_arguments"
+    with pytest.raises(RuntimeFault) as missing:
+        server.call("todo", {"action": "add"})
+    assert missing.value.code == "invalid_arguments"
+    with pytest.raises(RuntimeFault) as unknown:
+        server.call("todo", {"action": "update", "id": 99, "status": "completed"})
+    assert unknown.value.code == "todo_not_found"
+    with pytest.raises(RuntimeFault) as bad:
+        server.call("todo", {"action": "update", "id": 1, "status": "done"})
+    assert bad.value.code == "invalid_arguments"
+    with pytest.raises(RuntimeFault) as act:
+        server.call("todo", {"action": "explode"})
+    assert act.value.code == "invalid_action"
+
+
+def test_todo_schema_steers_task_tracking(tmp_path):
+    tools = {t["name"]: t for t in make(tmp_path).tools()}
+    props = tools["todo"]["inputSchema"]["properties"]
+    assert set(props["action"]["enum"]) == {"get", "add", "update", "delete", "clear"}
+    assert set(props["status"]["enum"]) == {"pending", "in_progress", "completed"}
+    assert "restarts" in tools["todo"]["description"]

@@ -15,7 +15,6 @@ import time
 from .errors import RuntimeFault
 from .patch import build_new as build_patched
 from .patch import parse as parse_diff
-from .state import StateStore
 from .security import coerce_command, command_for_spawn, redact, safe_environment
 
 def _fs_error(action, target, exc):
@@ -48,13 +47,13 @@ MAX_BATCH_SEARCHES = 16
 BATCH_SEARCH_WORKERS = 8
 
 class Capabilities:
-    def __init__(self, cfg, paths, policy, processes):
+    def __init__(self, cfg, paths, policy, processes, store=None):
         self.cfg, self.paths, self.policy, self.processes = cfg, paths, policy, processes
         self._cwd_lock = threading.Lock()
         self._cwd = paths.workspace
         self._path_locks = {}
         self._path_locks_guard = threading.Lock()
-        self.store = StateStore(cfg.state_file) if cfg.state_file else None
+        self.store = store
         if self.store is not None:
             saved = self.store.load().get("cwd")
             if isinstance(saved, str) and saved:
@@ -125,7 +124,7 @@ class Capabilities:
 
     def filesystem(self, action, path=".", content=None, destination=None, recursive=False,
                    encoding="utf-8", offset=0, max_bytes=None, expected_occurrences=None,
-                   old_text=None, new_text=None, line_start=None, line_end=None,
+                   old_text=None, new_text=None, edits=None, line_start=None, line_end=None,
                    limit=200, glob=None, include_hidden=False, patch=None):
         if action == "copy":
             if not destination:
@@ -246,6 +245,56 @@ class Capabilities:
                 except OSError as e:
                     _fs_error("replace_text", target, e)
             return {"path": str(target), "replacements": count, "bytes": len(updated.encode(encoding))}
+        if action == "multi_edit":
+            if not isinstance(edits, list) or not edits:
+                raise RuntimeFault("invalid_arguments",
+                                   "multi_edit requires a non-empty edits array, "
+                                   'e.g. {"action": "multi_edit", "path": "src/app.py", '
+                                   '"edits": [{"old_text": "foo", "new_text": "bar"}]}')
+            if not target.is_file():
+                raise RuntimeFault("not_file", f"Not a file: {target}")
+            for index, edit in enumerate(edits):
+                if (not isinstance(edit, dict)
+                        or not isinstance(edit.get("old_text"), str)
+                        or not isinstance(edit.get("new_text"), str)):
+                    raise RuntimeFault("invalid_arguments",
+                                       f"edits[{index}] must be an object with "
+                                       "old_text and new_text strings")
+            with self._locked_paths([target]):
+                try:
+                    original = target.read_text(encoding=encoding)
+                except OSError as e:
+                    _fs_error("multi_edit", target, e)
+                # Apply in order against the evolving content, but
+                # validate every edit before writing anything: a
+                # failing edit leaves the file untouched, so a
+                # coherent multi-part change never lands half-applied.
+                content = original
+                applied = []
+                for index, edit in enumerate(edits):
+                    old, new = edit["old_text"], edit["new_text"]
+                    if old == new:
+                        raise RuntimeFault("invalid_arguments",
+                                           f"edits[{index}] old_text and new_text "
+                                           "are identical; nothing would change")
+                    expected = edit.get("expected_occurrences")
+                    expected = 1 if expected is None else int(expected)
+                    count = content.count(old)
+                    if count != expected:
+                        raise RuntimeFault("content_mismatch",
+                                           f"edits[{index}]: expected {expected} "
+                                           f"occurrence(s), found {count}. Edits apply "
+                                           "in order, so earlier edits may have "
+                                           "changed the text; pass "
+                                           "expected_occurrences when it repeats.")
+                    content = content.replace(old, new)
+                    applied.append({"index": index, "replacements": count})
+                try:
+                    self._atomic_write(target, content, encoding)
+                except OSError as e:
+                    _fs_error("multi_edit", target, e)
+            return {"path": str(target), "edits": applied,
+                    "bytes": len(content.encode(encoding))}
         if action == "apply_patch":
             if patch is None:
                 raise RuntimeFault("invalid_arguments", "apply_patch requires patch")

@@ -15,6 +15,8 @@ from .errors import RuntimeFault
 from .security import PathPolicy, Policy
 from .processes import ProcessManager
 from .capabilities import Capabilities
+from .state import StateStore
+from .todos import TodoStore
 
 PROTOCOL = "2024-11-05"
 MAX_BATCH_CALLS = 16
@@ -34,7 +36,7 @@ SCHEMAS = {
         "action": {"enum": ["get", "set_cwd"], "description": "get returns roots and Git root; set_cwd changes runtime directory."},
         "path": {"type": "string", "description": "Directory for set_cwd, relative to cwd or absolute, must resolve inside read roots."}}, "required": ["action"]},
     "filesystem": {"type": "object", "properties": {
-        "action": {"enum": ["read", "list", "stat", "write", "replace_text", "apply_patch", "mkdir", "delete", "move", "copy"], "description": "read defaults to byte mode; pass line_start/line_end for line mode. list is paginated. apply_patch takes a unified diff string. copy duplicates a file (or a directory with recursive=true) without shell quoting issues."},
+        "action": {"enum": ["read", "list", "stat", "write", "replace_text", "multi_edit", "apply_patch", "mkdir", "delete", "move", "copy"], "description": "read defaults to byte mode; pass line_start/line_end for line mode. list is paginated. multi_edit applies several exact replacements to one file, validated end-to-end and written once. apply_patch takes a unified diff string. copy duplicates a file (or a directory with recursive=true) without shell quoting issues."},
         "path": {"type": "string", "description": "Target path, relative to cwd or absolute. Reads need read roots, writes need write roots."},
         "content": {"type": "string", "description": "Full replacement content for write; overwrites the file."},
         "destination": {"type": "string", "description": "Destination path for move/copy; copy creates missing parent dirs, move requires the parent to exist."},
@@ -45,6 +47,13 @@ SCHEMAS = {
         "old_text": {"type": "string", "description": "Exact text to find for replace_text."},
         "new_text": {"type": "string", "description": "Replacement text for replace_text."},
         "expected_occurrences": {"type": "integer", "description": "Required match count for replace_text, default 1."},
+        "edits": {"type": "array", "minItems": 1, "maxItems": 32,
+            "description": "Exact replacements for multi_edit, applied in order: [{\"old_text\": \"foo\", \"new_text\": \"bar\"}]. The whole set is validated before anything is written; a failing edit leaves the file untouched. Pass expected_occurrences inside an entry when the text repeats.",
+            "items": {"type": "object", "properties": {
+                "old_text": {"type": "string", "description": "Exact text to find."},
+                "new_text": {"type": "string", "description": "Replacement text."},
+                "expected_occurrences": {"type": "integer", "description": "Required match count, default 1."}},
+                "required": ["old_text", "new_text"]}},
         "line_start": {"type": "integer", "description": "1-based first line for line-mode read, default 1."},
         "line_end": {"type": "integer", "description": "Inclusive last line for line-mode read, default end of file."},
         "limit": {"type": "integer", "description": "Max list entries returned, default 200, clamped 1..1000."},
@@ -87,6 +96,11 @@ SCHEMAS = {
         "text": {"type": "string", "description": "Stdin text for write."},
         "append_newline": {"type": "boolean", "description": "Append newline to stdin write, default true."},
         "force": {"type": "boolean", "description": "Force-kill the process tree on stop."}}, "required": ["action"]},
+    "todo": {"type": "object", "properties": {
+        "action": {"enum": ["get", "add", "update", "delete", "clear"], "description": "get lists todos; add appends one; update changes title or status; delete removes one; clear removes all."},
+        "id": {"type": "integer", "description": "Todo id from get or add; required for update and delete."},
+        "title": {"type": "string", "description": "Task text; required for add, optional for update."},
+        "status": {"enum": ["pending", "in_progress", "completed"], "description": "Task state for update."}}, "required": ["action"]},
     "multi_search": {"type": "object", "properties": {
         "searches": {"type": "array", "minItems": 1, "maxItems": 16,
             "description": "Up to 16 independent searches run in parallel, e.g. [{\"query\": \"UserService\", \"glob\": [\"*.py\"]}, {\"query\": \"TODO\", \"files_only\": true}]. Each entry takes the same arguments as the search tool, plus an optional label echoed back with its results.",
@@ -116,13 +130,14 @@ SCHEMAS = {
 }
 DESCRIPTIONS = {
     "workspace": "Inspect workspace and Git root, or change runtime current directory.",
-    "filesystem": "Policy-checked real filesystem operations: line or byte reads, paginated lists, atomic writes, guarded text replacement, policy-checked copy. Prefer write, replace_text, and apply_patch for file edits instead of shelling out to python or shell commands.",
+    "filesystem": "Policy-checked real filesystem operations: line or byte reads, paginated lists, atomic writes, guarded text replacement, multi_edit for several exact replacements per file (all-or-nothing), policy-checked copy. Prefer write, replace_text, multi_edit, and apply_patch for file edits instead of shelling out to python or shell commands.",
     "search": "Repository text or filename search with glob filters, default ignores, and context lines.",
     "git": "Common structured Git operations plus a generic argument-array action.",
     "execute": "Run a bounded foreground process with structured output; argv arrays preferred. For long waits or polling, use the process tool instead of a long-timeout execute. Do not edit files with it; prefer the filesystem write, replace_text, or apply_patch actions.",
     "process": "Manage long-running processes with stable IDs, split streams, cursors, stdin, restart, and tree stop. For file edits, prefer the filesystem write, replace_text, or apply_patch actions.",
     "multi_search": "Run up to 16 independent searches in one call, e.g. {\"searches\": [{\"query\": \"UserService\", \"glob\": [\"*.py\"], \"label\": \"users\"}, {\"query\": \"TODO\", \"files_only\": true}]}. Each entry takes the same arguments as the search tool. A failing entry is reported per-entry without failing the batch.",
     "batch": "Run up to 16 tool calls in one call, in parallel, e.g. {\"calls\": [{\"tool\": \"search\", \"arguments\": {\"query\": \"todo\"}}, {\"tool\": \"git\", \"arguments\": {\"action\": \"status\"}}]}. Each entry names a tool and its arguments; tool names may carry the host prefix (Birb_localforge_mcp__search). Distinct paths run concurrently while edits to the same file serialize. A failing call is reported per-call without failing the batch.",
+    "todo": "Persistent task list (TodoWrite-style) with get, add, update, delete, and clear. Keep it current across turns: add before starting work, mark in_progress while working, completed when done. State survives server restarts.",
 }
 
 class Server:
@@ -131,7 +146,9 @@ class Server:
         self.paths = PathPolicy(cfg)
         self.policy = Policy(cfg, self.paths)
         self.processes = ProcessManager(cfg, self.paths, self.policy)
-        self.cap = Capabilities(cfg, self.paths, self.policy, self.processes)
+        self.state = StateStore(cfg.state_file) if cfg.state_file else None
+        self.cap = Capabilities(cfg, self.paths, self.policy, self.processes, self.state)
+        self.todos = TodoStore(self.state)
         self.pool = ThreadPoolExecutor(max_workers=int(cfg.max_concurrency),
                                        thread_name_prefix="localforge")
         atexit.register(self.cleanup)
@@ -144,19 +161,53 @@ class Server:
         return [{"name": name, "description": DESCRIPTIONS[name], "inputSchema": SCHEMAS[name]} for name in DESCRIPTIONS]
 
     ARG_KEYS = {
-        "workspace": ("action", "path"),
-        "filesystem": ("action", "path", "content", "destination", "recursive", "encoding", "offset",
-                        "max_bytes", "old_text", "new_text", "expected_occurrences", "line_start",
-                        "line_end", "limit", "glob", "include_hidden", "patch"),
-        "search": ("query", "path", "glob", "exclude", "case_sensitive", "max_results", "files_only",
+        "workspace": ("action", "path", "dir"),
+        "filesystem": ("action", "path", "file", "target", "content", "text", "destination", "dest", "recursive", "encoding", "offset",
+                        "max_bytes", "old_text", "old", "find", "new_text", "new", "replacement", "expected_occurrences", "edits",
+                        "line_start", "start", "line_end", "end", "limit", "glob", "include_hidden", "patch"),
+        "search": ("query", "pattern", "path", "glob", "exclude", "case_sensitive", "max_results", "files_only",
                    "fixed_string", "context_lines", "include_hidden", "max_file_size_bytes"),
         "git": ("action", "args", "cwd"),
-        "execute": ("command", "cwd", "timeout", "shell", "env", "input"),
-        "process": ("action", "process_id", "command", "cwd", "shell", "env", "after", "limit_bytes",
+        "execute": ("command", "cmd", "cwd", "timeout", "shell", "env", "input"),
+        "process": ("action", "process_id", "id", "command", "cmd", "cwd", "shell", "env", "after", "limit_bytes",
                     "wait_ms", "text", "append_newline", "force"),
         "multi_search": ("searches",),
         "batch": ("calls",),
+        "todo": ("action", "id", "title", "status"),
     }
+
+    # Model-facing aliases: Quick's model is not trained on these
+    # schemas, so it guesses nearby names (old/replacement instead
+    # of old_text/new_text, as seen in dogfooding). Rename before
+    # dispatch; a canonical key always wins over its alias.
+    ALIASES = {
+        "workspace": {"dir": "path"},
+        "filesystem": {
+            "file": "path", "target": "path",
+            "old": "old_text", "find": "old_text",
+            "new": "new_text", "replacement": "new_text",
+            "text": "content", "dest": "destination",
+            "start": "line_start", "end": "line_end",
+        },
+        "search": {"pattern": "query"},
+        "execute": {"cmd": "command"},
+        "process": {"cmd": "command", "id": "process_id"},
+    }
+
+    @classmethod
+    def _apply_aliases(cls, name, arguments):
+        aliases = cls.ALIASES.get(name)
+        if not aliases:
+            return arguments
+        renamed = dict(arguments)
+        for alias, canonical in aliases.items():
+            if alias not in renamed:
+                continue
+            if canonical in renamed:
+                del renamed[alias]
+            else:
+                renamed[canonical] = renamed.pop(alias)
+        return renamed
 
     @classmethod
     def _unknown_arg_fault(cls, name, exc):
@@ -193,17 +244,23 @@ class Server:
             raise RuntimeFault("tool_not_found", f"Unknown tool: {name}")
         if not isinstance(arguments, dict):
             raise RuntimeFault("invalid_arguments", "Tool arguments must be an object")
-        missing = [key for key in SCHEMAS[name].get("required", []) if key not in arguments]
+        args = self._apply_aliases(name, arguments)
+        missing = [key for key in SCHEMAS[name].get("required", []) if key not in args]
         if missing:
             raise RuntimeFault("invalid_arguments", f"Missing required argument(s): {', '.join(missing)}")
-        args = dict(arguments)
         if name == "workspace": return self.cap.workspace(**args)
         if name == "filesystem": return self.cap.filesystem(**args)
         if name == "search": return self.cap.search(**args)
-        if name == "multi_search": return self.cap.multi_search(**args)
+        if name == "multi_search":
+            searches = args.get("searches")
+            if isinstance(searches, list):
+                args["searches"] = [self._apply_aliases("search", dict(s))
+                                    if isinstance(s, dict) else s for s in searches]
+            return self.cap.multi_search(**args)
         if name == "batch": return self.batch(**args)
         if name == "git": return self.cap.git(**args)
         if name == "execute": return self.cap.execute(**args)
+        if name == "todo": return self._todo(args)
         action = args.pop("action")
         required_by_action = {
             "start": ["command"], "read": ["process_id"], "write": ["process_id", "text"],
@@ -222,6 +279,34 @@ class Server:
         if action == "restart": return self.processes.restart(args["process_id"])
         if action == "stop": return self.processes.stop(args.pop("process_id"), **args)
         raise RuntimeFault("invalid_action", f"Unknown process action: {action}")
+
+    def _todo(self, args):
+        action = args.pop("action")
+        if action == "get":
+            return {"todos": self.todos.get()}
+        if action == "add":
+            title = args.get("title")
+            if not isinstance(title, str) or not title.strip():
+                raise RuntimeFault("invalid_arguments",
+                                   "todo add requires a non-empty title, "
+                                   'e.g. {"action": "add", "title": "Fix login bug"}')
+            return self.todos.add(title.strip())
+        if action in {"update", "delete"}:
+            try:
+                todo_id = int(args.get("id"))
+            except (TypeError, ValueError):
+                raise RuntimeFault("invalid_arguments",
+                                   f"todo {action} requires an integer id "
+                                   "from get or add")
+            title = args.get("title")
+            if title is not None and not isinstance(title, str):
+                raise RuntimeFault("invalid_arguments", "todo title must be a string")
+            if action == "delete":
+                return self.todos.delete(todo_id)
+            return self.todos.update(todo_id, title=title, status=args.get("status"))
+        if action == "clear":
+            return self.todos.clear()
+        raise RuntimeFault("invalid_action", f"Unknown todo action: {action}")
 
     def batch(self, calls):
         """Run several tool calls in parallel within one tool call.
