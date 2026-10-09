@@ -18,7 +18,7 @@ from .capabilities import Capabilities
 from .state import StateStore
 from .todos import TodoStore
 
-PROTOCOL = "2024-11-05"
+PROTOCOL = "2025-06-18"
 MAX_BATCH_CALLS = 16
 
 def _bare_tool_name(name):
@@ -149,9 +149,16 @@ class Server:
         self.state = StateStore(cfg.state_file) if cfg.state_file else None
         self.cap = Capabilities(cfg, self.paths, self.policy, self.processes, self.state)
         self.todos = TodoStore(self.state)
+        self._client_log = None
         self.pool = ThreadPoolExecutor(max_workers=int(cfg.max_concurrency),
                                        thread_name_prefix="localforge")
         atexit.register(self.cleanup)
+
+    def _log_to_client(self, level, message):
+        # Plumbed in by run_stdio; direct callers (tests,
+        # embedding) have no client channel to notify.
+        if self._client_log is not None:
+            self._client_log(level, message)
 
     def cleanup(self):
         self.processes.cleanup()
@@ -235,9 +242,11 @@ class Server:
             fault = enriched.code
             raise enriched from e
         finally:
+            elapsed = int((time.monotonic() - start) * 1000)
             if os.environ.get("LOCALFORGE_LOG") == "1":
-                elapsed = int((time.monotonic() - start) * 1000)
                 print(f"localforge tool={name} ms={elapsed} {fault}", file=sys.stderr)
+            if self.cfg.log_to_client:
+                self._log_to_client("info", f"tool={name} ms={elapsed} {fault}")
 
     def _dispatch(self, name, arguments):
         if name not in SCHEMAS:
@@ -367,7 +376,8 @@ class Server:
         method, request_id = request["method"], request.get("id")
         is_notification = "id" not in request
         if method == "initialize":
-            result = {"protocolVersion": PROTOCOL, "capabilities": {"tools": {}},
+            result = {"protocolVersion": PROTOCOL,
+                      "capabilities": {"tools": {}, "logging": {}},
                       "serverInfo": {"name": "localforge-mcp", "version": __version__}}
         elif method == "tools/list":
             result = {"tools": self.tools()}
@@ -376,7 +386,8 @@ class Server:
             if not isinstance(params, dict) or not isinstance(params.get("name"), str):
                 raise RuntimeFault("invalid_arguments", "tools/call requires params.name")
             value = self.call(params["name"], params.get("arguments", {}))
-            result = {"content": [{"type": "text", "text": json.dumps(value, ensure_ascii=False)}]}
+            result = {"content": [{"type": "text", "text": json.dumps(value, ensure_ascii=False)}],
+                      "structuredContent": value}
         elif method == "ping":
             result = {}
         elif method.startswith("notifications/") or method == "initialized":
@@ -403,6 +414,15 @@ class Server:
             with write_lock:
                 sys.stdout.write(json.dumps(response, separators=(",", ":")) + "\n")
                 sys.stdout.flush()
+
+        def _notify(level, message):
+            # MCP logging capability: surfaces tool-call
+            # traces to the client when log_to_client is on.
+            _write({"jsonrpc": "2.0", "method": "notifications/message",
+                    "params": {"level": level, "logger": "localforge",
+                               "data": message}})
+
+        self._client_log = _notify
 
         def _handle(raw):
             request_id = None

@@ -1,5 +1,13 @@
 # Changelog
 
+## 1.7.0
+
+- MCP protocol bumped to 2025-06-18. `tools/call` results now carry `structuredContent` (the typed result object) alongside the text content, so clients that support it get typed results instead of parsing JSON text; the text form is unchanged for older clients.
+- New `logging` capability: with `log_to_client=true` in the config, every tool call emits an MCP logging notification (tool, duration, outcome) visible in the client. `LOCALFORGE_LOG=1` still writes the same line to stderr.
+- `workspace get` caches the Git root per directory for 30 seconds instead of spawning `git rev-parse` on every call.
+- `replace_text` and `multi_edit` refuse files larger than `max_file_read_bytes` (`file_too_large`) instead of reading unbounded files into memory.
+- Path locks are now striped into a fixed table of 256 locks (bounded memory over long sessions); the same path always maps to the same stripe so same-file edits still serialize, and stripes are acquired in a process-stable order so overlapping edits cannot deadlock.
+
 ## 1.6.0
 
 - New `todo` tool: persistent task list (get, add, update, delete, clear) backed by the state file, so agent task tracking survives server restarts; in-memory only when no state file is configured.
