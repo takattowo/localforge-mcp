@@ -18,8 +18,9 @@ def make(tmp, mode="DEVELOPMENT", network="unrestricted", **kwargs):
 def test_mcp_protocol(tmp_path):
     server = make(tmp_path)
     init = server.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
-    assert init["result"]["protocolVersion"] == "2024-11-05"
+    assert init["result"]["protocolVersion"] == "2025-06-18"
     assert init["result"]["serverInfo"]["name"] == "localforge-mcp"
+    assert "logging" in init["result"]["capabilities"]
     tools = server.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})["result"]["tools"]
     assert {item["name"] for item in tools} == {"workspace", "filesystem", "search", "multi_search", "batch", "git", "execute", "process", "todo"}
     assert server.handle({"jsonrpc": "2.0", "method": "notifications/initialized"}) is None
@@ -34,10 +35,13 @@ def test_filesystem_and_modes(tmp_path):
     server.cap.filesystem("write", "a.txt", "hello world")
     result = server.cap.filesystem("read", "a.txt")
     assert result["content"] == "hello" and result["truncated"]
-    server.cap.filesystem("replace_text", "a.txt", old_text="world", new_text="agent")
+    # replace_text reads the whole file, so it follows the
+    # same cap; edit via a server with the default limit.
+    full = make(tmp_path)
+    full.cap.filesystem("replace_text", "a.txt", old_text="world", new_text="agent")
     assert (tmp_path / "a.txt").read_text() == "hello agent"
     with pytest.raises(RuntimeFault):
-        server.cap.filesystem("replace_text", "a.txt", old_text="missing", new_text="x")
+        full.cap.filesystem("replace_text", "a.txt", old_text="missing", new_text="x")
     with pytest.raises(RuntimeFault):
         server.cap.filesystem("read", "../escape")
     readonly = make(tmp_path, "READ_ONLY")
@@ -827,3 +831,63 @@ def test_todo_schema_steers_task_tracking(tmp_path):
     assert set(props["action"]["enum"]) == {"get", "add", "update", "delete", "clear"}
     assert set(props["status"]["enum"]) == {"pending", "in_progress", "completed"}
     assert "restarts" in tools["todo"]["description"]
+
+
+def test_tools_call_includes_structured_content(tmp_path):
+    server = make(tmp_path)
+    resp = server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                          "params": {"name": "workspace", "arguments": {"action": "get"}}})
+    result = resp["result"]
+    assert result["structuredContent"]["workspace_root"] == str(tmp_path)
+    assert json.loads(result["content"][0]["text"]) == result["structuredContent"]
+
+
+def test_client_logging_notifications(tmp_path):
+    server = make(tmp_path, log_to_client=True)
+    messages = []
+    server._client_log = lambda level, message: messages.append((level, message))
+    server.call("workspace", {"action": "get"})
+    assert len(messages) == 1
+    level, message = messages[0]
+    assert level == "info" and "tool=workspace" in message and "ok" in message
+    assert make(tmp_path).cfg.log_to_client is False
+
+
+def test_workspace_get_caches_git_root(tmp_path, monkeypatch):
+    import shutil
+    if shutil.which("git") is None:
+        pytest.skip("git unavailable")
+    server = make(tmp_path)
+    server.cap.execute(["git", "init"])
+    calls = []
+    real_run = subprocess.run
+    def counting(*args, **kwargs):
+        calls.append(args)
+        return real_run(*args, **kwargs)
+    monkeypatch.setattr(subprocess, "run", counting)
+    first = server.cap.workspace("get")
+    second = server.cap.workspace("get")
+    assert first["repository_root"] == second["repository_root"] is not None
+    assert len([c for c in calls if "rev-parse" in c[0]]) == 1
+
+
+def test_replace_text_and_multi_edit_size_guard(tmp_path):
+    server = make(tmp_path, max_file_read_bytes=10)
+    (tmp_path / "big.txt").write_text("x" * 100)
+    with pytest.raises(RuntimeFault) as exc:
+        server.cap.filesystem("replace_text", "big.txt", old_text="x", new_text="y")
+    assert exc.value.code == "file_too_large" and "max_file_read_bytes" in exc.value.message
+    assert (tmp_path / "big.txt").read_text() == "x" * 100
+    with pytest.raises(RuntimeFault) as exc2:
+        server.cap.filesystem("multi_edit", "big.txt",
+                              edits=[{"old_text": "x", "new_text": "y"}])
+    assert exc2.value.code == "file_too_large"
+
+
+def test_path_locks_are_bounded_stripes(tmp_path):
+    server = make(tmp_path)
+    assert len(server.cap._path_locks) == 256
+    for i in range(300):
+        with server.cap._locked_paths([tmp_path / f"f{i}.txt"]):
+            pass
+    assert len(server.cap._path_locks) == 256

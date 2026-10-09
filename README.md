@@ -18,6 +18,8 @@ LocalForge MCP gives an MCP client structured access to a real workspace, files,
 - `multi_edit`: several exact replacements per file in one call, validated end-to-end and written atomically.
 - Tolerant argument aliases (`old`→`old_text`, `replacement`→`new_text`, `text`→`content`, `file`→`path`, `pattern`→`query`, `cmd`→`command`, and more), so mis-remembered parameter names do not cost a failed round-trip.
 - Persistent `todo` tool: TodoWrite-style task list backed by the state file; survives restarts.
+- MCP 2025-06-18 protocol with `structuredContent` tool results and the `logging` capability.
+- Long-session guards: Git-root caching, whole-file-edit size limits, and a fixed-size striped path-lock table.
 - Structured Git operations plus generic Git argument arrays.
 - Foreground execution with separate stdout/stderr, timeout, truncation, duration, and exit metadata.
 - Long-running process IDs, incremental split-stream logs, stdin, status, restart, stop, and process-tree cleanup.
@@ -302,7 +304,7 @@ Supported `default_shell` values:
 - `cmd`
 - `sh`
 
-`execute.timeout` is seconds. `process.wait_ms` is milliseconds (max 60000). `limit_bytes`, `max_bytes`, and `max_file_read_bytes` are bytes. `filesystem offset` is a byte offset in legacy read mode; use `line_start`/`line_end` for line mode. `max_concurrency` bounds how many tool calls run in parallel (default 8).
+`execute.timeout` is seconds. `process.wait_ms` is milliseconds (max 60000). `limit_bytes`, `max_bytes`, and `max_file_read_bytes` are bytes. `filesystem offset` is a byte offset in legacy read mode; use `line_start`/`line_end` for line mode. `max_concurrency` bounds how many tool calls run in parallel (default 8). `log_to_client` (default false) emits an MCP logging notification per tool call (tool, duration, outcome) visible in the client; `LOCALFORGE_LOG=1` writes the same line to stderr. `replace_text` and `multi_edit` refuse files larger than `max_file_read_bytes` with `file_too_large`.
 
 ## Security model
 

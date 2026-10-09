@@ -45,14 +45,23 @@ DEFAULT_EXCLUDES = [".git/**", ".venv/**", "__pycache__/**", "node_modules/**", 
 
 MAX_BATCH_SEARCHES = 16
 BATCH_SEARCH_WORKERS = 8
+GIT_ROOT_TTL_SECONDS = 30
+PATH_LOCK_STRIPES = 256
 
 class Capabilities:
     def __init__(self, cfg, paths, policy, processes, store=None):
         self.cfg, self.paths, self.policy, self.processes = cfg, paths, policy, processes
         self._cwd_lock = threading.Lock()
         self._cwd = paths.workspace
-        self._path_locks = {}
-        self._path_locks_guard = threading.Lock()
+        # Striped path locks: a fixed-size table (bounded memory
+        # over long sessions) where each path maps to one stripe
+        # by hash. The same path always maps to the same stripe,
+        # so same-file mutations still serialize; paths that share
+        # a stripe serialize as a tradeoff, which is rare at the
+        # default concurrency.
+        self._path_locks = [threading.Lock() for _ in range(PATH_LOCK_STRIPES)]
+        self._git_lock = threading.Lock()
+        self._git_root_cache = (None, None, 0.0)
         self.store = store
         if self.store is not None:
             saved = self.store.load().get("cwd")
@@ -68,29 +77,24 @@ class Capabilities:
             return self._cwd
 
     def _path_lock(self, target):
-        key = str(target)
-        with self._path_locks_guard:
-            lock = self._path_locks.get(key)
-            if lock is None:
-                lock = threading.Lock()
-                self._path_locks[key] = lock
-            return lock
+        return self._path_locks[hash(str(target)) % PATH_LOCK_STRIPES]
 
     @contextlib.contextmanager
     def _locked_paths(self, targets):
         """Serialize mutations on the same path; distinct paths stay parallel.
 
         Mirrors how CLI agents serialize edits to one file while editing
-        several files at once. Locks are acquired in sorted path order so
-        concurrent mutations of overlapping path sets cannot deadlock.
+        several files at once. Stripes are acquired in a process-stable
+        order (sorted by object identity) so concurrent mutations of
+        overlapping path sets cannot deadlock.
         """
-        entries = sorted({str(t): self._path_lock(t) for t in targets}.items())
-        for _, lock in entries:
+        locks = sorted({self._path_lock(t) for t in targets}, key=id)
+        for lock in locks:
             lock.acquire()
         try:
             yield
         finally:
-            for _, lock in reversed(entries):
+            for lock in reversed(locks):
                 lock.release()
 
     def workspace(self, action, path=None):
@@ -108,19 +112,48 @@ class Capabilities:
         raise RuntimeFault("invalid_action", "workspace action must be get or set_cwd")
 
     def _workspace_info(self):
-        git_root = None
+        return {"workspace_root": str(self.paths.workspace), "cwd": str(self.cwd),
+                "repository_root": self._git_root(self.cwd)}
+
+    def _git_root(self, cwd):
+        # rev-parse costs a process spawn; cache the answer per
+        # directory for a short TTL so repeated workspace calls in
+        # the same directory do not pay it every time.
+        key = str(cwd)
+        now = time.monotonic()
+        with self._git_lock:
+            cached_cwd, cached_root, checked_at = self._git_root_cache
+            if cached_cwd == key and now - checked_at < GIT_ROOT_TTL_SECONDS:
+                return cached_root
+        root = None
         try:
             result = subprocess.run(
-                ["git", "-C", str(self.cwd), "rev-parse", "--show-toplevel"],
+                ["git", "-C", key, "rev-parse", "--show-toplevel"],
                 capture_output=True, text=True, timeout=5,
                 stdin=subprocess.DEVNULL,
                 env=safe_environment(self.cfg),
             )
             if result.returncode == 0:
-                git_root = result.stdout.strip() or None
+                root = result.stdout.strip() or None
         except (OSError, subprocess.TimeoutExpired):
             pass
-        return {"workspace_root": str(self.paths.workspace), "cwd": str(self.cwd), "repository_root": git_root}
+        with self._git_lock:
+            self._git_root_cache = (key, root, time.monotonic())
+        return root
+
+    def _guard_file_size(self, action, target):
+        # replace_text and multi_edit read the whole file into
+        # memory; refuse anything beyond the configured read cap
+        # instead of an unbounded read.
+        try:
+            size = target.stat().st_size
+        except OSError as e:
+            _fs_error(action, target, e)
+        if size > int(self.cfg.max_file_read_bytes):
+            raise RuntimeFault("file_too_large",
+                               f"{target} is {size} bytes; {action} is capped at "
+                               f"max_file_read_bytes ({self.cfg.max_file_read_bytes}). "
+                               "Raise the limit in the config for large files.")
 
     def filesystem(self, action, path=".", content=None, destination=None, recursive=False,
                    encoding="utf-8", offset=0, max_bytes=None, expected_occurrences=None,
@@ -229,6 +262,7 @@ class Capabilities:
                 raise RuntimeFault("invalid_arguments", "replace_text requires old_text and new_text")
             if old_text == new_text:
                 raise RuntimeFault("invalid_arguments", "old_text and new_text are identical; nothing would change")
+            self._guard_file_size("replace_text", target)
             with self._locked_paths([target]):
                 try:
                     original = target.read_text(encoding=encoding)
@@ -253,6 +287,7 @@ class Capabilities:
                                    '"edits": [{"old_text": "foo", "new_text": "bar"}]}')
             if not target.is_file():
                 raise RuntimeFault("not_file", f"Not a file: {target}")
+            self._guard_file_size("multi_edit", target)
             for index, edit in enumerate(edits):
                 if (not isinstance(edit, dict)
                         or not isinstance(edit.get("old_text"), str)
