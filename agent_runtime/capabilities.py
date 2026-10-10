@@ -13,6 +13,7 @@ import tempfile
 import threading
 import time
 from .errors import RuntimeFault
+from .job import adopt as job_adopt
 from .patch import build_new as build_patched
 from .patch import parse as parse_diff
 from .security import coerce_command, command_for_spawn, redact, safe_environment
@@ -708,6 +709,11 @@ class Capabilities:
             proc = subprocess.Popen(command_for_spawn(self.cfg, command, shell), cwd=work, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                     stdin=subprocess.PIPE if stdin_bytes is not None else subprocess.DEVNULL,
                                     env=safe_environment(self.cfg, env), **self._creation())
+            if self.cfg.kill_children_on_exit:
+                # Kernel-side cleanup: the child dies with
+                # this process however it dies, not just on
+                # a clean exit (see agent_runtime/job.py).
+                job_adopt(proc.pid)
             stdout, stderr = proc.communicate(input=stdin_bytes, timeout=effective_timeout)
             error_type = None if proc.returncode == 0 else "process_exit"
         except subprocess.TimeoutExpired:

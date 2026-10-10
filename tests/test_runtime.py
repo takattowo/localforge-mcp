@@ -891,3 +891,76 @@ def test_path_locks_are_bounded_stripes(tmp_path):
         with server.cap._locked_paths([tmp_path / f"f{i}.txt"]):
             pass
     assert len(server.cap._path_locks) == 256
+
+
+def test_guarded_write_completes_fails_and_times_out():
+    from agent_runtime.server import _guarded_write
+    assert _guarded_write(lambda: None, 5) is True
+    def _broken():
+        raise BrokenPipeError("pipe gone")
+    assert _guarded_write(_broken, 5) is False
+    import time
+    def _stuck():
+        time.sleep(5)
+    assert _guarded_write(_stuck, 0.1) is False
+
+
+def test_run_stdio_bounds_pending_requests(tmp_path, monkeypatch):
+    import io
+    from agent_runtime import server as server_module
+    monkeypatch.setattr(server_module, "MAX_PENDING_REQUESTS", 2)
+    server = make(tmp_path)
+    slow = [sys.executable, "-c", "import time; time.sleep(1); print('done')"]
+    lines = [json.dumps({"jsonrpc": "2.0", "id": i, "method": "tools/call",
+                          "params": {"name": "execute", "arguments": {"command": slow}}})
+              for i in range(5)]
+
+    class _FakeStdin:
+        def __init__(self, data):
+            self.buffer = io.BytesIO(data)
+
+    monkeypatch.setattr(sys, "stdin", _FakeStdin(("\n".join(lines) + "\n").encode()))
+    out = io.StringIO()
+    monkeypatch.setattr(sys, "stdout", out)
+    server.run_stdio()
+    responses = [json.loads(line) for line in out.getvalue().splitlines()]
+    assert len(responses) == 5
+    rejected = [r for r in responses if r.get("error", {}).get("code") == -32603]
+    accepted = [r for r in responses if "result" in r]
+    assert len(rejected) == 3 and len(accepted) == 2
+    assert all("overloaded" in r["error"]["message"] for r in rejected)
+
+
+def test_process_write_times_out_on_full_stdin(tmp_path, monkeypatch):
+    from agent_runtime import processes as processes_module
+    monkeypatch.setattr(processes_module, "STDIN_WRITE_TIMEOUT_SECONDS", 0.5)
+    server = make(tmp_path)
+    child = [sys.executable, "-c", "import time; time.sleep(30)"]
+    server.processes.start(child, process_id="stdin-hog")
+    try:
+        with pytest.raises(RuntimeFault) as exc:
+            server.processes.write("stdin-hog", "x" * 1_000_000)
+        assert exc.value.code == "stdin_blocked"
+    finally:
+        server.processes.stop("stdin-hog", True)
+
+
+def test_job_adopt_is_best_effort():
+    import subprocess
+    from agent_runtime import job
+    if os.name != "nt":
+        job.adopt(0)
+        return
+    proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(2)"])
+    try:
+        job.adopt(proc.pid)
+    finally:
+        proc.kill()
+        proc.wait()
+
+
+def test_kill_children_on_exit_gates_adoption(tmp_path):
+    server = make(tmp_path, kill_children_on_exit=False)
+    assert server.cfg.kill_children_on_exit is False
+    out = server.cap.execute([sys.executable, "-c", "print('ok')"])
+    assert out["success"] and "ok" in out["stdout"]

@@ -20,6 +20,34 @@ from .todos import TodoStore
 
 PROTOCOL = "2025-06-18"
 MAX_BATCH_CALLS = 16
+STDOUT_WRITE_TIMEOUT_SECONDS = 30
+MAX_PENDING_REQUESTS = 128
+
+def _guarded_write(emit, timeout):
+    """Run emit() on a helper thread with a timeout.
+
+    Returns True when emit() completed, False when it failed
+    or is still blocked. A blocked helper stays blocked only
+    until the pipe drains or breaks, so a client that stops
+    reading cannot pin a worker thread forever.
+    """
+    done = threading.Event()
+    ok = False
+
+    def _run():
+        nonlocal ok
+        try:
+            emit()
+            ok = True
+        except (BrokenPipeError, OSError, ValueError):
+            ok = False
+        finally:
+            done.set()
+
+    threading.Thread(target=_run, daemon=True).start()
+    if not done.wait(timeout):
+        return False
+    return ok
 
 def _bare_tool_name(name):
     """Strip a host prefix from a tool name.
@@ -407,13 +435,32 @@ class Server:
         tools/call requests run in parallel instead of queueing behind the
         slowest call. Responses are matched to requests by id, so completion
         order does not matter; stdout writes are serialized per response.
+
+        Durability: stdout writes run on a helper thread with a timeout, so
+        a client that stops reading cannot pin a worker forever, and the
+        pending-request count is bounded so a request flood cannot grow
+        memory without limit. Once stdout is stuck or broken, the server
+        stops writing and exits when stdin closes.
         """
         write_lock = threading.Lock()
+        stdout_dead = False
 
         def _write(response):
-            with write_lock:
-                sys.stdout.write(json.dumps(response, separators=(",", ":")) + "\n")
-                sys.stdout.flush()
+            nonlocal stdout_dead
+            if stdout_dead:
+                return
+            payload = json.dumps(response, separators=(",", ":")) + "\n"
+
+            def _emit():
+                with write_lock:
+                    sys.stdout.write(payload)
+                    sys.stdout.flush()
+
+            if not _guarded_write(_emit, STDOUT_WRITE_TIMEOUT_SECONDS):
+                # The client is not draining stdout (or the pipe is
+                # broken): further writes would only pile up blocked
+                # helper threads, so stop writing for good.
+                stdout_dead = True
 
         def _notify(level, message):
             # MCP logging capability: surfaces tool-call
@@ -424,7 +471,11 @@ class Server:
 
         self._client_log = _notify
 
+        pending_lock = threading.Lock()
+        pending = 0
+
         def _handle(raw):
+            nonlocal pending
             request_id = None
             try:
                 request = json.loads(raw)
@@ -445,17 +496,55 @@ class Server:
                 response = {"jsonrpc": "2.0", "id": request_id, "error": {"code": -32603, "message": "Internal error"}}
             if response is not None:
                 _write(response)
+            with pending_lock:
+                pending -= 1
+
+        def _submit(raw):
+            # Bound the backlog: the pool queue is unbounded, so
+            # a client that pipelines faster than execution drains
+            # would grow memory without limit. Overloaded requests
+            # get an immediate error; notifications are dropped,
+            # as they expect no response anyway.
+            nonlocal pending
+            request_id = None
+            is_notification = False
+            try:
+                request = json.loads(raw)
+                if isinstance(request, dict):
+                    request_id = request.get("id")
+                    is_notification = "id" not in request
+            except ValueError:
+                pass
+            with pending_lock:
+                pending += 1
+                overloaded = pending > MAX_PENDING_REQUESTS
+            if overloaded:
+                with pending_lock:
+                    pending -= 1
+                if not is_notification:
+                    _write({"jsonrpc": "2.0", "id": request_id,
+                            "error": {"code": -32603, "message":
+                                      f"Server overloaded: more than {MAX_PENDING_REQUESTS} "
+                                      "requests pending. Slow down or raise max_concurrency."}})
+                return
+            try:
+                self.pool.submit(_handle, raw)
+            except RuntimeError:
+                with pending_lock:
+                    pending -= 1
 
         try:
             for raw in sys.stdin.buffer:
-                self.pool.submit(_handle, raw)
+                _submit(raw)
         except BaseException:
             # Abnormal exit (e.g. Ctrl+C): stop taking work and exit
             # without waiting for in-flight tool calls.
             self.pool.shutdown(wait=False, cancel_futures=True)
             raise
         # Clean EOF: let in-flight calls finish so their responses
-        # are written before the server exits.
+        # are written before the server exits. The backlog is
+        # bounded by MAX_PENDING_REQUESTS, so this cannot wait
+        # forever on a flooded queue.
         self.pool.shutdown(wait=True)
 
 

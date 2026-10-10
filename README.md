@@ -304,7 +304,7 @@ Supported `default_shell` values:
 - `cmd`
 - `sh`
 
-`execute.timeout` is seconds. `process.wait_ms` is milliseconds (max 60000). `limit_bytes`, `max_bytes`, and `max_file_read_bytes` are bytes. `filesystem offset` is a byte offset in legacy read mode; use `line_start`/`line_end` for line mode. `max_concurrency` bounds how many tool calls run in parallel (default 8). `log_to_client` (default false) emits an MCP logging notification per tool call (tool, duration, outcome) visible in the client; `LOCALFORGE_LOG=1` writes the same line to stderr. `replace_text` and `multi_edit` refuse files larger than `max_file_read_bytes` with `file_too_large`.
+`execute.timeout` is seconds. `process.wait_ms` is milliseconds (max 60000). `limit_bytes`, `max_bytes`, and `max_file_read_bytes` are bytes. `filesystem offset` is a byte offset in legacy read mode; use `line_start`/`line_end` for line mode. `max_concurrency` bounds how many tool calls run in parallel (default 8). `log_to_client` (default false) emits an MCP logging notification per tool call (tool, duration, outcome) visible in the client; `LOCALFORGE_LOG=1` writes the same line to stderr. `replace_text` and `multi_edit` refuse files larger than `max_file_read_bytes` with `file_too_large`. `kill_children_on_exit` (default true) puts every spawned child into a Windows Job Object that the kernel terminates when the server exits, however it exits; set it to false to let children outlive the server.
 
 ## Security model
 
@@ -326,6 +326,7 @@ For untrusted agents or repositories, run LocalForge MCP under a dedicated low-p
 
 - Windows-native process-tree behavior requires Windows testing; cross-platform tests cover portable logic.
 - Process state is in-memory and does not survive runtime restart.
+- Children die with the server however it exits on Windows (Job Object); on POSIX they die only on explicit stop/restart or clean exit.
 - Shell command network detection is intentionally conservative and cannot inspect arbitrary scripts.
 - File writes are atomic at replacement time but cannot preserve every filesystem-specific metadata attribute.
 - MCP transport is stdio only.

@@ -9,7 +9,10 @@ import threading
 import time
 import uuid
 from .errors import RuntimeFault
+from .job import adopt as job_adopt
 from .security import coerce_command, command_for_spawn, redact, safe_environment
+
+STDIN_WRITE_TIMEOUT_SECONDS = 30
 
 @dataclass
 class Chunk:
@@ -32,6 +35,11 @@ class Managed:
     bytes: int = 0
     next_seq: int = 1
     lock: threading.RLock = field(default_factory=threading.RLock)
+    stdin_lock: threading.Lock = field(default_factory=threading.Lock)
+    chunk_cond: threading.Condition = field(init=False)
+
+    def __post_init__(self):
+        self.chunk_cond = threading.Condition(self.lock)
 
 class ProcessManager:
     def __init__(self, cfg, paths, policy):
@@ -86,12 +94,16 @@ class ProcessManager:
                     while item.bytes > self.cfg.process_buffer_bytes and item.chunks:
                         old = item.chunks.popleft()
                         item.bytes -= old.raw_len
+                    item.chunk_cond.notify_all()
         finally:
             tail = decoder.decode(b"", final=True)
-            if tail:
-                with item.lock:
+            with item.lock:
+                if tail:
                     item.chunks.append(Chunk(item.next_seq, stream, redact(tail), time.time(), 0))
                     item.next_seq += 1
+                # Wake readers so a wait ends promptly when
+                # the stream closes, even without new chunks.
+                item.chunk_cond.notify_all()
             pipe.close()
 
     def start(self, command, cwd=None, shell=False, env=None, process_id=None):
@@ -106,6 +118,11 @@ class ProcessManager:
             if pid in self.items and self.items[pid].proc.poll() is None:
                 raise RuntimeFault("process_exists", f"Process id already active: {pid}")
             proc = self._popen(command, str(work), shell, env)
+            if self.cfg.kill_children_on_exit:
+                # Kernel-side cleanup: the child dies with
+                # this process however it dies, not just on
+                # a clean exit (see agent_runtime/job.py).
+                job_adopt(proc.pid)
             item = Managed(pid, proc, command, str(work), shell, env, time.time())
             self.items[pid] = item
         for stream, pipe in (("stdout", proc.stdout), ("stderr", proc.stderr)):
@@ -116,13 +133,18 @@ class ProcessManager:
         item = self._get(process_id)
         limit_bytes = max(1, min(int(limit_bytes), self.cfg.max_capture_bytes))
         deadline = time.monotonic() + min(max(int(wait_ms), 0), 60_000) / 1000
-        while time.monotonic() < deadline:
-            with item.lock:
+        # Wait on a condition notified by the pump threads
+        # instead of polling: readers wake the moment new
+        # chunks land, and idle waits cost no CPU.
+        with item.lock:
+            while time.monotonic() < deadline:
                 if any(c.seq > after for c in item.chunks):
                     break
-            time.sleep(0.05)
-        output, used, truncated = [], 0, False
-        with item.lock:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                item.chunk_cond.wait(remaining)
+            output, used, truncated = [], 0, False
             oldest = item.chunks[0].seq if item.chunks else item.next_seq
             lost = bool(after and after < oldest - 1)
             for chunk in item.chunks:
@@ -144,12 +166,35 @@ class ProcessManager:
         item = self._get(process_id)
         if item.proc.poll() is not None:
             raise RuntimeFault("process_exited", "Process already exited")
-        try:
-            data = (text + ("\n" if append_newline else "")).encode("utf-8")
-            item.proc.stdin.write(data)
-            item.proc.stdin.flush()
-        except (BrokenPipeError, OSError) as e:
-            raise RuntimeFault("stdin_closed", "Process stdin is closed") from e
+        data = (text + ("\n" if append_newline else "")).encode("utf-8")
+        # stdin is a pipe: a child that never drains it fills
+        # the buffer and blocks the write forever, pinning a
+        # worker. Write on a helper thread with a timeout; the
+        # helper stays blocked only until the child exits and
+        # the pipe breaks. Writes serialize per process.
+        with item.stdin_lock:
+            outcome: dict = {}
+
+            def _do_write():
+                try:
+                    item.proc.stdin.write(data)
+                    item.proc.stdin.flush()
+                    outcome["ok"] = True
+                except (BrokenPipeError, OSError) as e:
+                    outcome["error"] = e
+
+            writer = threading.Thread(target=_do_write, daemon=True)
+            writer.start()
+            writer.join(STDIN_WRITE_TIMEOUT_SECONDS)
+        if writer.is_alive():
+            raise RuntimeFault("stdin_blocked",
+                               f"Process did not drain stdin within "
+                               f"{STDIN_WRITE_TIMEOUT_SECONDS}s; the write "
+                               "may complete later or fail when the process exits.")
+        if "error" in outcome:
+            raise RuntimeFault("stdin_closed", "Process stdin is closed") from outcome["error"]
+        if "ok" not in outcome:
+            raise RuntimeFault("stdin_closed", "Process stdin is closed")
         return {"process_id": process_id, "written_bytes": len(data)}
 
     def _terminate_tree(self, item, force=False):
