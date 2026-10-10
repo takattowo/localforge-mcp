@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.8.0
+
+- Durability hardening for long-running sessions:
+  - `process write` and stdio responses now write on a helper thread with a 30s timeout (new `stdin_blocked` code); a child that never drains stdin, or a host that stops reading stdout, can no longer pin a worker thread forever.
+  - Pending stdio requests are bounded at 128: a request flood gets an immediate per-request error (`-32603`) instead of unbounded memory growth, and a clean EOF no longer waits on an unbounded backlog.
+  - Children are adopted into a Windows Job Object with kill-on-close (via `ctypes`, no dependencies): they die with the server however it exits — taskkill, crash, host restart after hibernation — not just on clean exit. Grandchildren join the job automatically. Set `kill_children_on_exit: false` to opt out. Off Windows, adoption is a no-op.
+  - `process read` waits on a condition variable instead of polling at 20 Hz; idle waits cost no CPU.
+  - Once stdout is stuck or broken, the server stops writing for good instead of silently failing every subsequent response.
+
 ## 1.7.0
 
 - MCP protocol bumped to 2025-06-18. `tools/call` results now carry `structuredContent` (the typed result object) alongside the text content, so clients that support it get typed results instead of parsing JSON text; the text form is unchanged for older clients.
