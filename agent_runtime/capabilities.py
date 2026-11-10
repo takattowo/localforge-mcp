@@ -55,6 +55,7 @@ DEFAULT_EXCLUDES = [".git/**", ".venv/**", "__pycache__/**", "node_modules/**", 
                     "target/**", "dist/**", "build/**", "*.egg-info/**"]
 
 MAX_BATCH_SEARCHES = 16
+MAX_READ_LINES = 2000
 BATCH_SEARCH_WORKERS = 8
 GIT_ROOT_TTL_SECONDS = 30
 PATH_LOCK_STRIPES = 256
@@ -202,23 +203,7 @@ class Capabilities:
             if not target.is_file():
                 raise RuntimeFault("not_file", f"Not a file: {target}")
             if line_start is not None or line_end is not None:
-                start = max(1, int(line_start or 1))
-                with target.open("rb") as handle:
-                    head = handle.read(8192)
-                    if b"\x00" in head:
-                        raise RuntimeFault("binary_file", "Binary file read is not supported")
-                try:
-                    text = target.read_text(encoding=encoding, errors="replace")
-                except OSError as e:
-                    _fs_error("read", target, e)
-                split = text.splitlines()
-                total = len(split)
-                end = min(int(line_end) if line_end is not None else total, total)
-                if end < start:
-                    raise RuntimeFault("invalid_arguments", "line_end must be >= line_start")
-                picked = [{"no": n, "text": line} for n, line in enumerate(split, 1) if start <= n <= end]
-                return {"path": str(target), "lines": picked, "line_start": start,
-                        "line_end": end, "total_lines": total, "truncated": total > end}
+                return self._read_lines(target, encoding, line_start, line_end)
             cap = min(int(max_bytes or self.cfg.max_file_read_bytes), self.cfg.max_file_read_bytes)
             offset = max(0, int(offset))
             with target.open("rb") as handle:
@@ -420,6 +405,47 @@ class Capabilities:
                     _fs_error("move", target, e)
             return {"source": str(target), "destination": str(dest)}
         raise RuntimeFault("invalid_action", f"Unknown filesystem action: {action}")
+
+    def _read_lines(self, target, encoding, line_start, line_end):
+        """Line-mode read as numbered text, one "N<TAB>line" per line.
+
+        Streams the file, so memory stays bounded however large it
+        is. Output stops at MAX_READ_LINES lines or max_read_chars,
+        and next_line says where to continue.
+        """
+        start = max(1, int(line_start or 1))
+        last = int(line_end) if line_end is not None else None
+        if last is not None and last < start:
+            raise RuntimeFault("invalid_arguments", "line_end must be >= line_start")
+        budget = int(self.cfg.max_read_chars)
+        try:
+            with target.open("rb") as handle:
+                if b"\x00" in handle.read(8192):
+                    raise RuntimeFault("binary_file", "Binary file read is not supported")
+            out, used, total, end, capped = [], 0, 0, start - 1, False
+            with target.open("r", encoding=encoding, errors="replace", newline="") as handle:
+                for total, line in enumerate(handle, 1):
+                    if total < start or capped or (last is not None and total > last):
+                        continue
+                    text = f"{total}\t" + line.rstrip("\r\n")
+                    if len(text) > budget:
+                        text = text[:budget] + " ...[line cut]"
+                    if out and (len(out) >= MAX_READ_LINES or used + len(text) + 1 > budget):
+                        capped = True
+                        continue
+                    out.append(text)
+                    used += len(text) + 1
+                    end = total
+        except OSError as e:
+            _fs_error("read", target, e)
+        if total and start > total:
+            raise RuntimeFault("invalid_arguments",
+                               f"line_start {start} is past the end of the file ({total} lines)")
+        result = {"path": str(target), "content": "\n".join(out), "line_start": start,
+                  "line_end": end, "total_lines": total, "truncated": total > end}
+        if total > end:
+            result["next_line"] = end + 1
+        return result
 
     @staticmethod
     def _read_text(target, encoding):
