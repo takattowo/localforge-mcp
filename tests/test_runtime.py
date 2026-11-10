@@ -1007,6 +1007,9 @@ def test_edits_preserve_line_endings(tmp_path):
     server.cap.filesystem("multi_edit", "crlf.txt",
                           edits=[{"old_text": "one\r\ntwo", "new_text": "1\n2"}])
     assert crlf.read_bytes() == b"1\r\n2\r\nthree\r\n"
+    with pytest.raises(RuntimeFault) as same:
+        server.cap.filesystem("replace_text", "crlf.txt", old_text="1\r\n", new_text="1\n")
+    assert same.value.code == "invalid_arguments"
     out = server.cap.filesystem("write", "crlf.txt", "a\nb\n")
     assert crlf.read_bytes() == b"a\r\nb\r\n" and out["bytes"] == 6
     out = server.cap.filesystem("write", "new.txt", "x\ny\n")
