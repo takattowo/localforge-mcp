@@ -106,8 +106,10 @@ class ProcessManager:
                 item.chunk_cond.notify_all()
             pipe.close()
 
-    def start(self, command, cwd=None, shell=False, env=None, process_id=None):
-        work = self.paths.resolve(cwd or ".", access="read", must_exist=True)
+    def start(self, command, cwd=None, shell=False, env=None, process_id=None, base_cwd=None):
+        # base_cwd is the runtime cwd; a relative or missing cwd
+        # resolves against it, like execute.
+        work = self.paths.resolve(cwd or ".", cwd=base_cwd, access="read", must_exist=True)
         command = coerce_command(command)
         shell = bool(shell or isinstance(command, str))
         self.policy.authorize_command(command, work, shell)

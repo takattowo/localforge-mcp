@@ -308,7 +308,7 @@ class Server:
         missing = [key for key in required_by_action[action] if key not in args]
         if missing:
             raise RuntimeFault("invalid_arguments", f"Process {action} requires: {', '.join(missing)}")
-        if action == "start": return self.processes.start(**args)
+        if action == "start": return self.processes.start(**args, base_cwd=self.cap.cwd)
         if action == "read": return self.processes.read(args.pop("process_id"), **args)
         if action == "write": return self.processes.write(args.pop("process_id"), args.pop("text"), **args)
         if action == "status": return self.processes.status(args["process_id"])
