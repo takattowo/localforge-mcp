@@ -149,7 +149,9 @@ def build_new(original, filepatch, rel, eol=None):
 
     cursor = 0
     for hunk in filepatch.hunks:
-        start = hunk.old_start - 1 if hunk.old_start > 0 else 0
+        # A zero-length old range (-N,0) inserts after line N, so it
+        # starts at index N; any other range starts at line N.
+        start = hunk.old_start if hunk.old_len == 0 else max(hunk.old_start - 1, 0)
         if start < cursor or start > len(lines):
             raise RuntimeFault("content_mismatch",
                                f"Patch hunk out of order in {rel}: {hunk.header}")
