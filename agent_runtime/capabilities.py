@@ -276,9 +276,11 @@ class Capabilities:
                     # An existing file keeps its line endings; a new
                     # file is written exactly as sent.
                     eol = None
-                    if target.is_file():
+                    try:
                         with target.open("r", encoding=encoding, errors="replace", newline="") as handle:
                             eol = _detect_eol(handle.read(65536))
+                    except FileNotFoundError:
+                        pass
                     target.parent.mkdir(parents=True, exist_ok=True)
                     written = self._atomic_write(target, data, encoding, eol)
                 except OSError as e:
@@ -298,22 +300,22 @@ class Capabilities:
             if old_text == new_text:
                 raise RuntimeFault("invalid_arguments", "old_text and new_text are identical; nothing would change")
             self._guard_file_size("replace_text", target)
+            expected = 1 if expected_occurrences is None else int(expected_occurrences)
             with self._locked_paths([target]):
                 try:
                     original, eol = self._read_text(target, encoding)
                 except OSError as e:
                     _fs_error("replace_text", target, e)
-                count = original.count(old_text)
-                expected = 1 if expected_occurrences is None else int(expected_occurrences)
-                if count != expected:
-                    raise RuntimeFault("content_mismatch", f"Expected {expected} occurrence(s), found {count}. "
-                        "Pass expected_occurrences to replace all of them at once.")
-                updated = original.replace(old_text, new_text)
+                updated, counts, write_eol = self._apply_edits(
+                    original, eol, [(old_text, new_text, expected)],
+                    lambda index, want, found: RuntimeFault(
+                        "content_mismatch", f"Expected {want} occurrence(s), found {found}. "
+                        "Pass expected_occurrences to replace all of them at once."))
                 try:
-                    written = self._atomic_write(target, updated, encoding, eol)
+                    written = self._atomic_write(target, updated, encoding, write_eol)
                 except OSError as e:
                     _fs_error("replace_text", target, e)
-            return {"path": str(target), "replacements": count, "bytes": written}
+            return {"path": str(target), "replacements": counts[0], "bytes": written}
         if action == "multi_edit":
             if not isinstance(edits, list) or not edits:
                 raise RuntimeFault("invalid_arguments",
@@ -330,39 +332,36 @@ class Capabilities:
                     raise RuntimeFault("invalid_arguments",
                                        f"edits[{index}] must be an object with "
                                        "old_text and new_text strings")
+            specs = []
+            for index, edit in enumerate(edits):
+                old, new = _lf(edit["old_text"]), _lf(edit["new_text"])
+                if old == new:
+                    raise RuntimeFault("invalid_arguments",
+                                       f"edits[{index}] old_text and new_text "
+                                       "are identical; nothing would change")
+                expected = edit.get("expected_occurrences")
+                specs.append((old, new, 1 if expected is None else int(expected)))
             with self._locked_paths([target]):
                 try:
                     original, eol = self._read_text(target, encoding)
                 except OSError as e:
                     _fs_error("multi_edit", target, e)
-                # Apply in order against the evolving content, but
-                # validate every edit before writing anything: a
+                # Edits apply in order against the evolving content and
+                # are all validated before anything is written: a
                 # failing edit leaves the file untouched, so a
                 # coherent multi-part change never lands half-applied.
-                content = original
-                applied = []
-                for index, edit in enumerate(edits):
-                    old, new = _lf(edit["old_text"]), _lf(edit["new_text"])
-                    if old == new:
-                        raise RuntimeFault("invalid_arguments",
-                                           f"edits[{index}] old_text and new_text "
-                                           "are identical; nothing would change")
-                    expected = edit.get("expected_occurrences")
-                    expected = 1 if expected is None else int(expected)
-                    count = content.count(old)
-                    if count != expected:
-                        raise RuntimeFault("content_mismatch",
-                                           f"edits[{index}]: expected {expected} "
-                                           f"occurrence(s), found {count}. Edits apply "
-                                           "in order, so earlier edits may have "
-                                           "changed the text; pass "
-                                           "expected_occurrences when it repeats.")
-                    content = content.replace(old, new)
-                    applied.append({"index": index, "replacements": count})
+                content, counts, write_eol = self._apply_edits(
+                    original, eol, specs,
+                    lambda index, want, found: RuntimeFault(
+                        "content_mismatch", f"edits[{index}]: expected {want} "
+                        f"occurrence(s), found {found}. Edits apply in order, so "
+                        "earlier edits may have changed the text; pass "
+                        "expected_occurrences when it repeats."))
                 try:
-                    written = self._atomic_write(target, content, encoding, eol)
+                    written = self._atomic_write(target, content, encoding, write_eol)
                 except OSError as e:
                     _fs_error("multi_edit", target, e)
+            applied = [{"index": index, "replacements": count} for index, count in enumerate(counts)]
             return {"path": str(target), "edits": applied, "bytes": written}
         if action == "apply_patch":
             if patch is None:
@@ -397,12 +396,14 @@ class Capabilities:
                             raise RuntimeFault("binary_file", "Binary file patch is not supported")
                         original = raw.decode(encoding, "replace")
                         eol = _detect_eol(original)
-                    planned.append((dest, build_patched(original, fp, rel), creating, eol))
+                    planned.append((dest, build_patched(original, fp, rel, eol), creating))
                 results = []
-                for dest, updated, creating, eol in planned:
+                for dest, updated, creating in planned:
                     try:
                         dest.parent.mkdir(parents=True, exist_ok=True)
-                        written = self._atomic_write(dest, updated, encoding, eol)
+                        # build_new keeps untouched lines byte-exact,
+                        # so the result is written verbatim.
+                        written = self._atomic_write(dest, updated, encoding)
                     except OSError as e:
                         _fs_error("apply_patch", dest, e)
                     results.append({"path": str(dest), "created": creating, "bytes": written})
@@ -442,9 +443,10 @@ class Capabilities:
     def _read_lines(self, target, encoding, line_start, line_end):
         """Line-mode read as numbered text, one "N<TAB>line" per line.
 
-        Streams the file, so memory stays bounded however large it
-        is. Output stops at MAX_READ_LINES lines or max_read_chars,
-        and next_line says where to continue.
+        Reads in bounded pieces, so memory stays bounded however long
+        a line or the file is, and stops at MAX_READ_LINES lines or
+        max_read_chars. next_line says where to continue; total_lines
+        appears only when the read reaches the end of the file.
         """
         start = max(1, int(line_start or 1))
         last = int(line_end) if line_end is not None else None
@@ -455,36 +457,85 @@ class Capabilities:
             with target.open("rb") as handle:
                 if b"\x00" in handle.read(8192):
                     raise RuntimeFault("binary_file", "Binary file read is not supported")
-            out, used, total, end, capped = [], 0, 0, start - 1, False
-            with target.open("r", encoding=encoding, errors="replace", newline="") as handle:
-                for total, line in enumerate(handle, 1):
-                    if total < start or capped or (last is not None and total > last):
+            out, used, n, end, more = [], 0, 0, start - 1, False
+            # newline="\n": only LF ends a line, like ripgrep, so a
+            # lone CR stays inside its line.
+            with target.open("r", encoding=encoding, errors="replace", newline="\n") as handle:
+                while True:
+                    line = handle.readline(budget + 1)
+                    if not line:
+                        break
+                    n += 1
+                    if not line.endswith("\n"):
+                        # Over-long line: skip the rest without
+                        # holding it in memory.
+                        while (rest := handle.readline(65536)) and not rest.endswith("\n"):
+                            pass
+                    if n < start:
                         continue
-                    text = f"{total}\t" + line.rstrip("\r\n")
+                    text = f"{n}\t" + line.rstrip("\r\n")
                     if len(text) > budget:
                         text = text[:max(0, budget - len(LINE_CUT))] + LINE_CUT
                     if out and (len(out) >= MAX_READ_LINES or used + len(text) + 1 > budget):
-                        capped = True
-                        continue
+                        more = True
+                        break
                     out.append(text)
                     used += len(text) + 1
-                    end = total
+                    end = n
+                    if last is not None and n >= last:
+                        more = bool(handle.read(1))
+                        break
         except OSError as e:
             _fs_error("read", target, e)
-        if start > max(total, 1):
+        if not more and start > max(n, 1):
             raise RuntimeFault("invalid_arguments",
-                               f"line_start {start} is past the end of the file ({total} lines)")
+                               f"line_start {start} is past the end of the file ({n} lines)")
         result = {"path": str(target), "content": "\n".join(out), "line_start": start,
-                  "line_end": end, "total_lines": total, "truncated": total > end}
-        if total > end:
+                  "line_end": end, "truncated": more}
+        if more:
             result["next_line"] = end + 1
+        else:
+            result["total_lines"] = n
         return result
 
     @staticmethod
     def _read_text(target, encoding):
-        """Read a file as LF text plus its dominant line ending."""
+        """Read a file as text, line endings untouched, plus its dominant ending."""
         text = target.read_bytes().decode(encoding)
-        return _lf(text), _detect_eol(text)
+        return text, _detect_eol(text)
+
+    @staticmethod
+    def _apply_edits(original, eol, edits, mismatch):
+        """Apply (old, new, expected) edits in order, all-or-nothing.
+
+        Edit strings arrive with LF line breaks. The first pass runs on
+        the file text as-is with the edits converted to its dominant
+        line ending, so untouched lines keep their exact bytes (mixed
+        endings, stray CRs) and the result is written verbatim. If
+        that pass does not match, the second runs on LF-normalized
+        text and the result is written back with the dominant ending.
+        Returns (content, counts, eol_for_write); mismatch(index,
+        expected, found) builds the error when neither pass matches.
+        """
+        def run(text, edit_eol):
+            counts = []
+            for index, (old, new, expected) in enumerate(edits):
+                if edit_eol == "\r\n":
+                    old, new = old.replace("\n", "\r\n"), new.replace("\n", "\r\n")
+                found = text.count(old)
+                if found != expected:
+                    return None, (index, expected, found)
+                text = text.replace(old, new)
+                counts.append(found)
+            return text, counts
+
+        content, counts = run(original, eol)
+        if content is not None:
+            return content, counts, None
+        content, counts = run(_lf(original), None)
+        if content is None:
+            raise mismatch(*counts)
+        return content, counts, eol
 
     @staticmethod
     def _atomic_write(target, data, encoding, eol=None):
@@ -662,10 +713,11 @@ class Capabilities:
 
     @staticmethod
     def _rg_context(events, i, step, limit):
-        # Walk only contiguous context events: begin/end events mark
-        # a file boundary, so context never bleeds into another file.
+        # Walk neighboring context and match lines, like the Python
+        # engine; begin/end events mark a file boundary, so context
+        # never bleeds into another file.
         lines, j = [], i + step
-        while 0 <= j < len(events) and len(lines) < limit and events[j].get("type") == "context":
+        while 0 <= j < len(events) and len(lines) < limit and events[j].get("type") in ("context", "match"):
             data = events[j]["data"]
             lines.append(f"{data['line_number']}\t" + data["lines"].get("text", "").rstrip("\r\n"))
             j += step
@@ -751,7 +803,12 @@ class Capabilities:
                             continue
                         handle.seek(0)
                         data = handle.read(max_size + 1)
-                    lines = data.decode("utf-8", "replace").splitlines()
+                    text = data.decode("utf-8", "replace")
+                    # Split on LF only, like ripgrep, so a lone CR or a
+                    # form feed does not shift line numbers.
+                    lines = [line[:-1] if line.endswith("\r") else line for line in text.split("\n")]
+                    if not text or text.endswith("\n"):
+                        lines.pop()
                     for number, line in enumerate(lines, 1):
                         if pattern is not None:
                             matched = pattern.search(line) is not None

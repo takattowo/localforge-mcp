@@ -114,35 +114,60 @@ def parse(text):
     return files
 
 
-def build_new(original, filepatch, rel):
-    # splitlines: patch files written on Windows carry CRLF while diff
-    # context uses LF. Output is LF; _atomic_write applies platform EOL.
-    lines = original.splitlines()
+def _split_lines(text):
+    """Split on LF only, keeping each line's ending.
+
+    str.splitlines also breaks on CR, form feed, and other separators,
+    which would misnumber lines and rewrite their endings.
+    """
+    parts = text.split("\n")
+    lines = [part + "\n" for part in parts[:-1]]
+    if parts[-1]:
+        lines.append(parts[-1])
+    return lines
+
+
+def _body(line):
+    body = line[:-1] if line.endswith("\n") else line
+    return body[:-1] if body.endswith("\r") else body
+
+
+def build_new(original, filepatch, rel, eol=None):
+    # Untouched lines keep their exact bytes; added lines take the
+    # file's dominant line ending (eol), LF when it has none. parse
+    # LF-normalizes patch text, so lines compare without endings.
+    newline = eol or "\n"
+    lines = _split_lines(original)
     out = []
-    last_nl = True
+
+    def emit(line):
+        # A line after one that lacks a newline (the old last line)
+        # needs a break between them.
+        if out and not out[-1].endswith("\n"):
+            out[-1] += newline
+        out.append(line)
+
     cursor = 0
     for hunk in filepatch.hunks:
         start = hunk.old_start - 1 if hunk.old_start > 0 else 0
         if start < cursor or start > len(lines):
             raise RuntimeFault("content_mismatch",
                                f"Patch hunk out of order in {rel}: {hunk.header}")
-        out.extend(lines[cursor:start])
+        for line in lines[cursor:start]:
+            emit(line)
         cursor = start
         for op, want, nl in zip(hunk.ops, hunk.texts, hunk.newlines):
             if op in (" ", "-"):
-                if cursor >= len(lines) or lines[cursor] != want:
-                    found = lines[cursor] if cursor < len(lines) else "<end of file>"
+                if cursor >= len(lines) or _body(lines[cursor]) != want:
+                    found = _body(lines[cursor]) if cursor < len(lines) else "<end of file>"
                     raise RuntimeFault("content_mismatch",
                                        f"Patch hunk failed in {rel}: {hunk.header} "
                                        f"(expected {want!r}, found {found!r})")
                 if op == " ":
-                    out.append(lines[cursor])
-                    last_nl = nl
+                    emit(lines[cursor])
                 cursor += 1
             else:
-                out.append(want)
-                last_nl = nl
-    out.extend(lines[cursor:])
-    if not out:
-        return ""
-    return "\n".join(out) + ("\n" if last_nl else "")
+                emit(want + (newline if nl else ""))
+    for line in lines[cursor:]:
+        emit(line)
+    return "".join(out)
