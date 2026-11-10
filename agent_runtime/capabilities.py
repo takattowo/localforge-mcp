@@ -32,6 +32,16 @@ def _fs_error(action, target, exc):
     raise
 
 
+def _lf(text: str):
+    return text.replace("\r\n", "\n")
+
+
+def _detect_eol(raw: bytes):
+    """Return the dominant line ending of raw file bytes; LF on a tie."""
+    crlf = raw.count(b"\r\n")
+    return "\r\n" if crlf > raw.count(b"\n") - crlf else "\n"
+
+
 def _clip(data: str, cap: int):
     raw = data.encode("utf-8")
     if len(raw) <= cap:
@@ -251,11 +261,17 @@ class Capabilities:
             data = content or ""
             with self._locked_paths([target]):
                 try:
+                    # An existing file keeps its line endings; a new
+                    # file is written exactly as sent.
+                    eol = None
+                    if target.is_file():
+                        with target.open("rb") as handle:
+                            eol = _detect_eol(handle.read(65536))
                     target.parent.mkdir(parents=True, exist_ok=True)
-                    self._atomic_write(target, data, encoding)
+                    written = self._atomic_write(target, data, encoding, eol)
                 except OSError as e:
                     _fs_error("write", target, e)
-            return {"path": str(target), "bytes": len(data.encode(encoding))}
+            return {"path": str(target), "bytes": written}
         if action == "replace_text":
             if not target.is_file():
                 raise RuntimeFault("not_file", f"Not a file: {target}")
@@ -264,9 +280,10 @@ class Capabilities:
             if old_text == new_text:
                 raise RuntimeFault("invalid_arguments", "old_text and new_text are identical; nothing would change")
             self._guard_file_size("replace_text", target)
+            old_text, new_text = _lf(old_text), _lf(new_text)
             with self._locked_paths([target]):
                 try:
-                    original = target.read_text(encoding=encoding)
+                    original, eol = self._read_text(target, encoding)
                 except OSError as e:
                     _fs_error("replace_text", target, e)
                 count = original.count(old_text)
@@ -276,10 +293,10 @@ class Capabilities:
                         "Pass expected_occurrences to replace all of them at once.")
                 updated = original.replace(old_text, new_text)
                 try:
-                    self._atomic_write(target, updated, encoding)
+                    written = self._atomic_write(target, updated, encoding, eol)
                 except OSError as e:
                     _fs_error("replace_text", target, e)
-            return {"path": str(target), "replacements": count, "bytes": len(updated.encode(encoding))}
+            return {"path": str(target), "replacements": count, "bytes": written}
         if action == "multi_edit":
             if not isinstance(edits, list) or not edits:
                 raise RuntimeFault("invalid_arguments",
@@ -298,7 +315,7 @@ class Capabilities:
                                        "old_text and new_text strings")
             with self._locked_paths([target]):
                 try:
-                    original = target.read_text(encoding=encoding)
+                    original, eol = self._read_text(target, encoding)
                 except OSError as e:
                     _fs_error("multi_edit", target, e)
                 # Apply in order against the evolving content, but
@@ -308,7 +325,7 @@ class Capabilities:
                 content = original
                 applied = []
                 for index, edit in enumerate(edits):
-                    old, new = edit["old_text"], edit["new_text"]
+                    old, new = _lf(edit["old_text"]), _lf(edit["new_text"])
                     if old == new:
                         raise RuntimeFault("invalid_arguments",
                                            f"edits[{index}] old_text and new_text "
@@ -326,11 +343,10 @@ class Capabilities:
                     content = content.replace(old, new)
                     applied.append({"index": index, "replacements": count})
                 try:
-                    self._atomic_write(target, content, encoding)
+                    written = self._atomic_write(target, content, encoding, eol)
                 except OSError as e:
                     _fs_error("multi_edit", target, e)
-            return {"path": str(target), "edits": applied,
-                    "bytes": len(content.encode(encoding))}
+            return {"path": str(target), "edits": applied, "bytes": written}
         if action == "apply_patch":
             if patch is None:
                 raise RuntimeFault("invalid_arguments", "apply_patch requires patch")
@@ -350,7 +366,7 @@ class Capabilities:
                     if creating:
                         if dest.exists():
                             raise RuntimeFault("invalid_arguments", f"Patch creates existing file: {dest}")
-                        original = ""
+                        original, eol = "", None
                     else:
                         if not dest.exists():
                             raise RuntimeFault("path_not_found", f"Path not found: {dest}")
@@ -362,17 +378,16 @@ class Capabilities:
                             _fs_error("apply_patch", dest, e)
                         if b"\x00" in raw[:8192]:
                             raise RuntimeFault("binary_file", "Binary file patch is not supported")
-                        original = raw.decode(encoding, "replace")
-                    planned.append((dest, build_patched(original, fp, rel), creating))
+                        original, eol = raw.decode(encoding, "replace"), _detect_eol(raw)
+                    planned.append((dest, build_patched(original, fp, rel), creating, eol))
                 results = []
-                for dest, updated, creating in planned:
+                for dest, updated, creating, eol in planned:
                     try:
                         dest.parent.mkdir(parents=True, exist_ok=True)
-                        self._atomic_write(dest, updated, encoding)
+                        written = self._atomic_write(dest, updated, encoding, eol)
                     except OSError as e:
                         _fs_error("apply_patch", dest, e)
-                    results.append({"path": str(dest), "created": creating,
-                                    "bytes": len(updated.encode(encoding))})
+                    results.append({"path": str(dest), "created": creating, "bytes": written})
             return {"base": str(target), "files": results}
         if action == "mkdir":
             with self._locked_paths([target]):
@@ -407,15 +422,33 @@ class Capabilities:
         raise RuntimeFault("invalid_action", f"Unknown filesystem action: {action}")
 
     @staticmethod
-    def _atomic_write(target, data, encoding):
+    def _read_text(target, encoding):
+        """Read a file as LF text plus its dominant line ending."""
+        raw = target.read_bytes()
+        return _lf(raw.decode(encoding)), _detect_eol(raw)
+
+    @staticmethod
+    def _atomic_write(target, data, encoding, eol=None):
+        """Write data atomically and return the bytes written.
+
+        eol "\n" or "\r\n" normalizes every line ending to it; None
+        writes data verbatim. Bytes are written directly, so Python
+        never translates LF to the platform line ending.
+        """
+        if eol is not None:
+            data = _lf(data)
+            if eol == "\r\n":
+                data = data.replace("\n", "\r\n")
+        raw = data.encode(encoding)
         fd, temp = tempfile.mkstemp(prefix=".localforge-", dir=target.parent)
         os.close(fd)
         try:
-            Path(temp).write_text(data, encoding=encoding)
+            Path(temp).write_bytes(raw)
             os.replace(temp, target)
         finally:
             if os.path.exists(temp):
                 os.unlink(temp)
+        return len(raw)
 
     def search(self, query=None, path=".", glob=None, exclude=None, case_sensitive=False,
                max_results=200, files_only=False, fixed_string=True, context_lines=0,

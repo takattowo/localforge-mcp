@@ -964,3 +964,29 @@ def test_kill_children_on_exit_gates_adoption(tmp_path):
     assert server.cfg.kill_children_on_exit is False
     out = server.cap.execute([sys.executable, "-c", "print('ok')"])
     assert out["success"] and "ok" in out["stdout"]
+
+
+def test_edits_preserve_line_endings(tmp_path):
+    server = make(tmp_path)
+    lf = tmp_path / "lf.txt"
+    crlf = tmp_path / "crlf.txt"
+    lf.write_bytes(b"one\ntwo\nthree\n")
+    crlf.write_bytes(b"one\r\ntwo\r\nthree\r\n")
+    out = server.cap.filesystem("replace_text", "lf.txt", old_text="two", new_text="TWO")
+    assert lf.read_bytes() == b"one\nTWO\nthree\n"
+    assert out["bytes"] == len(lf.read_bytes())
+    # old_text copied from a CRLF byte read still matches.
+    server.cap.filesystem("multi_edit", "crlf.txt",
+                          edits=[{"old_text": "one\r\ntwo", "new_text": "1\n2"}])
+    assert crlf.read_bytes() == b"1\r\n2\r\nthree\r\n"
+    out = server.cap.filesystem("write", "crlf.txt", "a\nb\n")
+    assert crlf.read_bytes() == b"a\r\nb\r\n" and out["bytes"] == 6
+    out = server.cap.filesystem("write", "new.txt", "x\ny\n")
+    assert (tmp_path / "new.txt").read_bytes() == b"x\ny\n" and out["bytes"] == 4
+    diff = "--- a/lf.txt\n+++ b/lf.txt\n@@ -1,3 +1,3 @@\n one\n-TWO\n+two\n three\n"
+    out = server.cap.filesystem("apply_patch", ".", patch=diff)
+    assert lf.read_bytes() == b"one\ntwo\nthree\n"
+    assert out["files"][0]["bytes"] == len(lf.read_bytes())
+    diff = "--- a/crlf.txt\n+++ b/crlf.txt\n@@ -1,2 +1,2 @@\n-a\n+A\n b\n"
+    server.cap.filesystem("apply_patch", ".", patch=diff)
+    assert crlf.read_bytes() == b"A\r\nb\r\n"
