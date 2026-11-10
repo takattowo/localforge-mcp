@@ -197,8 +197,11 @@ def test_read_lines_caps_output_and_streams(tmp_path):
     nxt = server.cap.filesystem("read", "long.txt", line_start=first["next_line"])
     assert nxt["content"].startswith(f"{first['next_line']}\trow {first['next_line']}")
     page = nxt
-    while "next_line" in page:
+    for _ in range(100):
+        if "next_line" not in page:
+            break
         page = server.cap.filesystem("read", "long.txt", line_start=page["next_line"])
+    assert "next_line" not in page
     assert page["total_lines"] == 100 and page["content"].endswith("100\trow 100")
     (tmp_path / "wide.txt").write_text("x" * 1000 + "\nshort\n")
     wide = server.cap.filesystem("read", "wide.txt", line_start=1)
@@ -1113,8 +1116,9 @@ def test_edits_count_matches_in_lf_view(tmp_path):
     with pytest.raises(RuntimeFault) as exc:
         server.cap.filesystem("replace_text", "twice.txt", old_text="x\ny", new_text="X\nY")
     assert exc.value.code == "content_mismatch" and "found 2" in exc.value.as_dict()["message"]
-    with pytest.raises(RuntimeFault):
+    with pytest.raises(RuntimeFault) as exc:
         server.cap.filesystem("multi_edit", "twice.txt", edits=[{"old_text": "x\ny", "new_text": "X\nY"}])
+    assert exc.value.code == "content_mismatch"
     assert twice.read_bytes() == b"x\r\ny\r\nz\r\nx\ny\n"
     # Matching half of a CRLF pair must not leave a stray CR.
     split = tmp_path / "split.txt"
@@ -1134,12 +1138,16 @@ def test_apply_patch_zero_context_insert(tmp_path):
     diff = "--- a/f.txt\n+++ b/f.txt\n@@ -2,0 +3 @@\n+X\n"
     server.cap.filesystem("apply_patch", ".", patch=diff)
     assert (tmp_path / "f.txt").read_bytes() == b"1\n2\nX\n3\n"
+    (tmp_path / "g.txt").write_bytes(b"1\n2\n3")
+    diff = "--- a/g.txt\n+++ b/g.txt\n@@ -3,0 +4 @@\n+X\n"
+    server.cap.filesystem("apply_patch", ".", patch=diff)
+    assert (tmp_path / "g.txt").read_bytes() == b"1\n2\n3\nX\n"
 
 
 def test_config_rejects_tiny_max_read_chars(tmp_path):
     path = tmp_path / "lf.json"
     path.write_text(json.dumps({"workspace_root": str(tmp_path), "max_read_chars": 20}))
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="at least 64"):
         Config.load(str(path))
 
 
