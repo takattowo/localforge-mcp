@@ -1154,8 +1154,9 @@ def test_search_folder_glob_and_exact_truncation(tmp_path, monkeypatch, engine):
     for folder in ("src", "other"):
         (tmp_path / folder).mkdir()
         (tmp_path / folder / "a.py").write_text("hit\nhit\n")
-    # The server runs from its own directory, not the search root, so a
-    # glob with a folder must still match against the root-relative path.
+    # Run from a different directory than the search root, as the server
+    # does, so a glob with a folder must still match the root-relative path.
+    monkeypatch.chdir(tmp_path / "other")
     found = server.cap.search("hit", glob=["src/*.py"])
     assert found["engine"] == engine
     assert {r["path"] for r in found["results"]} == {os.path.join("src", "a.py")}
@@ -1167,6 +1168,12 @@ def test_search_folder_glob_and_exact_truncation(tmp_path, monkeypatch, engine):
     assert len(over["results"]) == 1 and over["truncated"] is True
     one_file = server.cap.search("hit", path="src/a.py", max_results=2)
     assert len(one_file["results"]) == 2 and one_file["truncated"] is False
+    one_over = server.cap.search("hit", path="src/a.py", max_results=1)
+    assert len(one_over["results"]) == 1 and one_over["truncated"] is True
+    all_files = server.cap.search(files_only=True, max_results=2)
+    assert len(all_files["results"]) == 2 and all_files["truncated"] is False
+    cut_files = server.cap.search(files_only=True, max_results=1)
+    assert len(cut_files["results"]) == 1 and cut_files["truncated"] is True
 
 
 def test_config_rejects_tiny_max_read_chars(tmp_path):

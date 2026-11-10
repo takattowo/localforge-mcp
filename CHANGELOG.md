@@ -2,7 +2,7 @@
 
 ## 1.9.1
 
-- `search` globs with a folder (e.g. `src/*.py`, `src/**/*.cs`) now match with ripgrep. ripgrep matches such globs against the path relative to its working directory, and it ran from the server's directory instead of the search root, so they silently returned nothing.
+- `search` globs with a folder (e.g. `src/*.py`, `src/**/*.cs`) now match with ripgrep. ripgrep matches such globs against the path relative to its working directory, and it ran from the server's directory instead of the search root, so they silently returned nothing. Include and exclude globs (including the built-in excludes such as `node_modules/**`) are now relative to the search `path`; before, ripgrep ignored excludes unless the server happened to run from the search root.
 - `search` `truncated` is true only when results were actually cut, not whenever the result count equals `max_results`.
 
 ## 1.9.0
