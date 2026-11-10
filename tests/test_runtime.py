@@ -1230,6 +1230,14 @@ def test_search_globs_follow_ripgrep_rules(tmp_path, monkeypatch, engine):
     assert files(glob=["*\\.py"]) == ["a/src/x.py", "src/a.py", "src/deep/a.py"]
     # A class starting with ! may hold ]: [!]x] is any character but ] and x.
     assert files(glob=["[!]x]*.py"]) == ["src/a.py", "src/deep/a.py"]
+    # A folder-only exclude ending in ** hides only folders below it.
+    assert files(exclude=["src/**/"]) == ["a/src/x.py", "scripts/build", "src/a.py"]
+    assert files(exclude=["**/"]) == []
+    # Slashes alone: as an include nothing matches, as an exclude it is ignored.
+    assert files(glob=["/"]) == []
+    assert files(exclude=["/"]) == defaults
+    # A class can match "/" when its range covers it.
+    assert files(glob=["*/*[ -~]*"]) == ["a/src/x.py", "scripts/build", "src/a.py", "src/deep/a.py"]
 
 
 def test_python_glob_fallback_is_bounded(tmp_path, monkeypatch):
@@ -1240,7 +1248,7 @@ def test_python_glob_fallback_is_bounded(tmp_path, monkeypatch):
     deep.mkdir(parents=True)
     (deep / "z.txt").write_text("hit\n")
     started = time.monotonic()
-    for glob in ("*a*a*a*a*a*a*a*a*a*a*b", "**/x/**/x/**/x/**/x/**/x/**/y", "a********b"):
+    for glob in ("*a*a*a*a*a*a*a*a*a*a*b", "**/x/**/x/**/x/**/x/**/x/**/y", "a********b", "**/" * 10 + "y"):
         assert server.cap.search(files_only=True, glob=[glob])["results"] == []
     assert time.monotonic() - started < 2
     with pytest.raises(RuntimeFault) as exc:
@@ -1256,11 +1264,21 @@ def test_glob_atomic_form_matches_plain_translation():
     # Includes a negated class, which can match "/" and so must not be
     # folded into an atomic chunk (found by fuzzing).
     cases = [("a**[!a]b*[!a]", "abbbb/b/"), ("*a*b*", "xaybz"), ("**/x/**/y", "q/x/r/x/y"),
-             ("*[ab]?*c", "zbqqc"), ("**/a/b/**/c", "a/b/a/b/c")]
+             ("*[ab]?*c", "zbqqc"), ("**/a/b/**/c", "a/b/a/b/c"), ("x/*[ -~]*", "x/a/b"),
+             ("*[+-0]*", "-a/b"), ("**/**/b", "a/b"), ("a/**/**", "a/b/c")]
     for glob, path in cases:
         plain = re.compile("".join(rx for _, rx in _glob_tokens(glob)))
         fast = re.compile(_glob_body(glob))
         assert bool(plain.fullmatch(path)) == bool(fast.fullmatch(path)), (glob, path)
+        assert plain.fullmatch(path), (glob, path)
+    # Set-operation lookalikes in a class are literal, with no FutureWarning.
+    import warnings
+    from agent_runtime.capabilities import _glob_regex
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert _glob_regex("[a&&b|~]").fullmatch("&")
+    with pytest.raises(RuntimeFault):
+        _glob_regex("[z-a]")
 
 
 def test_config_rejects_tiny_max_read_chars(tmp_path):

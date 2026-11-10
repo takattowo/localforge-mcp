@@ -118,6 +118,9 @@ def _glob_tokens(glob):
         if (glob.startswith("**", i) and (i == 0 or glob[i - 1] == "/")
                 and (i + 2 == len(glob) or glob[i + 2] == "/")):
             last = i + 2 == len(glob)
+            if tokens and tokens[-1] == ("dstar", "(?:.*/)?"):
+                # **/** is **: a run of them would backtrack exponentially.
+                tokens.pop()
             tokens.append(("dstar", ".*" if last else "(?:.*/)?"))
             i += 2 if last else 3
             continue
@@ -133,11 +136,19 @@ def _glob_tokens(glob):
             tokens.append(("sep" if glob[i] == "/" else "lit", re.escape(glob[i])))
         elif c == "[" and (end := glob.find("]", i + (3 if glob[i + 1:i + 2] in ("!", "^") else 2))) != -1:
             # A ] right after [ or [! is part of the class.
-            body = glob[i + 1:end].replace("\\", "\\\\").replace("[", "\\[")
+            body = glob[i + 1:end].replace("\\", "\\\\")
+            # Escape what Python reads as nesting or set operations.
+            for ch in "[&~|":
+                body = body.replace(ch, "\\" + ch)
             if body[0] in "!^":
                 body = "^" + body[1:]
-            # A negated class can match "/" too.
-            tokens.append(("sep" if "/" in body or body[0] == "^" else "lit", "[" + body + "]"))
+            cls = "[" + body + "]"
+            try:
+                # A range or negation can cover "/" too ([ -~], [!a]).
+                spans_sep = re.fullmatch(cls, "/") is not None
+            except re.error:
+                spans_sep = False  # reported when the whole glob compiles
+            tokens.append(("sep" if spans_sep else "lit", cls))
             i = end
         else:
             tokens.append(("sep" if c == "/" else "lit", re.escape(c)))
@@ -181,21 +192,27 @@ def _glob_regex(pattern, folders=True):
     leading or inner slash anchors it to the search root, a trailing slash
     means a folder, ** spans any number of folders, {a,b} alternates, and
     matching is case-sensitive. Anchoring and the trailing slash are read
-    from the whole pattern before braces expand, as ripgrep does. Returns
-    None for an empty pattern, which ripgrep ignores; a folder-only
-    pattern never matches when folders is false (includes match files).
+    from the whole pattern before braces expand, as ripgrep does. A
+    folder-only pattern matches whatever lies inside a matching folder,
+    and never matches when folders is false (includes match files).
+    Returns None for a pattern ripgrep ignores: an empty one, or slashes
+    alone as an exclude; slashes alone as an include match nothing.
     """
     core = pattern.rstrip("/")
-    if not core.strip("/"):
+    if not pattern:
         return None
+    if not core.strip("/"):
+        return None if folders else _NEVER
     anchored = "/" in core
     core = core.lstrip("/")
+    suffix = ""
     if pattern.endswith("/"):
         if not folders:
             return _NEVER
-        core += "/**"
+        # Regex, not "/**": a**/ must not also match a's own files.
+        suffix = "/.*"
     prefix = "" if anchored else "(?:.*/)?"
-    parts = [prefix + _glob_body(glob) for glob in _expand_braces(core)]
+    parts = [prefix + _glob_body(glob) + suffix for glob in _expand_braces(core)]
     try:
         return re.compile("(?:" + "|".join(parts) + ")")
     except re.error as e:
