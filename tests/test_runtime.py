@@ -154,7 +154,7 @@ def test_search_defaults_and_guards(tmp_path, monkeypatch):
     assert os.path.join("src", "hit.py") in paths
     assert not any(".venv" in p for p in paths)
     assert not any("big.py" in p for p in paths)
-    assert "**/.git/**" in content["applied_excludes"]
+    assert "**/.git/" in content["applied_excludes"]
     ctx = server.cap.search("UserService", path="src/hit.py", context_lines=1)
     assert ctx["results"][0]["line"] == 2
     assert ctx["results"][0]["before"] == ["1\tline one"]
@@ -491,7 +491,7 @@ def test_search_single_file_with_rg(tmp_path):
     out = server.cap.search("UserService", path="a.txt")
     assert out["engine"] == "ripgrep"
     assert len(out["results"]) == 1 and out["results"][0]["line"] == 1
-    assert "**/.git/**" in out["applied_excludes"]
+    assert "**/.git/" in out["applied_excludes"]
 
 
 def test_execute_timeout_above_default_warns(tmp_path):
@@ -1213,6 +1213,54 @@ def test_search_globs_follow_ripgrep_rules(tmp_path, monkeypatch, engine):
     # A single-file search reads only that file, not same-named files below it.
     one = server.cap.search("hit", path="src/a.py")
     assert [Path(r["path"]).as_posix() for r in one["results"]] == ["src/a.py"]
+    # An explicit file path ignores excludes, as in ripgrep.
+    kept = server.cap.search("hit", path="src/a.py", exclude=["*.py"])
+    assert [Path(r["path"]).as_posix() for r in kept["results"]] == ["src/a.py"]
+    defaults = ["a/src/x.py", "scripts/build", "src/a.py", "src/deep/a.py", "src/deep/er/y.cs"]
+    # A trailing slash means a folder: the file scripts/build stays.
+    assert files(exclude=["build/"]) == defaults
+    assert files(exclude=["build"]) == [p for p in defaults if p != "scripts/build"]
+    # A folder-only include matches no file; an empty glob is ignored.
+    assert files(glob=["src/"]) == []
+    assert files(glob=[""]) == defaults
+    # A slash anywhere in a brace pattern anchors every alternative.
+    assert files(glob=["{src/*.py,*.cs}"]) == ["src/a.py"]
+    # A backslash escapes the next character; it is not a separator.
+    assert files(glob=["src\\*.py"]) == []
+    assert files(glob=["*\\.py"]) == ["a/src/x.py", "src/a.py", "src/deep/a.py"]
+    # A class starting with ! may hold ]: [!]x] is any character but ] and x.
+    assert files(glob=["[!]x]*.py"]) == ["src/a.py", "src/deep/a.py"]
+
+
+def test_python_glob_fallback_is_bounded(tmp_path, monkeypatch):
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    server = make(tmp_path)
+    (tmp_path / ("a" * 40 + ".txt")).write_text("hit\n")
+    deep = tmp_path.joinpath(*["x"] * 30)
+    deep.mkdir(parents=True)
+    (deep / "z.txt").write_text("hit\n")
+    started = time.monotonic()
+    for glob in ("*a*a*a*a*a*a*a*a*a*a*b", "**/x/**/x/**/x/**/x/**/x/**/y", "a********b"):
+        assert server.cap.search(files_only=True, glob=[glob])["results"] == []
+    assert time.monotonic() - started < 2
+    with pytest.raises(RuntimeFault) as exc:
+        server.cap.search(files_only=True, glob=["{a,b}" * 8])
+    assert exc.value.code == "invalid_arguments"
+    # Many single-choice groups expand once and must not recurse.
+    assert server.cap.search(files_only=True, glob=["{a}" * 2000])["results"] == []
+
+
+def test_glob_atomic_form_matches_plain_translation():
+    import re
+    from agent_runtime.capabilities import _glob_body, _glob_tokens
+    # Includes a negated class, which can match "/" and so must not be
+    # folded into an atomic chunk (found by fuzzing).
+    cases = [("a**[!a]b*[!a]", "abbbb/b/"), ("*a*b*", "xaybz"), ("**/x/**/y", "q/x/r/x/y"),
+             ("*[ab]?*c", "zbqqc"), ("**/a/b/**/c", "a/b/a/b/c")]
+    for glob, path in cases:
+        plain = re.compile("".join(rx for _, rx in _glob_tokens(glob)))
+        fast = re.compile(_glob_body(glob))
+        assert bool(plain.fullmatch(path)) == bool(fast.fullmatch(path)), (glob, path)
 
 
 def test_config_rejects_tiny_max_read_chars(tmp_path):

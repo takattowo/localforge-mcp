@@ -2,9 +2,10 @@
 
 ## 1.9.2
 
-- The default excludes (`.git`, `.venv`, `__pycache__`, `node_modules`, `.hg`, `target`, `dist`, `build`, `*.egg-info`) now apply at any depth under ripgrep, e.g. `packages/web/node_modules`. ripgrep reads a glob with a slash as anchored to the search root, so they only covered the top level. They are now reported as `**/node_modules/**` etc. in `applied_excludes`.
-- The Python search fallback now matches globs like ripgrep `-g` instead of `Path.match`: a glob with a folder is anchored to the search root (`src/*.py` no longer matches `a/src/x.py`), `**` spans any number of folders on every Python version, `{a,b}` alternates, matching is case-sensitive on Windows too, and a bare-name exclude hides matching folders at any depth.
-- A single-file search with the Python fallback reads only that file; it used to also search same-named files in subfolders.
+- The default excludes (`.git`, `.venv`, `__pycache__`, `node_modules`, `.hg`, `target`, `dist`, `build`, `*.egg-info`) now apply at any depth under ripgrep, e.g. `packages/web/node_modules`. ripgrep reads a glob with a slash as anchored to the search root, so they only covered the top level. They are now reported as `**/node_modules/` etc. in `applied_excludes`; the trailing slash makes ripgrep skip those folders instead of walking them, and keeps files with those names.
+- The Python search fallback now matches globs like ripgrep `-g` instead of `Path.match`: a glob with a folder is anchored to the search root (`src/*.py` no longer matches `a/src/x.py`), `**` spans any number of folders on every Python version, `{a,b}` alternates (a slash anywhere in the pattern anchors every alternative), matching is case-sensitive on Windows too, a bare-name exclude hides matching folders at any depth, a folder-only include (`src/`) matches no file, an empty glob is ignored, and `[!]x]` is a class. Each verified against ripgrep 15.1.0.
+- The Python fallback's glob matching runs in linear time: star and `**` chunks are matched atomically, so patterns like `*a*a*a*a*a*a*a*a*a*a*b` no longer take seconds per path. A glob that expands to more than 64 brace alternatives is rejected with `invalid_arguments`.
+- A single-file search with the Python fallback reads only that file, and ignores excludes like ripgrep does for an explicit path; it used to also search same-named files in subfolders.
 
 ## 1.9.1
 
