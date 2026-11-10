@@ -97,7 +97,7 @@ SCHEMAS = {
         "max_results": {"type": "integer", "description": "Result cap 1..5000, default 200."},
         "files_only": {"type": "boolean", "description": "List matching filenames; takes no query."},
         "fixed_string": {"type": "boolean", "description": "Literal match when true, regex when false, default true."},
-        "context_lines": {"type": "integer", "description": "Surrounding lines per match, clamped 0..5, ignored with files_only."},
+        "context_lines": {"type": "integer", "description": "Surrounding lines per match, clamped 0..5, ignored with files_only. Returned as before/after lists of 'N<TAB>line'."},
         "include_hidden": {"type": "boolean", "description": "Search hidden files, default false."},
         "max_file_size_bytes": {"type": "integer", "description": "Skip larger files, default 1000000, must be positive."}}},
     "git": {"type": "object", "properties": {
@@ -159,7 +159,7 @@ SCHEMAS = {
 DESCRIPTIONS = {
     "workspace": "Inspect workspace and Git root, or change runtime current directory.",
     "filesystem": "Policy-checked real filesystem operations: line or byte reads, paginated lists, atomic writes, guarded text replacement, multi_edit for several exact replacements per file (all-or-nothing), policy-checked copy. Prefer write, replace_text, multi_edit, and apply_patch for file edits instead of shelling out to python or shell commands.",
-    "search": "Repository text or filename search with glob filters, default ignores, and context lines.",
+    "search": "Repository text or filename search with glob filters, default ignores, and context lines. Result paths under the runtime cwd are relative to it.",
     "git": "Common structured Git operations plus a generic argument-array action.",
     "execute": "Run a bounded foreground process with structured output; argv arrays preferred. For long waits or polling, use the process tool instead of a long-timeout execute. Do not edit files with it; prefer the filesystem write, replace_text, or apply_patch actions.",
     "process": "Manage long-running processes with stable IDs, split streams, cursors, stdin, restart, and tree stop. For file edits, prefer the filesystem write, replace_text, or apply_patch actions.",
