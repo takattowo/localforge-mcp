@@ -1277,8 +1277,20 @@ def test_glob_atomic_form_matches_plain_translation():
     with warnings.catch_warnings():
         warnings.simplefilter("error")
         assert _glob_regex("[a&&b|~]").fullmatch("&")
-    with pytest.raises(RuntimeFault):
+        # A dash next to a dash still reads as a range: [+--] is + to -,
+        # [--0] is - to 0 (so it covers "." and "/").
+        plus_dash = _glob_regex("[+--]")
+        assert plus_dash.fullmatch(",") and not plus_dash.fullmatch(".")
+        dash_zero = _glob_regex("[--0]")
+        assert dash_zero.fullmatch(".") and not dash_zero.fullmatch("1")
+        assert _glob_regex("[a-]").fullmatch("-") and _glob_regex("[-a]").fullmatch("-")
+    with pytest.raises(RuntimeFault) as exc:
         _glob_regex("[z-a]")
+    assert exc.value.code == "invalid_arguments"
+    # A folder-only exclude ending in ** hides what is below a folder,
+    # never a top-level file.
+    assert _glob_regex("**/").fullmatch("f.txt") is None
+    assert _glob_regex("**/").fullmatch("a/f.txt")
 
 
 def test_config_rejects_tiny_max_read_chars(tmp_path):
