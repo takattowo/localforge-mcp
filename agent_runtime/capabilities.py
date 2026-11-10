@@ -281,10 +281,10 @@ class Capabilities:
                 raise RuntimeFault("not_file", f"Not a file: {target}")
             if old_text is None or new_text is None:
                 raise RuntimeFault("invalid_arguments", "replace_text requires old_text and new_text")
+            old_text, new_text = _lf(old_text), _lf(new_text)
             if old_text == new_text:
                 raise RuntimeFault("invalid_arguments", "old_text and new_text are identical; nothing would change")
             self._guard_file_size("replace_text", target)
-            old_text, new_text = _lf(old_text), _lf(new_text)
             with self._locked_paths([target]):
                 try:
                     original, eol = self._read_text(target, encoding)
