@@ -78,59 +78,124 @@ def _clip_ends(data: str, cap: int):
     return f"{head}\n...[{cut} bytes cut]...\n{tail}", True
 
 # **/ makes each one apply at any depth: ripgrep reads a glob with a
-# slash as anchored to the search root, like a .gitignore line.
-DEFAULT_EXCLUDES = ["**/.git/**", "**/.venv/**", "**/__pycache__/**", "**/node_modules/**", "**/.hg/**",
-                    "**/target/**", "**/dist/**", "**/build/**", "**/*.egg-info/**"]
+# slash as anchored to the search root, like a .gitignore line. The
+# trailing slash means a folder, so ripgrep skips the whole folder
+# instead of walking it, and a file named like one is kept.
+DEFAULT_EXCLUDES = ["**/.git/", "**/.venv/", "**/__pycache__/", "**/node_modules/", "**/.hg/",
+                    "**/target/", "**/dist/", "**/build/", "**/*.egg-info/"]
+
+# Brace alternatives multiply; patterns come from the agent.
+MAX_GLOB_EXPANSIONS = 64
+_NEVER = re.compile(r"(?!)")
 
 
 def _expand_braces(pattern):
-    """Expand {a,b} alternatives, innermost first, into plain globs."""
-    match = re.search(r"\{([^{}]*)\}", pattern)
-    if not match:
-        return [pattern]
-    head, tail = pattern[:match.start()], pattern[match.end():]
-    return [out for alt in match.group(1).split(",") for out in _expand_braces(head + alt + tail)]
+    """Expand {a,b} alternatives into plain globs, at most MAX_GLOB_EXPANSIONS."""
+    done, todo = [], [pattern]
+    while todo:
+        current = todo.pop()
+        match = re.search(r"\{([^{}]*)\}", current)
+        if not match:
+            done.append(current)
+        else:
+            head, tail = current[:match.start()], current[match.end():]
+            todo.extend(head + alt + tail for alt in match.group(1).split(","))
+        if len(done) + len(todo) > MAX_GLOB_EXPANSIONS:
+            raise RuntimeFault("invalid_arguments",
+                               f"Glob {pattern!r} expands to more than {MAX_GLOB_EXPANSIONS} patterns")
+    return done
 
 
-def _glob_regex(pattern):
+def _glob_tokens(glob):
+    """Split one brace-free glob into (kind, regex) tokens.
+
+    kind is "star" (*), "dstar" (**), "sep" (anything that can match
+    "/") or "lit" (anything matching one non-"/" character).
+    """
+    tokens, i = [], 0
+    while i < len(glob):
+        c = glob[i]
+        if (glob.startswith("**", i) and (i == 0 or glob[i - 1] == "/")
+                and (i + 2 == len(glob) or glob[i + 2] == "/")):
+            last = i + 2 == len(glob)
+            tokens.append(("dstar", ".*" if last else "(?:.*/)?"))
+            i += 2 if last else 3
+            continue
+        if c == "*":
+            # A run of stars inside a folder name is one star.
+            while i + 1 < len(glob) and glob[i + 1] == "*":
+                i += 1
+            tokens.append(("star", "[^/]*"))
+        elif c == "?":
+            tokens.append(("lit", "[^/]"))
+        elif c == "\\" and i + 1 < len(glob):
+            i += 1
+            tokens.append(("sep" if glob[i] == "/" else "lit", re.escape(glob[i])))
+        elif c == "[" and (end := glob.find("]", i + (3 if glob[i + 1:i + 2] in ("!", "^") else 2))) != -1:
+            # A ] right after [ or [! is part of the class.
+            body = glob[i + 1:end].replace("\\", "\\\\").replace("[", "\\[")
+            if body[0] in "!^":
+                body = "^" + body[1:]
+            # A negated class can match "/" too.
+            tokens.append(("sep" if "/" in body or body[0] == "^" else "lit", "[" + body + "]"))
+            i = end
+        else:
+            tokens.append(("sep" if c == "/" else "lit", re.escape(c)))
+        i += 1
+    return tokens
+
+
+def _glob_body(glob):
+    """Translate one brace-free glob to a regex that cannot blow up.
+
+    A star followed by fixed text and then another star in the same
+    folder name, or a ** followed by fixed folders and then another **,
+    only needs the earliest match of that text: the next star can absorb
+    anything after it. Committing to it with an atomic group keeps the
+    match time linear instead of exponential in the number of stars.
+    """
+    tokens = _glob_tokens(glob)
+    out, k = [], 0
+    while k < len(tokens):
+        kind, rx = tokens[k]
+        middle_dstar = kind == "dstar" and rx != ".*"
+        if kind == "star" or middle_dstar:
+            fixed = ("lit",) if kind == "star" else ("lit", "sep")
+            j = k + 1
+            while j < len(tokens) and tokens[j][0] in fixed:
+                j += 1
+            if j > k + 1 and j < len(tokens) and tokens[j][0] == kind:
+                lead = "[^/]*?" if kind == "star" else "(?:.*?/)??"
+                out.append("(?>" + lead + "".join(r for _, r in tokens[k + 1:j]) + ")")
+                k = j
+                continue
+        out.append(rx)
+        k += 1
+    return "".join(out)
+
+
+def _glob_regex(pattern, folders=True):
     """Compile a glob the way ripgrep -g reads it, for root-relative posix paths.
 
     Like a .gitignore line: a glob with no slash matches at any depth, a
     leading or inner slash anchors it to the search root, a trailing slash
     means a folder, ** spans any number of folders, {a,b} alternates, and
-    matching is case-sensitive.
+    matching is case-sensitive. Anchoring and the trailing slash are read
+    from the whole pattern before braces expand, as ripgrep does. Returns
+    None for an empty pattern, which ripgrep ignores; a folder-only
+    pattern never matches when folders is false (includes match files).
     """
-    parts = []
-    for glob in _expand_braces(pattern):
-        core = glob.rstrip("/")
-        anchored = "/" in core
-        core = core.lstrip("/")
-        if glob.endswith("/"):
-            core += "/**"
-        out, i = [], 0
-        while i < len(core):
-            c = core[i]
-            if (core.startswith("**", i) and (i == 0 or core[i - 1] == "/")
-                    and (i + 2 == len(core) or core[i + 2] == "/")):
-                out.append(".*" if i + 2 == len(core) else "(?:.*/)?")
-                i += 2 if i + 2 == len(core) else 3
-                continue
-            if c == "*":
-                out.append("[^/]*")
-            elif c == "?":
-                out.append("[^/]")
-            elif c == "\\" and i + 1 < len(core):
-                out.append(re.escape(core[i + 1]))
-                i += 1
-            elif c == "[" and core.find("]", i + 2) != -1:
-                end = core.find("]", i + 2)
-                body = core[i + 1:end].replace("\\", "\\\\")
-                out.append("[" + ("^" + body[1:] if body.startswith("!") else body) + "]")
-                i = end
-            else:
-                out.append(re.escape(c))
-            i += 1
-        parts.append(("" if anchored else "(?:.*/)?") + "".join(out))
+    core = pattern.rstrip("/")
+    if not core.strip("/"):
+        return None
+    anchored = "/" in core
+    core = core.lstrip("/")
+    if pattern.endswith("/"):
+        if not folders:
+            return _NEVER
+        core += "/**"
+    prefix = "" if anchored else "(?:.*/)?"
+    parts = [prefix + _glob_body(glob) for glob in _expand_braces(core)]
     try:
         return re.compile("(?:" + "|".join(parts) + ")")
     except re.error as e:
@@ -841,8 +906,10 @@ class Capabilities:
     def _search_python(root, query, includes, excludes, case_sensitive, maximum, files_only, fixed_string, context, max_size, include_hidden):
         results = []
         pattern = Capabilities._compile_fallback(query, fixed_string, case_sensitive) if query is not None else None
-        include_res = [_glob_regex(p) for p in includes]
-        exclude_res = [_glob_regex(p) for p in excludes]
+        include_res = [r for r in (_glob_regex(p, folders=False) for p in includes) if r is not None]
+        excluded = [r for r in (_glob_regex(p) for p in excludes) if r is not None]
+        # One combined regex: one match per path instead of one per exclude.
+        exclude_re = re.compile("|".join(f"(?:{r.pattern})" for r in excluded)) if excluded else None
         # root is a file for a single-file search: read only that file.
         for item in ([root] if root.is_file() else root.rglob("*")):
             if not item.is_file():
@@ -855,11 +922,13 @@ class Capabilities:
                     continue
             except OSError:
                 continue
-            # Excludes follow .gitignore: a matching folder hides all it holds.
-            segments = rel.split("/")
-            ancestors = ["/".join(segments[:n]) for n in range(1, len(segments) + 1)]
-            if any(r.fullmatch(path) for r in exclude_res for path in ancestors):
-                continue
+            # Excludes follow .gitignore: a matching folder hides all it
+            # holds. An explicit file path ignores them, as in ripgrep.
+            if exclude_re is not None and item != root:
+                segments = rel.split("/")
+                ancestors = ("/".join(segments[:n]) for n in range(1, len(segments) + 1))
+                if any(exclude_re.fullmatch(path) for path in ancestors):
+                    continue
             if include_res and not any(r.fullmatch(rel) for r in include_res):
                 continue
             if files_only:
