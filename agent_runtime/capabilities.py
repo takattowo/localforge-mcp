@@ -51,6 +51,25 @@ def _clip(data: str, cap: int):
         cut = cut[:-1]
     return cut, True
 
+
+def _clip_ends(data: str, cap: int):
+    """Clip data to cap UTF-8 bytes, keeping the head and the tail.
+
+    Builds and test runs usually print the decisive lines last, so a
+    head-only cut hides them. Tiny caps fall back to head-only.
+    """
+    raw = data.encode("utf-8")
+    if len(raw) <= cap:
+        return data, False
+    if cap < 400:
+        return _clip(data, cap)
+    head, _ = _clip(data, cap // 4)
+    head_len = len(head.encode("utf-8"))
+    # 64 bytes is room for the cut marker below.
+    tail = raw[len(raw) - (cap - head_len - 64):].decode("utf-8", "ignore")
+    cut = len(raw) - head_len - len(tail.encode("utf-8"))
+    return f"{head}\n...[{cut} bytes cut]...\n{tail}", True
+
 DEFAULT_EXCLUDES = [".git/**", ".venv/**", "__pycache__/**", "node_modules/**", ".hg/**",
                     "target/**", "dist/**", "build/**", "*.egg-info/**"]
 
@@ -813,8 +832,8 @@ class Capabilities:
             err = ("[no output captured on stdout/stderr; the child may have written directly "
                    "to the console or died during startup (e.g. missing environment)]")
         cap = self.cfg.max_capture_bytes
-        out, out_cut = _clip(out, cap)
-        err, err_cut = _clip(err, cap)
+        out, out_cut = _clip_ends(out, cap)
+        err, err_cut = _clip_ends(err, cap)
         result = {"success": proc.returncode == 0 and error_type is None, "command": command, "cwd": str(work),
                 "exit_code": proc.returncode, "stdout": out, "stderr": err,
                 "stdout_truncated": out_cut, "stderr_truncated": err_cut,

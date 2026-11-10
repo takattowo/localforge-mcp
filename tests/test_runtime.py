@@ -1014,6 +1014,14 @@ def test_edits_preserve_line_endings(tmp_path):
     assert crlf.read_bytes() == b"A\r\nb\r\n"
 
 
+def test_execute_clip_keeps_head_and_tail(tmp_path):
+    server = make(tmp_path, max_capture_bytes=1000)
+    out = server.cap.execute([sys.executable, "-c", "print('HEAD' + 'x' * 5000 + 'TAIL')"])
+    assert out["stdout_truncated"] and len(out["stdout"].encode("utf-8")) <= 1000
+    assert out["stdout"].startswith("HEAD") and out["stdout"].rstrip().endswith("TAIL")
+    assert "bytes cut]" in out["stdout"]
+
+
 @pytest.mark.parametrize("engine", ["ripgrep", "python"])
 def test_search_context_numbered_and_per_file(tmp_path, monkeypatch, engine):
     if engine == "ripgrep" and not shutil.which("rg"):
