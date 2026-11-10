@@ -1023,6 +1023,24 @@ def test_edits_preserve_line_endings(tmp_path):
     assert crlf.read_bytes() == b"A\r\nb\r\n"
 
 
+def test_eol_detection_edge_cases(tmp_path):
+    server = make(tmp_path)
+    wide = tmp_path / "wide.txt"
+    wide.write_bytes("one\r\ntwo\r\n".encode("utf-16"))
+    server.cap.filesystem("replace_text", "wide.txt", old_text="two", new_text="TWO", encoding="utf-16")
+    assert wide.read_bytes().decode("utf-16") == "one\r\nTWO\r\n"
+    out = server.cap.filesystem("write", "wide.txt", "a\nb\n", encoding="utf-16")
+    assert wide.read_bytes().decode("utf-16") == "a\r\nb\r\n" and out["eol"] == "CRLF"
+    # No line break yet: nothing to preserve, so content is written as sent.
+    single = tmp_path / "single.txt"
+    single.write_bytes(b"solo")
+    out = server.cap.filesystem("write", "single.txt", "a\r\nb")
+    assert single.read_bytes() == b"a\r\nb" and "eol" not in out
+    (tmp_path / "empty.txt").write_text("")
+    with pytest.raises(RuntimeFault):
+        server.cap.filesystem("read", "empty.txt", line_start=2)
+
+
 def test_execute_clip_keeps_head_and_tail(tmp_path):
     server = make(tmp_path, max_capture_bytes=1000)
     out = server.cap.execute([sys.executable, "-c", "print('HEAD' + 'x' * 5000 + 'TAIL')"])
@@ -1048,7 +1066,7 @@ def test_search_context_numbered_and_per_file(tmp_path, monkeypatch, engine):
     # Outside the runtime cwd, paths stay absolute.
     (tmp_path / "sub").mkdir()
     server.cap.workspace("set_cwd", "sub")
-    assert any(Path(r["path"]).is_absolute() for r in server.cap.search("hit", path="..")["results"])
+    assert all(Path(r["path"]).is_absolute() for r in server.cap.search("hit", path="..")["results"])
 
 
 def test_commands_resolve_cwd_against_runtime_cwd(tmp_path):

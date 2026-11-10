@@ -2,9 +2,10 @@
 
 ## 1.9.0
 
-- Edits keep line endings: `write` (existing file), `replace_text`, `multi_edit`, and `apply_patch` preserve the file's dominant line ending instead of converting LF files to CRLF on Windows. New files are written exactly as sent. `old_text`/`new_text` copied from a CRLF byte read still match. Reported `bytes` are now the bytes actually written.
+- Breaking response shapes: line-mode `read` returns `content` instead of `lines`; search context returns `before`/`after` instead of `context`; `process read` returns `stdout`/`stderr` instead of `chunks` unless `format: "chunks"`; `structuredContent` is opt-in. Clients that parse the old fields must update.
+- Edits keep line endings: `write` (existing file), `replace_text`, `multi_edit`, and `apply_patch` preserve the file's dominant line ending instead of converting LF files to CRLF on Windows. New files, and files with no line break yet, are written exactly as sent. Detection runs on decoded text, so UTF-16 files work. `write` reports the kept ending as `eol`; delete the file first to change it. `old_text`/`new_text` copied from a CRLF byte read still match. Reported `bytes` are now the bytes actually written.
 - `execute`, `git`, and `process start` resolve a missing or relative `cwd` against the runtime cwd (`set_cwd`). `process start` used to run in the workspace root.
-- Line-mode `read` streams the file (bounded memory, no `max_file_read_bytes` limit) and returns numbered text in `content` (one `N<TAB>line` per line) instead of a `lines` array of objects. Output stops at 2000 lines or `max_read_chars` (default 60000); `next_line` says where to continue. Over-long lines are cut.
+- Line-mode `read` reads line by line (no whole-file load, no `max_file_read_bytes` limit) and returns numbered text in `content` (one `N<TAB>line` per line) instead of a `lines` array of objects. Output stops at 2000 lines or `max_read_chars` (default 60000); `next_line` says where to continue. Over-long lines are cut.
 - Search context comes back as `before`/`after` lists of `N<TAB>line` instead of one unlabeled `context` list, and ripgrep context no longer bleeds across file boundaries. Result paths under the runtime cwd are relative to it.
 - `execute` output over `max_capture_bytes` keeps the head and the tail (where build and test errors usually are) with a cut marker, instead of the head only.
 - `process read` returns `stdout`/`stderr` strings by default; `format: "chunks"` keeps the previous per-chunk shape.
