@@ -1144,6 +1144,31 @@ def test_apply_patch_zero_context_insert(tmp_path):
     assert (tmp_path / "g.txt").read_bytes() == b"1\n2\n3\nX\n"
 
 
+@pytest.mark.parametrize("engine", ["ripgrep", "python"])
+def test_search_folder_glob_and_exact_truncation(tmp_path, monkeypatch, engine):
+    if engine == "ripgrep" and not shutil.which("rg"):
+        pytest.skip("ripgrep unavailable")
+    if engine == "python":
+        monkeypatch.setattr(shutil, "which", lambda name: None)
+    server = make(tmp_path)
+    for folder in ("src", "other"):
+        (tmp_path / folder).mkdir()
+        (tmp_path / folder / "a.py").write_text("hit\nhit\n")
+    # The server runs from its own directory, not the search root, so a
+    # glob with a folder must still match against the root-relative path.
+    found = server.cap.search("hit", glob=["src/*.py"])
+    assert found["engine"] == engine
+    assert {r["path"] for r in found["results"]} == {os.path.join("src", "a.py")}
+    files = server.cap.search(files_only=True, glob=["src/*.py"])
+    assert [r["path"] for r in files["results"]] == [os.path.join("src", "a.py")]
+    exact = server.cap.search("hit", path="src", max_results=2)
+    assert len(exact["results"]) == 2 and exact["truncated"] is False
+    over = server.cap.search("hit", path="src", max_results=1)
+    assert len(over["results"]) == 1 and over["truncated"] is True
+    one_file = server.cap.search("hit", path="src/a.py", max_results=2)
+    assert len(one_file["results"]) == 2 and one_file["truncated"] is False
+
+
 def test_config_rejects_tiny_max_read_chars(tmp_path):
     path = tmp_path / "lf.json"
     path.write_text(json.dumps({"workspace_root": str(tmp_path), "max_read_chars": 20}))
