@@ -514,7 +514,8 @@ class Capabilities:
         its dominant line ending; that result is used, and written
         verbatim, only when it makes the same change, so untouched
         lines keep their exact bytes (mixed endings, stray CRs) but it
-        can never pick a different occurrence or split a CRLF pair.
+        never produces a different result in the LF view or splits a
+        CRLF pair.
         Otherwise the normalized result is written back with the
         dominant ending.
         Returns (content, counts, eol_for_write); mismatch(index,
