@@ -858,11 +858,14 @@ def test_todo_schema_steers_task_tracking(tmp_path):
     assert "restarts" in tools["todo"]["description"]
 
 
-def test_tools_call_includes_structured_content(tmp_path):
-    server = make(tmp_path)
-    resp = server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-                          "params": {"name": "workspace", "arguments": {"action": "get"}}})
-    result = resp["result"]
+def test_tools_call_structured_content_is_opt_in(tmp_path):
+    call = {"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+            "params": {"name": "workspace", "arguments": {"action": "get"}}}
+    plain = make(tmp_path).handle(call)["result"]
+    assert "structuredContent" not in plain
+    text = plain["content"][0]["text"]
+    assert json.loads(text)["workspace_root"] == str(tmp_path) and ", " not in text
+    result = make(tmp_path, structured_content=True).handle(call)["result"]
     assert result["structuredContent"]["workspace_root"] == str(tmp_path)
     assert json.loads(result["content"][0]["text"]) == result["structuredContent"]
 
