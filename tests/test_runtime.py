@@ -86,9 +86,10 @@ def test_process_lifecycle_restart_duplicate_and_concurrency(tmp_path):
     for process_id in ids:
         output = server.processes.read(process_id, wait_ms=1000)
         assert "ready" in output["stdout"] and "chunks" not in output
-    chunked = server.processes.read(ids[0], format="chunks")
+    chunked = server.call("process", {"action": "read", "process_id": ids[0], "format": "chunks"})
     assert "ready" in "".join(c["text"] for c in chunked["chunks"]) and "stdout" not in chunked
-    with pytest.raises(RuntimeFault): server.processes.read(ids[0], format="bogus")
+    with pytest.raises(RuntimeFault):
+        server.call("process", {"action": "read", "process_id": ids[0], "format": "bogus"})
     restarted = server.processes.restart("worker-0")
     assert restarted["process_id"] == "worker-0"
     for process_id in ids: server.processes.stop(process_id, True)
@@ -192,7 +193,7 @@ def test_read_lines_caps_output_and_streams(tmp_path):
     first = server.cap.filesystem("read", "long.txt", line_start=1)
     assert first["truncated"] is True and len(first["content"]) <= 200
     assert first["content"].startswith("1\trow 1\n2\trow 2")
-    assert first["total_lines"] == 100
+    assert "total_lines" not in first
     nxt = server.cap.filesystem("read", "long.txt", line_start=first["next_line"])
     assert nxt["content"].startswith(f"{first['next_line']}\trow {first['next_line']}")
     (tmp_path / "wide.txt").write_text("x" * 1000 + "\nshort\n")
@@ -1039,6 +1040,64 @@ def test_eol_detection_edge_cases(tmp_path):
     (tmp_path / "empty.txt").write_text("")
     with pytest.raises(RuntimeFault):
         server.cap.filesystem("read", "empty.txt", line_start=2)
+
+
+def test_edits_keep_untouched_line_bytes(tmp_path):
+    server = make(tmp_path)
+    mixed = tmp_path / "mixed.txt"
+    mixed.write_bytes(b"one\ntwo\r\nthree\r\nfour\r\n")
+    server.cap.filesystem("replace_text", "mixed.txt", old_text="four", new_text="4")
+    assert mixed.read_bytes() == b"one\ntwo\r\nthree\r\n4\r\n"
+    stray = tmp_path / "stray.txt"
+    stray.write_bytes(b"a\r\r\nb\r\n")
+    server.cap.filesystem("multi_edit", "stray.txt", edits=[{"old_text": "b", "new_text": "B"}])
+    assert stray.read_bytes() == b"a\r\r\nB\r\n"
+    # An edit spanning a minority line ending falls back to normalized text.
+    mixed.write_bytes(b"a\r\nb\nc\r\nd\r\n")
+    server.cap.filesystem("replace_text", "mixed.txt", old_text="b\nc", new_text="B\nC")
+    assert mixed.read_bytes() == b"a\r\nB\r\nC\r\nd\r\n"
+    mixed.write_bytes(b"one\ntwo\r\nthree\r\nfour\r\n")
+    diff = "--- a/mixed.txt\n+++ b/mixed.txt\n@@ -2,3 +2,3 @@\n two\n-three\n+THREE\n four\n"
+    server.cap.filesystem("apply_patch", ".", patch=diff)
+    assert mixed.read_bytes() == b"one\ntwo\r\nTHREE\r\nfour\r\n"
+    feed = tmp_path / "feed.txt"
+    feed.write_bytes(b"a\x0cb\nc\n")
+    diff = "--- a/feed.txt\n+++ b/feed.txt\n@@ -1,2 +1,2 @@\n a\x0cb\n-c\n+C\n"
+    server.cap.filesystem("apply_patch", ".", patch=diff)
+    assert feed.read_bytes() == b"a\x0cb\nC\n"
+    tail = tmp_path / "tail.txt"
+    tail.write_bytes(b"one\ntwo")
+    diff = "--- a/tail.txt\n+++ b/tail.txt\n@@ -1,2 +1,3 @@\n one\n two\n+three\n"
+    server.cap.filesystem("apply_patch", ".", patch=diff)
+    assert tail.read_bytes() == b"one\ntwo\nthree\n"
+
+
+def test_read_lines_bounded_and_lf_only(tmp_path):
+    server = make(tmp_path, max_read_chars=50)
+    (tmp_path / "cr.txt").write_bytes(b"a\rb\nc\n")
+    out = server.cap.filesystem("read", "cr.txt", line_start=1)
+    assert out["content"] == "1\ta\rb\n2\tc" and out["total_lines"] == 2
+    (tmp_path / "huge.txt").write_bytes(b"y" * 1_000_000 + b"\nafter\n")
+    first = server.cap.filesystem("read", "huge.txt", line_start=1, line_end=1)
+    assert first["content"].endswith("...[line cut]") and len(first["content"]) <= 50
+    assert first["truncated"] and first["next_line"] == 2 and "total_lines" not in first
+    second = server.cap.filesystem("read", "huge.txt", line_start=2)
+    assert second["content"] == "2\tafter" and second["total_lines"] == 2
+
+
+@pytest.mark.parametrize("engine", ["ripgrep", "python"])
+def test_search_context_near_matches_and_lone_cr(tmp_path, monkeypatch, engine):
+    if engine == "ripgrep" and not shutil.which("rg"):
+        pytest.skip("ripgrep unavailable")
+    if engine == "python":
+        monkeypatch.setattr(shutil, "which", lambda name: None)
+    server = make(tmp_path)
+    (tmp_path / "a.txt").write_bytes(b"x\ry\nhit\nhit\nz\n")
+    out = server.cap.search("hit", context_lines=1)
+    assert out["engine"] == engine
+    first, second = out["results"]
+    assert first["line"] == 2 and first["before"] == ["1\tx\ry"] and first["after"] == ["3\thit"]
+    assert second["line"] == 3 and second["before"] == ["2\thit"] and second["after"] == ["4\tz"]
 
 
 def test_execute_clip_keeps_head_and_tail(tmp_path):

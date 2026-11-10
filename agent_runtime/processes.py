@@ -131,8 +131,8 @@ class ProcessManager:
             threading.Thread(target=self._pump, args=(item, pipe, stream), daemon=True).start()
         return self.status(pid)
 
-    def read(self, process_id, after=0, limit_bytes=200_000, wait_ms=0, format="text"):
-        if format not in {"text", "chunks"}:
+    def read(self, process_id, after=0, limit_bytes=200_000, wait_ms=0, fmt="text"):
+        if fmt not in {"text", "chunks"}:
             raise RuntimeFault("invalid_arguments", "format must be 'text' or 'chunks'")
         item = self._get(process_id)
         limit_bytes = max(1, min(int(limit_bytes), self.cfg.max_capture_bytes))
@@ -165,7 +165,7 @@ class ProcessManager:
             "cursor_lost": lost, "truncated": truncated,
             "next_after": output[-1]["seq"] if output else after,
         }
-        if format == "chunks":
+        if fmt == "chunks":
             result["chunks"] = output
         else:
             # One string per stream: far fewer tokens than a JSON
