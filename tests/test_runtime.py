@@ -196,6 +196,10 @@ def test_read_lines_caps_output_and_streams(tmp_path):
     assert "total_lines" not in first
     nxt = server.cap.filesystem("read", "long.txt", line_start=first["next_line"])
     assert nxt["content"].startswith(f"{first['next_line']}\trow {first['next_line']}")
+    page = nxt
+    while "next_line" in page:
+        page = server.cap.filesystem("read", "long.txt", line_start=page["next_line"])
+    assert page["total_lines"] == 100 and page["content"].endswith("100\trow 100")
     (tmp_path / "wide.txt").write_text("x" * 1000 + "\nshort\n")
     wide = server.cap.filesystem("read", "wide.txt", line_start=1)
     assert wide["content"].endswith("...[line cut]") and wide["next_line"] == 2
@@ -1073,13 +1077,13 @@ def test_edits_keep_untouched_line_bytes(tmp_path):
 
 
 def test_read_lines_bounded_and_lf_only(tmp_path):
-    server = make(tmp_path, max_read_chars=50)
+    server = make(tmp_path, max_read_chars=64)
     (tmp_path / "cr.txt").write_bytes(b"a\rb\nc\n")
     out = server.cap.filesystem("read", "cr.txt", line_start=1)
     assert out["content"] == "1\ta\rb\n2\tc" and out["total_lines"] == 2
     (tmp_path / "huge.txt").write_bytes(b"y" * 1_000_000 + b"\nafter\n")
     first = server.cap.filesystem("read", "huge.txt", line_start=1, line_end=1)
-    assert first["content"].endswith("...[line cut]") and len(first["content"]) <= 50
+    assert first["content"].endswith("...[line cut]") and len(first["content"]) <= 64
     assert first["truncated"] and first["next_line"] == 2 and "total_lines" not in first
     second = server.cap.filesystem("read", "huge.txt", line_start=2)
     assert second["content"] == "2\tafter" and second["total_lines"] == 2
@@ -1098,6 +1102,45 @@ def test_search_context_near_matches_and_lone_cr(tmp_path, monkeypatch, engine):
     first, second = out["results"]
     assert first["line"] == 2 and first["before"] == ["1\tx\ry"] and first["after"] == ["3\thit"]
     assert second["line"] == 3 and second["before"] == ["2\thit"] and second["after"] == ["4\tz"]
+
+
+def test_edits_count_matches_in_lf_view(tmp_path):
+    server = make(tmp_path)
+    # Two matches in the LF view the agent reads; only one has the
+    # dominant ending. Must be a mismatch, not a silent edit of one.
+    twice = tmp_path / "twice.txt"
+    twice.write_bytes(b"x\r\ny\r\nz\r\nx\ny\n")
+    with pytest.raises(RuntimeFault) as exc:
+        server.cap.filesystem("replace_text", "twice.txt", old_text="x\ny", new_text="X\nY")
+    assert exc.value.code == "content_mismatch" and "found 2" in exc.value.as_dict()["message"]
+    with pytest.raises(RuntimeFault):
+        server.cap.filesystem("multi_edit", "twice.txt", edits=[{"old_text": "x\ny", "new_text": "X\nY"}])
+    assert twice.read_bytes() == b"x\r\ny\r\nz\r\nx\ny\n"
+    # Matching half of a CRLF pair must not leave a stray CR.
+    split = tmp_path / "split.txt"
+    split.write_bytes(b"a\nfoo\r\nbar\nbaz\n")
+    server.cap.filesystem("replace_text", "split.txt", old_text="\nbar", new_text=" bar")
+    assert split.read_bytes() == b"a\nfoo bar\nbaz\n"
+    cr = tmp_path / "cr.txt"
+    cr.write_bytes(b"foo\r\nbar\r\n")
+    with pytest.raises(RuntimeFault):
+        server.cap.filesystem("replace_text", "cr.txt", old_text="foo\r", new_text="FOO")
+    assert cr.read_bytes() == b"foo\r\nbar\r\n"
+
+
+def test_apply_patch_zero_context_insert(tmp_path):
+    server = make(tmp_path)
+    (tmp_path / "f.txt").write_bytes(b"1\n2\n3\n")
+    diff = "--- a/f.txt\n+++ b/f.txt\n@@ -2,0 +3 @@\n+X\n"
+    server.cap.filesystem("apply_patch", ".", patch=diff)
+    assert (tmp_path / "f.txt").read_bytes() == b"1\n2\nX\n3\n"
+
+
+def test_config_rejects_tiny_max_read_chars(tmp_path):
+    path = tmp_path / "lf.json"
+    path.write_text(json.dumps({"workspace_root": str(tmp_path), "max_read_chars": 20}))
+    with pytest.raises(ValueError):
+        Config.load(str(path))
 
 
 def test_execute_clip_keeps_head_and_tail(tmp_path):

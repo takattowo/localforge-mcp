@@ -508,14 +508,17 @@ class Capabilities:
     def _apply_edits(original, eol, edits, mismatch):
         """Apply (old, new, expected) edits in order, all-or-nothing.
 
-        Edit strings arrive with LF line breaks. The first pass runs on
-        the file text as-is with the edits converted to its dominant
-        line ending, so untouched lines keep their exact bytes (mixed
-        endings, stray CRs) and the result is written verbatim. If
-        that pass does not match, the second runs on LF-normalized
-        text and the result is written back with the dominant ending.
+        Edit strings arrive with LF line breaks. The LF-normalized view
+        is what the agent reads, so it decides match counts and errors.
+        The same edits also run on the file text as-is, converted to
+        its dominant line ending; that result is used, and written
+        verbatim, only when it makes the same change, so untouched
+        lines keep their exact bytes (mixed endings, stray CRs) but it
+        can never pick a different occurrence or split a CRLF pair.
+        Otherwise the normalized result is written back with the
+        dominant ending.
         Returns (content, counts, eol_for_write); mismatch(index,
-        expected, found) builds the error when neither pass matches.
+        expected, found) builds the error when the LF view does not match.
         """
         def run(text, edit_eol):
             counts = []
@@ -529,13 +532,13 @@ class Capabilities:
                 counts.append(found)
             return text, counts
 
-        content, counts = run(original, eol)
-        if content is not None:
-            return content, counts, None
-        content, counts = run(_lf(original), None)
-        if content is None:
+        normalized, counts = run(_lf(original), None)
+        if normalized is None:
             raise mismatch(*counts)
-        return content, counts, eol
+        exact, _ = run(original, eol)
+        if exact is not None and _lf(exact) == normalized:
+            return exact, counts, None
+        return normalized, counts, eol
 
     @staticmethod
     def _atomic_write(target, data, encoding, eol=None):

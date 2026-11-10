@@ -65,6 +65,9 @@ class Config:
         for name in ("default_timeout_seconds", "max_capture_bytes", "max_file_read_bytes", "max_read_chars", "process_buffer_bytes", "process_ttl_seconds", "max_processes", "max_concurrency"):
             if int(getattr(cfg, name)) <= 0:
                 raise ValueError(f"{name} must be positive")
+        if int(cfg.max_read_chars) < 64:
+            # Room for a line number plus the line-cut marker.
+            raise ValueError("max_read_chars must be at least 64")
         if not cfg.state_file:
             cfg.state_file = str(Path(cfg.config_path).parent / ".localforge-state.json")
         return cfg
