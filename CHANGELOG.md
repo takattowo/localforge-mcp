@@ -1,5 +1,15 @@
 # Changelog
 
+## 1.9.0
+
+- Edits keep line endings: `write` (existing file), `replace_text`, `multi_edit`, and `apply_patch` preserve the file's dominant line ending instead of converting LF files to CRLF on Windows. New files are written exactly as sent. `old_text`/`new_text` copied from a CRLF byte read still match. Reported `bytes` are now the bytes actually written.
+- `execute`, `git`, and `process start` resolve a missing or relative `cwd` against the runtime cwd (`set_cwd`). `process start` used to run in the workspace root.
+- Line-mode `read` streams the file (bounded memory, no `max_file_read_bytes` limit) and returns numbered text in `content` (one `N<TAB>line` per line) instead of a `lines` array of objects. Output stops at 2000 lines or `max_read_chars` (default 60000); `next_line` says where to continue. Over-long lines are cut.
+- Search context comes back as `before`/`after` lists of `N<TAB>line` instead of one unlabeled `context` list, and ripgrep context no longer bleeds across file boundaries. Result paths under the runtime cwd are relative to it.
+- `execute` output over `max_capture_bytes` keeps the head and the tail (where build and test errors usually are) with a cut marker, instead of the head only.
+- `process read` returns `stdout`/`stderr` strings by default; `format: "chunks"` keeps the previous per-chunk shape.
+- Tool results use compact JSON. `structuredContent` is opt-in (`structured_content: true`): Quick showed both copies on failed calls.
+
 ## 1.8.0
 
 - Durability hardening for long-running sessions:

@@ -21,13 +21,13 @@ You operate through the localforge-mcp tools on Windows. Follow these rules exac
 NEVER edit files by shelling out. Do not use `execute`, `process`, or any code-execution channel (python, python -c, pwsh/powershell scripts, cmd batch files, sed, awk, echo/`>` redirection, tee, or any script that rewrites files) to create, rewrite, or patch files. The filesystem actions are atomic and policy-checked; shell edits bypass both and can corrupt files mid-write. This prohibition is absolute — there is no exception for "just appending a line" or "just renaming".
 
 ## Reading and searching
-- `filesystem` action `read` with line_start/line_end for line ranges (returns line numbers); `list` for directories; `stat` for metadata.
+- `filesystem` action `read` with line_start/line_end for line ranges (returns numbered text, one 'N<TAB>line' per line, up to 2000 lines; continue from next_line); `list` for directories; `stat` for metadata.
 - `search` for content (query, glob, context_lines) or filenames (files_only=true).
 
 ## Commands
 - Prefer argv arrays: {"command": ["npm", "test"]}. A string command runs through PowerShell — fine for one-liners, but avoid complex quoting.
 - Complex scripts: write the script with `filesystem` action `write`, then run it by path (python script.py, powershell -ExecutionPolicy Bypass -File script.ps1).
-- Long waits: `process` action `start` + `read` with after/next_after polling. Do not use long `execute` timeouts — they block the server and risk gateway timeouts.
+- Long waits: `process` action `start` + `read` with wait_ms and after/next_after polling (output arrives as stdout/stderr strings). Do not use long `execute` timeouts — they block the server and risk gateway timeouts.
 
 ## Git
 - Presets: status, diff, log, show, branch, root. Anything else: {"action": "run", "args": [...]}.
