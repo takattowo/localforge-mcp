@@ -136,13 +136,22 @@ def _glob_tokens(glob):
             tokens.append(("sep" if glob[i] == "/" else "lit", re.escape(glob[i])))
         elif c == "[" and (end := glob.find("]", i + (3 if glob[i + 1:i + 2] in ("!", "^") else 2))) != -1:
             # A ] right after [ or [! is part of the class.
-            body = glob[i + 1:end].replace("\\", "\\\\")
-            # Escape what Python reads as nesting or set operations.
-            for ch in "[&~|":
-                body = body.replace(ch, "\\" + ch)
-            if body[0] in "!^":
-                body = "^" + body[1:]
-            cls = "[" + body + "]"
+            body = glob[i + 1:end]
+            negate = body[0] in "!^"
+            if negate:
+                body = body[1:]
+            # Rebuild with every character escaped, so Python reads none of
+            # them as nesting, a set operation or an escape; only a bare "-"
+            # between two characters makes a range, as before.
+            items, j = [], 0
+            while j < len(body):
+                if j + 2 < len(body) and body[j + 1] == "-":
+                    items.append(re.escape(body[j]) + "-" + re.escape(body[j + 2]))
+                    j += 3
+                else:
+                    items.append(re.escape(body[j]))
+                    j += 1
+            cls = "[" + ("^" if negate else "") + "".join(items) + "]"
             try:
                 # A range or negation can cover "/" too ([ -~], [!a]).
                 spans_sep = re.fullmatch(cls, "/") is not None
