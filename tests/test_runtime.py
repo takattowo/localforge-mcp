@@ -990,3 +990,20 @@ def test_edits_preserve_line_endings(tmp_path):
     diff = "--- a/crlf.txt\n+++ b/crlf.txt\n@@ -1,2 +1,2 @@\n-a\n+A\n b\n"
     server.cap.filesystem("apply_patch", ".", patch=diff)
     assert crlf.read_bytes() == b"A\r\nb\r\n"
+
+
+def test_commands_resolve_cwd_against_runtime_cwd(tmp_path):
+    server = make(tmp_path)
+    (tmp_path / "sub" / "inner").mkdir(parents=True)
+    server.cap.workspace("set_cwd", "sub")
+    code = [sys.executable, "-c", "import os; print(os.getcwd())"]
+    pid = server.call("process", {"action": "start", "command": code})["process_id"]
+    try:
+        out = server.processes.read(pid, wait_ms=5000)
+        printed = "".join(c["text"] for c in out["chunks"]).strip()
+        assert printed.endswith("sub") and out["cwd"].endswith("sub")
+    finally:
+        server.processes.stop(pid, True)
+    ran = server.cap.execute(code, cwd="inner")
+    assert ran["stdout"].strip().endswith(os.path.join("sub", "inner"))
+    assert server.cap.git("root", cwd="inner")["cwd"].endswith(os.path.join("sub", "inner"))

@@ -687,7 +687,7 @@ class Capabilities:
         return {"engine": "python", "results": results, "truncated": len(results) >= maximum, "applied_excludes": excludes}
 
     def git(self, action, args=None, cwd=None):
-        work = self.paths.resolve(cwd or self.cwd, access="read", must_exist=True)
+        work = self.paths.resolve(cwd or ".", cwd=self.cwd, access="read", must_exist=True)
         presets = {
             "status": ["status", "--porcelain=v2", "--branch"], "diff": ["diff"],
             "log": ["log", "--oneline", "-n", "20"], "show": ["show"],
@@ -726,7 +726,7 @@ class Capabilities:
                 pass
 
     def execute(self, command, cwd=None, timeout=None, shell=False, env=None, input=None):
-        work = self.paths.resolve(cwd or self.cwd, access="read", must_exist=True)
+        work = self.paths.resolve(cwd or ".", cwd=self.cwd, access="read", must_exist=True)
         command = coerce_command(command)
         stdin_bytes = None
         if input is not None:
