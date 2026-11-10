@@ -38,6 +38,7 @@ class Config:
     extra_environment: dict[str, str] = field(default_factory=dict)
     allow_shell_commands: bool = True
     log_to_client: bool = False
+    structured_content: bool = False
     kill_children_on_exit: bool = True
 
     @classmethod

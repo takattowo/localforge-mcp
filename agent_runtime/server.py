@@ -415,8 +415,14 @@ class Server:
             if not isinstance(params, dict) or not isinstance(params.get("name"), str):
                 raise RuntimeFault("invalid_arguments", "tools/call requires params.name")
             value = self.call(params["name"], params.get("arguments", {}))
-            result = {"content": [{"type": "text", "text": json.dumps(value, ensure_ascii=False)}],
-                      "structuredContent": value}
+            # Compact separators: the model reads this text, so every
+            # byte costs tokens. structuredContent repeats the whole
+            # result; Quick showed both copies on failed calls, so it
+            # is opt-in.
+            result = {"content": [{"type": "text", "text": json.dumps(
+                value, ensure_ascii=False, separators=(",", ":"))}]}
+            if self.cfg.structured_content:
+                result["structuredContent"] = value
         elif method == "ping":
             result = {}
         elif method.startswith("notifications/") or method == "initialized":
