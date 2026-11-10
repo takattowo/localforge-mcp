@@ -660,7 +660,9 @@ class Capabilities:
             command += ["-g", "!" + pattern]
         if files_only:
             command += ["--files", str(root)]
-            result = subprocess.run(command, capture_output=True, text=True, errors="replace", timeout=60,
+            # cwd=root: ripgrep matches globs with a folder against the
+            # path relative to its working directory, not the search root.
+            result = subprocess.run(command, cwd=str(root), capture_output=True, text=True, errors="replace", timeout=60,
                                     stdin=subprocess.DEVNULL,
                                     env=safe_environment(self.cfg))
             paths = result.stdout.splitlines()
@@ -681,7 +683,7 @@ class Capabilities:
         if context > 0:
             command += ["-C", str(context)]
         command += [query, str(root)]
-        result = subprocess.run(command, capture_output=True, text=True, errors="replace", timeout=60,
+        result = subprocess.run(command, cwd=str(root), capture_output=True, text=True, errors="replace", timeout=60,
                                 stdin=subprocess.DEVNULL,
                                 env=safe_environment(self.cfg))
         events = []
@@ -690,9 +692,10 @@ class Capabilities:
                 events.append(json.loads(line))
             except ValueError:
                 continue
-        matches = self._rg_matches(events, maximum, context)
-        out = {"engine": "ripgrep", "results": matches, "exit_code": result.returncode,
-                "truncated": len(matches) >= maximum, "applied_excludes": excludes}
+        # One extra match tells a full page from a cut one.
+        matches = self._rg_matches(events, maximum + 1, context)
+        out = {"engine": "ripgrep", "results": matches[:maximum], "exit_code": result.returncode,
+                "truncated": len(matches) > maximum, "applied_excludes": excludes}
         err = self._rg_error(result)
         if err is not None:
             out["error"] = err
@@ -749,9 +752,9 @@ class Capabilities:
                 events.append(json.loads(line))
             except ValueError:
                 continue
-        matches = self._rg_matches(events, maximum, context)
-        out = {"engine": "ripgrep", "results": matches, "exit_code": result.returncode,
-                "truncated": len(matches) >= maximum, "applied_excludes": applied}
+        matches = self._rg_matches(events, maximum + 1, context)
+        out = {"engine": "ripgrep", "results": matches[:maximum], "exit_code": result.returncode,
+                "truncated": len(matches) > maximum, "applied_excludes": applied}
         err = self._rg_error(result)
         if err is not None:
             out["error"] = err
@@ -826,13 +829,14 @@ class Capabilities:
                                 entry["before"] = [f"{n}\t{lines[n - 1]}" for n in range(max(1, number - context), number)]
                                 entry["after"] = [f"{n}\t{lines[n - 1]}" for n in range(number + 1, min(len(lines), number + context) + 1)]
                             results.append(entry)
-                            if len(results) >= maximum:
+                            if len(results) > maximum:
                                 break
                 except OSError:
                     pass
-            if len(results) >= maximum:
+            if len(results) > maximum:
                 break
-        return {"engine": "python", "results": results, "truncated": len(results) >= maximum, "applied_excludes": excludes}
+        # Collected up to one extra result: it marks a cut page.
+        return {"engine": "python", "results": results[:maximum], "truncated": len(results) > maximum, "applied_excludes": excludes}
 
     def git(self, action, args=None, cwd=None):
         work = self.paths.resolve(cwd or ".", cwd=self.cwd, access="read", must_exist=True)

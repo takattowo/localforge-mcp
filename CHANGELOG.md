@@ -1,5 +1,10 @@
 # Changelog
 
+## 1.9.1
+
+- `search` globs with a folder (e.g. `src/*.py`, `src/**/*.cs`) now match with ripgrep. ripgrep matches such globs against the path relative to its working directory, and it ran from the server's directory instead of the search root, so they silently returned nothing.
+- `search` `truncated` is true only when results were actually cut, not whenever the result count equals `max_results`.
+
 ## 1.9.0
 
 - Breaking response shapes: line-mode `read` returns `content` instead of `lines` and omits `total_lines` when truncated; search context returns `before`/`after` instead of `context`; `process read` returns `stdout`/`stderr` instead of `chunks` unless `format: "chunks"`; `structuredContent` is opt-in. Clients that parse the old fields must update.
