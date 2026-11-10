@@ -1301,6 +1301,16 @@ def test_glob_regex_rules():
     # rejects [a-b--c] as the range a to "-" (checked with ripgrep 15.1.0).
     chained = _glob_regex("[a-c-e]")
     assert chained.fullmatch("d") and not chained.fullmatch("-")
+    assert chained.fullmatch("e") and not chained.fullmatch("f")
+    # Each step replaces the end and is checked against the start, so the
+    # range can narrow ([a-c-b] is a to b) and a reversed step is an error
+    # even when a later end is valid ([b-a-c]); both checked with ripgrep.
+    narrowed = _glob_regex("[a-c-b]")
+    assert narrowed.fullmatch("b") and not narrowed.fullmatch("c")
+    for bad in ("[b-a-c]", "[z-a-z]", "[.-+-z]"):
+        with pytest.raises(RuntimeFault) as exc:
+            _glob_regex(bad)
+        assert exc.value.code == "invalid_arguments", bad
     with pytest.raises(RuntimeFault) as exc:
         _glob_regex("[a-b--c]")
     assert exc.value.code == "invalid_arguments"
