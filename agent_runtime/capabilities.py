@@ -36,10 +36,17 @@ def _lf(text: str):
     return text.replace("\r\n", "\n")
 
 
-def _detect_eol(raw: bytes):
-    """Return the dominant line ending of raw file bytes; LF on a tie."""
-    crlf = raw.count(b"\r\n")
-    return "\r\n" if crlf > raw.count(b"\n") - crlf else "\n"
+def _detect_eol(text: str):
+    """Return the dominant line ending of decoded text; LF on a tie.
+
+    None when the text has no line break, so it is written as sent.
+    Runs on decoded text because in UTF-16 a CRLF is not b"\\r\\n".
+    """
+    crlf = text.count("\r\n")
+    lf = text.count("\n") - crlf
+    if not crlf and not lf:
+        return None
+    return "\r\n" if crlf > lf else "\n"
 
 
 def _clip(data: str, cap: int):
@@ -75,6 +82,7 @@ DEFAULT_EXCLUDES = [".git/**", ".venv/**", "__pycache__/**", "node_modules/**", 
 
 MAX_BATCH_SEARCHES = 16
 MAX_READ_LINES = 2000
+LINE_CUT = " ...[line cut]"
 BATCH_SEARCH_WORKERS = 8
 GIT_ROOT_TTL_SECONDS = 30
 PATH_LOCK_STRIPES = 256
@@ -269,13 +277,18 @@ class Capabilities:
                     # file is written exactly as sent.
                     eol = None
                     if target.is_file():
-                        with target.open("rb") as handle:
+                        with target.open("r", encoding=encoding, errors="replace", newline="") as handle:
                             eol = _detect_eol(handle.read(65536))
                     target.parent.mkdir(parents=True, exist_ok=True)
                     written = self._atomic_write(target, data, encoding, eol)
                 except OSError as e:
                     _fs_error("write", target, e)
-            return {"path": str(target), "bytes": written}
+            result = {"path": str(target), "bytes": written}
+            if eol is not None:
+                # Tells the agent its line endings were kept; delete
+                # the file first to change them.
+                result["eol"] = "CRLF" if eol == "\r\n" else "LF"
+            return result
         if action == "replace_text":
             if not target.is_file():
                 raise RuntimeFault("not_file", f"Not a file: {target}")
@@ -382,7 +395,8 @@ class Capabilities:
                             _fs_error("apply_patch", dest, e)
                         if b"\x00" in raw[:8192]:
                             raise RuntimeFault("binary_file", "Binary file patch is not supported")
-                        original, eol = raw.decode(encoding, "replace"), _detect_eol(raw)
+                        original = raw.decode(encoding, "replace")
+                        eol = _detect_eol(original)
                     planned.append((dest, build_patched(original, fp, rel), creating, eol))
                 results = []
                 for dest, updated, creating, eol in planned:
@@ -448,7 +462,7 @@ class Capabilities:
                         continue
                     text = f"{total}\t" + line.rstrip("\r\n")
                     if len(text) > budget:
-                        text = text[:budget] + " ...[line cut]"
+                        text = text[:max(0, budget - len(LINE_CUT))] + LINE_CUT
                     if out and (len(out) >= MAX_READ_LINES or used + len(text) + 1 > budget):
                         capped = True
                         continue
@@ -457,7 +471,7 @@ class Capabilities:
                     end = total
         except OSError as e:
             _fs_error("read", target, e)
-        if total and start > total:
+        if start > max(total, 1):
             raise RuntimeFault("invalid_arguments",
                                f"line_start {start} is past the end of the file ({total} lines)")
         result = {"path": str(target), "content": "\n".join(out), "line_start": start,
@@ -469,8 +483,8 @@ class Capabilities:
     @staticmethod
     def _read_text(target, encoding):
         """Read a file as LF text plus its dominant line ending."""
-        raw = target.read_bytes()
-        return _lf(raw.decode(encoding)), _detect_eol(raw)
+        text = target.read_bytes().decode(encoding)
+        return _lf(text), _detect_eol(text)
 
     @staticmethod
     def _atomic_write(target, data, encoding, eol=None):
@@ -504,26 +518,29 @@ class Capabilities:
         if files_only and query is not None:
             raise RuntimeFault("invalid_arguments", "files_only search takes no query")
         applied = list(dict.fromkeys([*(exclude or []), *DEFAULT_EXCLUDES]))
-        root = self.paths.resolve(path, cwd=self.cwd, access="read", must_exist=True)
+        # Read the cwd once: a parallel set_cwd must not change the
+        # base between resolving the root and shortening result paths.
+        base = self.cwd
+        root = self.paths.resolve(path, cwd=base, access="read", must_exist=True)
         maximum = max(1, min(int(max_results), 5000))
         rg = shutil.which("rg")
         if root.is_file():
             if rg:
-                return self._short_paths(self._search_rg_file(rg, root, query, case_sensitive, maximum, files_only, fixed_string, context, applied))
-            return self._short_paths(self._search_python_file(root, query, case_sensitive, maximum, files_only, fixed_string, context, int(max_file_size_bytes), applied))
+                return self._short_paths(base, self._search_rg_file(rg, root, query, case_sensitive, maximum, files_only, fixed_string, context, applied))
+            return self._short_paths(base, self._search_python_file(root, query, case_sensitive, maximum, files_only, fixed_string, context, int(max_file_size_bytes), applied))
         if not root.is_dir():
             raise RuntimeFault("not_directory", f"Not a directory: {root}")
         if rg:
-            return self._short_paths(self._search_rg(rg, root, query, glob or [], applied, case_sensitive, maximum, files_only, fixed_string, context, bool(include_hidden)))
-        return self._short_paths(self._search_python(root, query, glob or [], applied, case_sensitive, maximum, files_only, fixed_string, context, int(max_file_size_bytes), bool(include_hidden)))
+            return self._short_paths(base, self._search_rg(rg, root, query, glob or [], applied, case_sensitive, maximum, files_only, fixed_string, context, bool(include_hidden)))
+        return self._short_paths(base, self._search_python(root, query, glob or [], applied, case_sensitive, maximum, files_only, fixed_string, context, int(max_file_size_bytes), bool(include_hidden)))
 
-    def _short_paths(self, out):
+    @staticmethod
+    def _short_paths(base, out):
         """Show result paths relative to the runtime cwd when under it.
 
         Filesystem tools resolve relative paths against the same cwd,
         so the short form stays usable and saves tokens per match.
         """
-        base = self.cwd
         for entry in out.get("results", []):
             try:
                 entry["path"] = str(Path(entry["path"]).relative_to(base))
