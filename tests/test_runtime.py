@@ -1238,6 +1238,8 @@ def test_search_globs_follow_ripgrep_rules(tmp_path, monkeypatch, engine):
     assert files(exclude=["/"]) == defaults
     # A class can match "/" when its range covers it.
     assert files(glob=["*/*[ -~]*"]) == ["a/src/x.py", "scripts/build", "src/a.py", "src/deep/a.py"]
+    # A range followed by -X is extended: [a-c-z] is a to z, so y.cs matches.
+    assert files(glob=["[a-c-z]*.cs"]) == ["src/deep/er/y.cs"]
 
 
 def test_python_glob_fallback_is_bounded(tmp_path, monkeypatch):
@@ -1287,10 +1289,23 @@ def test_glob_atomic_form_matches_plain_translation():
     with pytest.raises(RuntimeFault) as exc:
         _glob_regex("[z-a]")
     assert exc.value.code == "invalid_arguments"
+
+
+def test_glob_regex_rules():
+    from agent_runtime.capabilities import _glob_regex
     # A folder-only exclude ending in ** hides what is below a folder,
     # never a top-level file.
     assert _glob_regex("**/").fullmatch("f.txt") is None
     assert _glob_regex("**/").fullmatch("a/f.txt")
+    # ripgrep extends a range by a following -X ([a-c-e] is a to e) and
+    # rejects [a-b--c] as the range a to "-" (checked with ripgrep 15.1.0).
+    chained = _glob_regex("[a-c-e]")
+    assert chained.fullmatch("d") and not chained.fullmatch("-")
+    with pytest.raises(RuntimeFault) as exc:
+        _glob_regex("[a-b--c]")
+    assert exc.value.code == "invalid_arguments"
+    # A dash with nothing after it stays literal.
+    assert _glob_regex("[a-c-]").fullmatch("-")
 
 
 def test_config_rejects_tiny_max_read_chars(tmp_path):

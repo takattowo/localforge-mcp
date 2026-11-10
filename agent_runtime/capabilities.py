@@ -142,12 +142,16 @@ def _glob_tokens(glob):
                 body = body[1:]
             # Rebuild with every character escaped, so Python reads none of
             # them as nesting, a set operation or an escape; only a bare "-"
-            # between two characters makes a range, as before.
+            # between two characters makes a range. Like ripgrep, a range
+            # followed by -X is extended to X: [a-c-e] is a to e.
             items, j = [], 0
             while j < len(body):
                 if j + 2 < len(body) and body[j + 1] == "-":
-                    items.append(re.escape(body[j]) + "-" + re.escape(body[j + 2]))
-                    j += 3
+                    last = j + 2
+                    while last + 2 < len(body) and body[last + 1] == "-":
+                        last += 2
+                    items.append(re.escape(body[j]) + "-" + re.escape(body[last]))
+                    j = last + 1
                 else:
                     items.append(re.escape(body[j]))
                     j += 1
