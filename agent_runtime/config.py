@@ -19,6 +19,7 @@ class Config:
     default_timeout_seconds: int = 600
     max_capture_bytes: int = 1_000_000
     max_file_read_bytes: int = 1_000_000
+    max_read_chars: int = 60_000
     process_buffer_bytes: int = 4_000_000
     process_ttl_seconds: int = 3600
     max_processes: int = 50
@@ -60,7 +61,7 @@ class Config:
             raise ValueError(f"invalid mode: {cfg.mode}")
         if cfg.network not in NETWORK_MODES:
             raise ValueError("network must be 'disabled' or 'unrestricted'")
-        for name in ("default_timeout_seconds", "max_capture_bytes", "max_file_read_bytes", "process_buffer_bytes", "process_ttl_seconds", "max_processes", "max_concurrency"):
+        for name in ("default_timeout_seconds", "max_capture_bytes", "max_file_read_bytes", "max_read_chars", "process_buffer_bytes", "process_ttl_seconds", "max_processes", "max_concurrency"):
             if int(getattr(cfg, name)) <= 0:
                 raise ValueError(f"{name} must be positive")
         if not cfg.state_file:

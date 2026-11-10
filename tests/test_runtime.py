@@ -170,12 +170,33 @@ def test_list_pagination_and_read_lines(tmp_path):
     only_py = server.cap.filesystem("list", ".", glob=["*.py"])
     assert only_py["total"] == 1 and only_py["entries"][0]["name"] == "c.py"
     lines = server.cap.filesystem("read", "a.txt", line_start=2, line_end=3)
-    assert [l["no"] for l in lines["lines"]] == [2, 3]
+    assert lines["content"] == "2\tsecond line\n3\tthird line"
     assert lines["total_lines"] == 3 and lines["truncated"] is False
+    assert "next_line" not in lines
     tail = server.cap.filesystem("read", "a.txt", line_start=3)
     assert tail["line_end"] == 3 and tail["truncated"] is False
     with pytest.raises(RuntimeFault):
         server.cap.filesystem("read", "a.txt", line_start=3, line_end=2)
+    with pytest.raises(RuntimeFault):
+        server.cap.filesystem("read", "a.txt", line_start=9)
+
+
+def test_read_lines_caps_output_and_streams(tmp_path):
+    server = make(tmp_path, max_read_chars=200, max_file_read_bytes=10)
+    (tmp_path / "long.txt").write_text("".join(f"row {n}\n" for n in range(1, 101)))
+    # Line mode streams, so max_file_read_bytes does not apply.
+    first = server.cap.filesystem("read", "long.txt", line_start=1)
+    assert first["truncated"] is True and len(first["content"]) <= 200
+    assert first["content"].startswith("1\trow 1\n2\trow 2")
+    assert first["total_lines"] == 100
+    nxt = server.cap.filesystem("read", "long.txt", line_start=first["next_line"])
+    assert nxt["content"].startswith(f"{first['next_line']}\trow {first['next_line']}")
+    (tmp_path / "wide.txt").write_text("x" * 1000 + "\nshort\n")
+    wide = server.cap.filesystem("read", "wide.txt", line_start=1)
+    assert wide["content"].endswith("...[line cut]") and wide["next_line"] == 2
+    (tmp_path / "empty.txt").write_text("")
+    empty = server.cap.filesystem("read", "empty.txt", line_start=1)
+    assert empty["content"] == "" and empty["total_lines"] == 0
 
 
 def test_execute_truncation_bytes_and_input(tmp_path):
