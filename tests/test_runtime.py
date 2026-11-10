@@ -147,13 +147,14 @@ def test_search_defaults_and_guards(tmp_path, monkeypatch):
     monkeypatch.setattr(shutil, "which", lambda name: None)
     content = server.cap.search("UserService")
     paths = [r["path"] for r in content["results"]]
-    assert any(str(tmp_path / "src" / "hit.py") in p for p in paths)
+    assert os.path.join("src", "hit.py") in paths
     assert not any(".venv" in p for p in paths)
     assert not any("big.py" in p for p in paths)
     assert ".git/**" in content["applied_excludes"]
     ctx = server.cap.search("UserService", path="src/hit.py", context_lines=1)
     assert ctx["results"][0]["line"] == 2
-    assert "line one" in ctx["results"][0]["context"]
+    assert ctx["results"][0]["before"] == ["1\tline one"]
+    assert ctx["results"][0]["after"] == ["3\tline three"]
     with pytest.raises(RuntimeFault):
         server.cap.search("UserService", files_only=True)
 
@@ -517,7 +518,7 @@ def test_multi_search_runs_queries_in_one_call(tmp_path):
     assert first["index"] == 0 and first["label"] == "first"
     assert first["results"][0]["text"] == "alpha beta"
     assert second["index"] == 1 and second["label"] is None
-    assert str(tmp_path / "b.txt") in second["results"][0]["path"]
+    assert second["results"][0]["path"] == "b.txt"
 
 
 def test_multi_search_isolates_failures(tmp_path):
@@ -1011,6 +1012,26 @@ def test_edits_preserve_line_endings(tmp_path):
     diff = "--- a/crlf.txt\n+++ b/crlf.txt\n@@ -1,2 +1,2 @@\n-a\n+A\n b\n"
     server.cap.filesystem("apply_patch", ".", patch=diff)
     assert crlf.read_bytes() == b"A\r\nb\r\n"
+
+
+@pytest.mark.parametrize("engine", ["ripgrep", "python"])
+def test_search_context_numbered_and_per_file(tmp_path, monkeypatch, engine):
+    if engine == "ripgrep" and not shutil.which("rg"):
+        pytest.skip("ripgrep unavailable")
+    if engine == "python":
+        monkeypatch.setattr(shutil, "which", lambda name: None)
+    server = make(tmp_path)
+    (tmp_path / "a.txt").write_text("a1\na2\nhit\n")
+    (tmp_path / "b.txt").write_text("hit\nb2\nb3\n")
+    out = server.cap.search("hit", context_lines=4)
+    assert out["engine"] == engine
+    by_path = {r["path"]: r for r in out["results"]}
+    assert by_path["a.txt"]["before"] == ["1\ta1", "2\ta2"] and by_path["a.txt"]["after"] == []
+    assert by_path["b.txt"]["before"] == [] and by_path["b.txt"]["after"] == ["2\tb2", "3\tb3"]
+    # Outside the runtime cwd, paths stay absolute.
+    (tmp_path / "sub").mkdir()
+    server.cap.workspace("set_cwd", "sub")
+    assert any(Path(r["path"]).is_absolute() for r in server.cap.search("hit", path="..")["results"])
 
 
 def test_commands_resolve_cwd_against_runtime_cwd(tmp_path):

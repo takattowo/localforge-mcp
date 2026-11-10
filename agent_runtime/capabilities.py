@@ -490,13 +490,27 @@ class Capabilities:
         rg = shutil.which("rg")
         if root.is_file():
             if rg:
-                return self._search_rg_file(rg, root, query, case_sensitive, maximum, files_only, fixed_string, context, applied)
-            return self._search_python_file(root, query, case_sensitive, maximum, files_only, fixed_string, context, int(max_file_size_bytes), applied)
+                return self._short_paths(self._search_rg_file(rg, root, query, case_sensitive, maximum, files_only, fixed_string, context, applied))
+            return self._short_paths(self._search_python_file(root, query, case_sensitive, maximum, files_only, fixed_string, context, int(max_file_size_bytes), applied))
         if not root.is_dir():
             raise RuntimeFault("not_directory", f"Not a directory: {root}")
         if rg:
-            return self._search_rg(rg, root, query, glob or [], applied, case_sensitive, maximum, files_only, fixed_string, context, bool(include_hidden))
-        return self._search_python(root, query, glob or [], applied, case_sensitive, maximum, files_only, fixed_string, context, int(max_file_size_bytes), bool(include_hidden))
+            return self._short_paths(self._search_rg(rg, root, query, glob or [], applied, case_sensitive, maximum, files_only, fixed_string, context, bool(include_hidden)))
+        return self._short_paths(self._search_python(root, query, glob or [], applied, case_sensitive, maximum, files_only, fixed_string, context, int(max_file_size_bytes), bool(include_hidden)))
+
+    def _short_paths(self, out):
+        """Show result paths relative to the runtime cwd when under it.
+
+        Filesystem tools resolve relative paths against the same cwd,
+        so the short form stays usable and saves tokens per match.
+        """
+        base = self.cwd
+        for entry in out.get("results", []):
+            try:
+                entry["path"] = str(Path(entry["path"]).relative_to(base))
+            except (KeyError, TypeError, ValueError):
+                pass
+        return out
 
     def multi_search(self, searches):
         """Run several independent searches in parallel within one tool call.
@@ -603,13 +617,23 @@ class Capabilities:
             entry = {"path": data["path"].get("text"), "line": data["line_number"],
                      "text": data["lines"].get("text", "").rstrip("\r\n")}
             if context > 0:
-                before = [e["data"]["lines"].get("text", "").rstrip("\r\n") for e in events[max(0, i - context):i] if e.get("type") == "context"]
-                after = [e["data"]["lines"].get("text", "").rstrip("\r\n") for e in events[i + 1:i + 1 + context] if e.get("type") == "context"]
-                entry["context"] = before + after
+                entry["before"] = Capabilities._rg_context(events, i, -1, context)
+                entry["after"] = Capabilities._rg_context(events, i, 1, context)
             matches.append(entry)
             if len(matches) >= maximum:
                 break
         return matches
+
+    @staticmethod
+    def _rg_context(events, i, step, limit):
+        # Walk only contiguous context events: begin/end events mark
+        # a file boundary, so context never bleeds into another file.
+        lines, j = [], i + step
+        while 0 <= j < len(events) and len(lines) < limit and events[j].get("type") == "context":
+            data = events[j]["data"]
+            lines.append(f"{data['line_number']}\t" + data["lines"].get("text", "").rstrip("\r\n"))
+            j += step
+        return lines[::-1] if step < 0 else lines
 
     def _search_rg_file(self, rg, target, query, case_sensitive, maximum, files_only, fixed_string, context, applied):
         if files_only:
@@ -702,7 +726,8 @@ class Capabilities:
                         if matched:
                             entry = {"path": str(item), "line": number, "text": line}
                             if context > 0:
-                                entry["context"] = lines[max(0, number - 1 - context):number - 1] + lines[number:min(len(lines), number + context)]
+                                entry["before"] = [f"{n}\t{lines[n - 1]}" for n in range(max(1, number - context), number)]
+                                entry["after"] = [f"{n}\t{lines[n - 1]}" for n in range(number + 1, min(len(lines), number + context) + 1)]
                             results.append(entry)
                             if len(results) >= maximum:
                                 break
