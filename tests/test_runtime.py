@@ -85,7 +85,10 @@ def test_process_lifecycle_restart_duplicate_and_concurrency(tmp_path):
     with pytest.raises(RuntimeFault): server.processes.start(command, process_id="worker-0")
     for process_id in ids:
         output = server.processes.read(process_id, wait_ms=1000)
-        assert "ready" in "".join(chunk["text"] for chunk in output["chunks"])
+        assert "ready" in output["stdout"] and "chunks" not in output
+    chunked = server.processes.read(ids[0], format="chunks")
+    assert "ready" in "".join(c["text"] for c in chunked["chunks"]) and "stdout" not in chunked
+    with pytest.raises(RuntimeFault): server.processes.read(ids[0], format="bogus")
     restarted = server.processes.restart("worker-0")
     assert restarted["process_id"] == "worker-0"
     for process_id in ids: server.processes.stop(process_id, True)
@@ -253,7 +256,7 @@ def test_process_gc_cap_evicts_oldest_exited(tmp_path):
     assert "ev-1" not in ids and "ev-2" in ids and "ev-3" in ids
     for pid in ("ev-2", "ev-3"):
         server.processes.stop(pid, True)
-def test_process_string_auto_enables_shell(tmp_path): server = make(tmp_path); p = server.processes.start("echo proc-shell-ok")["process_id"]; out = server.processes.read(p, wait_ms=5000); assert "proc-shell-ok" in "".join(c["text"] for c in out["chunks"]); server.processes.stop(p, True)
+def test_process_string_auto_enables_shell(tmp_path): server = make(tmp_path); p = server.processes.start("echo proc-shell-ok")["process_id"]; out = server.processes.read(p, wait_ms=5000); assert "proc-shell-ok" in out["stdout"]; server.processes.stop(p, True)
 def test_cwd_persists_across_restart(tmp_path):
     from agent_runtime.server import Server
     from agent_runtime.config import Config
@@ -1050,7 +1053,7 @@ def test_commands_resolve_cwd_against_runtime_cwd(tmp_path):
     pid = server.call("process", {"action": "start", "command": code})["process_id"]
     try:
         out = server.processes.read(pid, wait_ms=5000)
-        printed = "".join(c["text"] for c in out["chunks"]).strip()
+        printed = out["stdout"].strip()
         assert printed.endswith("sub") and out["cwd"].endswith("sub")
     finally:
         server.processes.stop(pid, True)

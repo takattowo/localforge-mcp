@@ -131,7 +131,9 @@ class ProcessManager:
             threading.Thread(target=self._pump, args=(item, pipe, stream), daemon=True).start()
         return self.status(pid)
 
-    def read(self, process_id, after=0, limit_bytes=200_000, wait_ms=0):
+    def read(self, process_id, after=0, limit_bytes=200_000, wait_ms=0, format="text"):
+        if format not in {"text", "chunks"}:
+            raise RuntimeFault("invalid_arguments", "format must be 'text' or 'chunks'")
         item = self._get(process_id)
         limit_bytes = max(1, min(int(limit_bytes), self.cfg.max_capture_bytes))
         deadline = time.monotonic() + min(max(int(wait_ms), 0), 60_000) / 1000
@@ -158,11 +160,19 @@ class ProcessManager:
                     break
                 output.append({"seq": chunk.seq, "stream": chunk.stream, "text": chunk.text, "at": chunk.at})
                 used += size
-        return {
-            **self.status(process_id), "chunks": output, "oldest_sequence": oldest,
+        result = {
+            **self.status(process_id), "oldest_sequence": oldest,
             "cursor_lost": lost, "truncated": truncated,
             "next_after": output[-1]["seq"] if output else after,
         }
+        if format == "chunks":
+            result["chunks"] = output
+        else:
+            # One string per stream: far fewer tokens than a JSON
+            # object per 4 KB pipe read.
+            for stream in ("stdout", "stderr"):
+                result[stream] = "".join(c["text"] for c in output if c["stream"] == stream)
+        return result
 
     def write(self, process_id, text, append_newline=True):
         item = self._get(process_id)
