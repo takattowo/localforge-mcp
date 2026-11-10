@@ -1,5 +1,11 @@
 # Changelog
 
+## 1.9.2
+
+- The default excludes (`.git`, `.venv`, `__pycache__`, `node_modules`, `.hg`, `target`, `dist`, `build`, `*.egg-info`) now apply at any depth under ripgrep, e.g. `packages/web/node_modules`. ripgrep reads a glob with a slash as anchored to the search root, so they only covered the top level. They are now reported as `**/node_modules/**` etc. in `applied_excludes`.
+- The Python search fallback now matches globs like ripgrep `-g` instead of `Path.match`: a glob with a folder is anchored to the search root (`src/*.py` no longer matches `a/src/x.py`), `**` spans any number of folders on every Python version, `{a,b}` alternates, matching is case-sensitive on Windows too, and a bare-name exclude hides matching folders at any depth.
+- A single-file search with the Python fallback reads only that file; it used to also search same-named files in subfolders.
+
 ## 1.9.1
 
 - `search` globs with a folder (e.g. `src/*.py`, `src/**/*.cs`) now match with ripgrep. ripgrep matches such globs against the path relative to its working directory, and it ran from the server's directory instead of the search root, so they silently returned nothing. Include and exclude globs (including the built-in excludes such as `node_modules/**`) are now relative to the search `path`; before, ripgrep ignored excludes unless the server happened to run from the search root.

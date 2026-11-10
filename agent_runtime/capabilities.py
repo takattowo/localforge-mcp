@@ -77,8 +77,64 @@ def _clip_ends(data: str, cap: int):
     cut = len(raw) - head_len - len(tail.encode("utf-8"))
     return f"{head}\n...[{cut} bytes cut]...\n{tail}", True
 
-DEFAULT_EXCLUDES = [".git/**", ".venv/**", "__pycache__/**", "node_modules/**", ".hg/**",
-                    "target/**", "dist/**", "build/**", "*.egg-info/**"]
+# **/ makes each one apply at any depth: ripgrep reads a glob with a
+# slash as anchored to the search root, like a .gitignore line.
+DEFAULT_EXCLUDES = ["**/.git/**", "**/.venv/**", "**/__pycache__/**", "**/node_modules/**", "**/.hg/**",
+                    "**/target/**", "**/dist/**", "**/build/**", "**/*.egg-info/**"]
+
+
+def _expand_braces(pattern):
+    """Expand {a,b} alternatives, innermost first, into plain globs."""
+    match = re.search(r"\{([^{}]*)\}", pattern)
+    if not match:
+        return [pattern]
+    head, tail = pattern[:match.start()], pattern[match.end():]
+    return [out for alt in match.group(1).split(",") for out in _expand_braces(head + alt + tail)]
+
+
+def _glob_regex(pattern):
+    """Compile a glob the way ripgrep -g reads it, for root-relative posix paths.
+
+    Like a .gitignore line: a glob with no slash matches at any depth, a
+    leading or inner slash anchors it to the search root, a trailing slash
+    means a folder, ** spans any number of folders, {a,b} alternates, and
+    matching is case-sensitive.
+    """
+    parts = []
+    for glob in _expand_braces(pattern):
+        core = glob.rstrip("/")
+        anchored = "/" in core
+        core = core.lstrip("/")
+        if glob.endswith("/"):
+            core += "/**"
+        out, i = [], 0
+        while i < len(core):
+            c = core[i]
+            if (core.startswith("**", i) and (i == 0 or core[i - 1] == "/")
+                    and (i + 2 == len(core) or core[i + 2] == "/")):
+                out.append(".*" if i + 2 == len(core) else "(?:.*/)?")
+                i += 2 if i + 2 == len(core) else 3
+                continue
+            if c == "*":
+                out.append("[^/]*")
+            elif c == "?":
+                out.append("[^/]")
+            elif c == "\\" and i + 1 < len(core):
+                out.append(re.escape(core[i + 1]))
+                i += 1
+            elif c == "[" and core.find("]", i + 2) != -1:
+                end = core.find("]", i + 2)
+                body = core[i + 1:end].replace("\\", "\\\\")
+                out.append("[" + ("^" + body[1:] if body.startswith("!") else body) + "]")
+                i = end
+            else:
+                out.append(re.escape(c))
+            i += 1
+        parts.append(("" if anchored else "(?:.*/)?") + "".join(out))
+    try:
+        return re.compile("(?:" + "|".join(parts) + ")")
+    except re.error as e:
+        raise RuntimeFault("invalid_arguments", f"Invalid glob {pattern!r}: {e}") from e
 
 MAX_BATCH_SEARCHES = 16
 MAX_READ_LINES = 2000
@@ -770,7 +826,7 @@ class Capabilities:
                 return {"engine": "python", "results": [], "truncated": False, "applied_excludes": applied}
         except OSError:
             return {"engine": "python", "results": [], "truncated": False, "applied_excludes": applied}
-        return self._search_python(target.parent, query, [target.name], applied, case_sensitive, maximum, False, fixed_string, context, max_size, True)
+        return self._search_python(target, query, [], applied, case_sensitive, maximum, False, fixed_string, context, max_size, True)
 
     @staticmethod
     def _compile_fallback(query, fixed_string, case_sensitive):
@@ -785,10 +841,13 @@ class Capabilities:
     def _search_python(root, query, includes, excludes, case_sensitive, maximum, files_only, fixed_string, context, max_size, include_hidden):
         results = []
         pattern = Capabilities._compile_fallback(query, fixed_string, case_sensitive) if query is not None else None
-        for item in root.rglob("*"):
+        include_res = [_glob_regex(p) for p in includes]
+        exclude_res = [_glob_regex(p) for p in excludes]
+        # root is a file for a single-file search: read only that file.
+        for item in ([root] if root.is_file() else root.rglob("*")):
             if not item.is_file():
                 continue
-            rel = item.relative_to(root).as_posix()
+            rel = item.name if item == root else item.relative_to(root).as_posix()
             if not include_hidden and any(part.startswith(".") for part in rel.split("/")):
                 continue
             try:
@@ -796,9 +855,12 @@ class Capabilities:
                     continue
             except OSError:
                 continue
-            if excludes and any(item.match(pattern) or Path(rel).match(pattern) for pattern in excludes):
+            # Excludes follow .gitignore: a matching folder hides all it holds.
+            segments = rel.split("/")
+            ancestors = ["/".join(segments[:n]) for n in range(1, len(segments) + 1)]
+            if any(r.fullmatch(path) for r in exclude_res for path in ancestors):
                 continue
-            if includes and not any(item.match(pattern) or Path(rel).match(pattern) for pattern in includes):
+            if include_res and not any(r.fullmatch(rel) for r in include_res):
                 continue
             if files_only:
                 results.append({"path": str(item)})

@@ -91,7 +91,7 @@ SCHEMAS = {
     "search": {"type": "object", "properties": {
         "query": {"type": "string", "description": "Text or regex to find; omit only with files_only."},
         "path": {"type": "string", "description": "File or directory to search, relative to cwd or absolute."},
-        "glob": {"type": "array", "items": {"type": "string"}, "description": "Include patterns, matched on the posix path relative to the search path."},
+        "glob": {"type": "array", "items": {"type": "string"}, "description": "Include patterns, relative to the search path, with ripgrep (.gitignore-style) rules: no slash matches at any depth, a slash anchors to the search path, ** spans folders, case-sensitive."},
         "exclude": {"type": "array", "items": {"type": "string"}, "description": "Extra excludes, relative to the search path; built-ins (.git, .venv, node_modules, etc.) always apply."},
         "case_sensitive": {"type": "boolean", "description": "Case-sensitive match, default false."},
         "max_results": {"type": "integer", "description": "Result cap 1..5000, default 200."},
@@ -137,7 +137,7 @@ SCHEMAS = {
                 "label": {"type": "string", "description": "Optional label echoed back to identify this search in the results."},
                 "query": {"type": "string", "description": "Text or regex to find; omit only with files_only."},
                 "path": {"type": "string", "description": "File or directory to search, relative to cwd or absolute."},
-                "glob": {"type": "array", "items": {"type": "string"}, "description": "Include patterns, matched on the posix path relative to the search path."},
+                "glob": {"type": "array", "items": {"type": "string"}, "description": "Include patterns, relative to the search path, with ripgrep (.gitignore-style) rules: no slash matches at any depth, a slash anchors to the search path, ** spans folders, case-sensitive."},
                 "exclude": {"type": "array", "items": {"type": "string"}, "description": "Extra excludes, relative to the search path; built-ins (.git, .venv, node_modules, etc.) always apply."},
                 "case_sensitive": {"type": "boolean", "description": "Case-sensitive match, default false."},
                 "max_results": {"type": "integer", "description": "Result cap 1..5000, default 200."},

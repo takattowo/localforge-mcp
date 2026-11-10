@@ -154,7 +154,7 @@ def test_search_defaults_and_guards(tmp_path, monkeypatch):
     assert os.path.join("src", "hit.py") in paths
     assert not any(".venv" in p for p in paths)
     assert not any("big.py" in p for p in paths)
-    assert ".git/**" in content["applied_excludes"]
+    assert "**/.git/**" in content["applied_excludes"]
     ctx = server.cap.search("UserService", path="src/hit.py", context_lines=1)
     assert ctx["results"][0]["line"] == 2
     assert ctx["results"][0]["before"] == ["1\tline one"]
@@ -491,7 +491,7 @@ def test_search_single_file_with_rg(tmp_path):
     out = server.cap.search("UserService", path="a.txt")
     assert out["engine"] == "ripgrep"
     assert len(out["results"]) == 1 and out["results"][0]["line"] == 1
-    assert ".git/**" in out["applied_excludes"]
+    assert "**/.git/**" in out["applied_excludes"]
 
 
 def test_execute_timeout_above_default_warns(tmp_path):
@@ -1174,6 +1174,45 @@ def test_search_folder_glob_and_exact_truncation(tmp_path, monkeypatch, engine):
     assert len(all_files["results"]) == 2 and all_files["truncated"] is False
     cut_files = server.cap.search(files_only=True, max_results=1)
     assert len(cut_files["results"]) == 1 and cut_files["truncated"] is True
+
+
+@pytest.mark.parametrize("engine", ["ripgrep", "python"])
+def test_search_globs_follow_ripgrep_rules(tmp_path, monkeypatch, engine):
+    # Expectations recorded from ripgrep 15.1.0 run from the search root;
+    # the Python fallback must give the same answers.
+    if engine == "ripgrep" and not shutil.which("rg"):
+        pytest.skip("ripgrep unavailable")
+    if engine == "python":
+        monkeypatch.setattr(shutil, "which", lambda name: None)
+    server = make(tmp_path)
+    for rel in ("src/a.py", "src/deep/a.py", "src/deep/er/y.cs", "a/src/x.py", "scripts/build",
+                "pkg/node_modules/x.js", "pkg/build/out.txt", "pkg/dist/b.js"):
+        (tmp_path / rel).parent.mkdir(parents=True, exist_ok=True)
+        (tmp_path / rel).write_text("hit\n")
+
+    def files(**kwargs):
+        out = server.cap.search(files_only=True, **kwargs)
+        assert out["engine"] == engine
+        return sorted(Path(r["path"]).as_posix() for r in out["results"])
+
+    # Default excludes apply at any depth; a file named like one is kept.
+    assert files() == ["a/src/x.py", "scripts/build", "src/a.py", "src/deep/a.py", "src/deep/er/y.cs"]
+    # A glob with a folder is anchored to the search root.
+    assert files(glob=["src/*.py"]) == ["src/a.py"]
+    assert files(glob=["/src/*.py"]) == ["src/a.py"]
+    # ** spans any number of folders.
+    assert files(glob=["src/**/*.cs"]) == ["src/deep/er/y.cs"]
+    assert files(glob=["src/**"]) == ["src/a.py", "src/deep/a.py", "src/deep/er/y.cs"]
+    # Case-sensitive, braces alternate, a bare name matches at any depth.
+    assert files(glob=["*.PY"]) == []
+    assert files(glob=["*.{py,cs}"]) == ["a/src/x.py", "src/a.py", "src/deep/a.py", "src/deep/er/y.cs"]
+    assert files(glob=["build"]) == ["scripts/build"]
+    # Excludes follow .gitignore: a bare name hides matching folders at any depth.
+    assert files(exclude=["src"]) == ["scripts/build"]
+    assert files(exclude=["a/**"]) == ["scripts/build", "src/a.py", "src/deep/a.py", "src/deep/er/y.cs"]
+    # A single-file search reads only that file, not same-named files below it.
+    one = server.cap.search("hit", path="src/a.py")
+    assert [Path(r["path"]).as_posix() for r in one["results"]] == ["src/a.py"]
 
 
 def test_config_rejects_tiny_max_read_chars(tmp_path):
