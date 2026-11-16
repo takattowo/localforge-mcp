@@ -414,7 +414,7 @@ class Capabilities:
         try:
             result = subprocess.run(
                 ["git", "-C", key, "rev-parse", "--show-toplevel"],
-                capture_output=True, text=True, timeout=5,
+                capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
                 stdin=subprocess.DEVNULL,
                 env=safe_environment(self.cfg),
             )
@@ -969,7 +969,7 @@ class Capabilities:
             command += ["--files", str(root)]
             # cwd=root: ripgrep matches globs with a folder against the
             # path relative to its working directory, not the search root.
-            result = subprocess.run(command, cwd=str(root), capture_output=True, text=True, errors="replace", timeout=60,
+            result = subprocess.run(command, cwd=str(root), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
                                     stdin=subprocess.DEVNULL,
                                     env=safe_environment(self.cfg))
             paths = result.stdout.splitlines()
@@ -990,7 +990,7 @@ class Capabilities:
         if context > 0:
             command += ["-C", str(context)]
         command += [query, str(root)]
-        result = subprocess.run(command, cwd=str(root), capture_output=True, text=True, errors="replace", timeout=60,
+        result = subprocess.run(command, cwd=str(root), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
                                 stdin=subprocess.DEVNULL,
                                 env=safe_environment(self.cfg))
         events = []
@@ -1050,7 +1050,7 @@ class Capabilities:
         if context > 0:
             command += ["-C", str(context)]
         command += [query, str(target)]
-        result = subprocess.run(command, capture_output=True, text=True, errors="replace", timeout=60,
+        result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
                                 stdin=subprocess.DEVNULL,
                                 env=safe_environment(self.cfg))
         events = []
