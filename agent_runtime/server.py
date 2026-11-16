@@ -69,6 +69,42 @@ def _bare_tool_name(name):
     """
     return name.split("__")[-1] if "__" in name else name
 
+# Smallest per-string cut tried before long lists are trimmed instead.
+PREVIEW_MIN_CUT = 256
+PREVIEW_CUT_NOTE = "; full result in result_path]"
+
+def _safe_text(text):
+    # Lone surrogates (Windows file names) cannot be sent as UTF-8.
+    return text.encode("utf-8", "replace").decode("utf-8")
+
+def _cut_text(text, limit):
+    """Head of text up to limit characters, on a line boundary when possible."""
+    text = _safe_text(text)
+    if len(text) <= limit:
+        return text
+    head = text[:limit]
+    if head.rfind("\n") > 0:
+        head = head[:head.rfind("\n") + 1]
+        total = text.count("\n") + (not text.endswith("\n"))
+        shown = f"lines 1-{head.count(chr(10))} of {total}"
+    else:
+        shown = f"{len(head.encode('utf-8'))} of {len(text.encode('utf-8'))} bytes"
+    return f"{head}...[cut: showing {shown}{PREVIEW_CUT_NOTE}"
+
+def _shrink(value, limit, items=None):
+    """Copy of a JSON value with strings cut to limit and lists to items."""
+    if isinstance(value, str):
+        return _cut_text(value, limit)
+    if isinstance(value, dict):
+        return {(_safe_text(key) if isinstance(key, str) else key): _shrink(item, limit, items)
+                for key, item in value.items()}
+    if isinstance(value, list):
+        kept = [_shrink(item, limit, items) for item in value[:items]]
+        if len(kept) < len(value):
+            kept.append(f"...[cut: showing {len(kept)} of {len(value)} items{PREVIEW_CUT_NOTE}")
+        return kept
+    return value
+
 SCHEMAS = {
     "workspace": {"type": "object", "properties": {
         "action": {"enum": ["get", "set_cwd"], "description": "get returns roots and Git root; set_cwd changes runtime directory."},
@@ -447,9 +483,11 @@ class Server:
 
         Hosts relay results through size-limited channels (Quick's
         device relay rejects roughly 300 KB). An oversized result is
-        saved whole, indented so line-mode read can page through it,
-        and replaced by a short preview plus the saved path.
-        Returns (value, text).
+        saved whole, indented so line-mode read can page through it.
+        A dict result keeps its shape with long strings (and, if
+        needed, long lists) cut until the reply fits a quarter of the
+        limit; anything else is replaced by a short raw-JSON preview.
+        Both carry the saved path. Returns (value, text).
         """
         limit = int(self.cfg.max_result_bytes)
         # surrogatepass: results can hold lone surrogates (Windows
@@ -463,9 +501,27 @@ class Server:
         except OSError:
             path = None
         narrow = "narrow the call (max_results, line ranges, fewer batch entries)."
-        value = {"result_too_large": True, "bytes": size, "result_path": path,
-                 "hint": ("Read result_path with filesystem read line_start/line_end or search it, or " + narrow)
-                         if path else "Saving the full result failed; " + narrow}
+        meta = {"result_too_large": True, "bytes": size, "result_path": path,
+                "hint": ("Read result_path with filesystem read line_start/line_end or search it, or " + narrow)
+                        if path else "Saving the full result failed; " + narrow}
+        if isinstance(value, dict):
+            budget = limit // 4
+            steps, cut, items = [], budget, 1024
+            while cut >= PREVIEW_MIN_CUT:
+                steps.append((cut, None))
+                cut //= 2
+            while items:
+                steps.append((PREVIEW_MIN_CUT, items))
+                items //= 2
+            for cut, items in steps:
+                # The meta keys come first and win over same-named result keys.
+                preview = dict(meta)
+                for key, item in _shrink(value, cut, items).items():
+                    preview.setdefault(key, item)
+                out = json.dumps(preview, ensure_ascii=False, separators=(",", ":"))
+                if len(out.encode("utf-8")) <= budget:
+                    return preview, out
+        value = meta
         safe = text.encode("utf-8", "replace").decode("utf-8")
         # JSON escaping can grow the preview, so shrink it until the reply fits.
         cap = min(2000, limit // 2)

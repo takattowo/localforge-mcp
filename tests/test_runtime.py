@@ -1575,7 +1575,9 @@ def test_oversized_result_is_saved_with_preview(tmp_path):
     text = call({"action": "read", "path": "big.txt"})
     assert len(text.encode()) <= 5000
     value = json.loads(text)
-    assert value["result_too_large"] and value["bytes"] > 20000 and value["preview"]
+    # Shape change on purpose: a dict result keeps its own fields, cut, instead of a raw preview.
+    assert value["result_too_large"] and value["bytes"] > 20000 and "preview" not in value
+    assert value["content"].startswith("x" * 100) and "[cut: showing" in value["content"]
     saved = json.loads(Path(value["result_path"]).read_text(encoding="utf-8"))
     assert saved["content"] == "x" * 20000
     assert "result_too_large" not in json.loads(call({"action": "stat", "path": "big.txt"}))
@@ -1585,6 +1587,57 @@ def test_oversized_result_is_saved_with_preview(tmp_path):
     batch = json.loads(response["result"]["content"][0]["text"])
     assert batch["result_too_large"]
     assert len(json.loads(Path(batch["result_path"]).read_text(encoding="utf-8"))["results"]) == 2
+
+
+def test_oversized_result_keeps_its_shape(tmp_path):
+    server = make(tmp_path, max_result_bytes=8000, spill_dir=str(tmp_path / "spill"))
+    body = "".join(f"line {n}\n" for n in range(1, 3001))
+    (tmp_path / "big.txt").write_bytes(body.encode("utf-8"))
+
+    def call(name, arguments):
+        response = server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                                  "params": {"name": name, "arguments": arguments}})
+        return response["result"]["content"][0]["text"]
+
+    text = call("filesystem", {"action": "read", "path": "big.txt"})
+    assert len(text.encode("utf-8")) <= 8000 // 4
+    value = json.loads(text)
+    assert list(value)[:4] == ["result_too_large", "bytes", "result_path", "hint"]
+    assert value["result_too_large"] is True and value["bytes"] > len(body)
+    assert value["path"].endswith("big.txt") and "preview" not in value
+    content = value["content"]
+    assert content.startswith("line 1\nline 2\nline 3\n")
+    head, marker = content.split("...[cut: ")
+    assert head.endswith("\n") and head == body[:len(head)]
+    assert marker == f"showing lines 1-{head.count(chr(10))} of 3000; full result in result_path]"
+    assert json.loads(Path(value["result_path"]).read_text(encoding="utf-8"))["content"] == body
+
+    text = call("batch", {"calls": [{"tool": "filesystem", "arguments": {"action": "read", "path": "big.txt"},
+                                     "label": f"r{n}"} for n in range(2)]})
+    assert len(text.encode("utf-8")) <= 8000 // 4
+    batch = json.loads(text)
+    assert batch["result_too_large"] and [entry["label"] for entry in batch["results"]] == ["r0", "r1"]
+    assert all(entry["result"]["content"].startswith("line 1\n") for entry in batch["results"])
+    assert len(json.loads(Path(batch["result_path"]).read_text(encoding="utf-8"))["results"]) == 2
+
+
+def test_oversized_preview_trims_long_lists_and_falls_back(tmp_path):
+    server = make(tmp_path, max_result_bytes=40000, spill_dir=str(tmp_path / "spill"))
+    value = {"results": [{"path": f"f{n}.py", "line": n} for n in range(3000)], "name": "bad\udc80name"}
+    fitted, text = server._fit_result("search", value, json.dumps(value, ensure_ascii=False))
+    assert len(text.encode("utf-8")) <= 10000 and json.loads(text) == fitted
+    assert fitted["results"][0] == {"path": "f0.py", "line": 0} and fitted["name"] == "bad?name"
+    kept = len(fitted["results"]) - 1
+    assert fitted["results"][-1] == f"...[cut: showing {kept} of 3000 items; full result in result_path]"
+    # A single long line is cut by bytes.
+    line = {"stdout": "y" * 50000}
+    fitted, _ = server._fit_result("execute", line, json.dumps(line))
+    assert fitted["stdout"].startswith("yyy") and fitted["stdout"].endswith(
+        " of 50000 bytes; full result in result_path]")
+    # Not a dict: today's raw-JSON preview.
+    listed = ["z" * 50000]
+    fitted, text = server._fit_result("x", listed, json.dumps(listed))
+    assert fitted["preview"].startswith('["zzz') and len(text.encode("utf-8")) <= 40000
 
 
 def test_process_read_pages_default_to_inline_cap(tmp_path):
