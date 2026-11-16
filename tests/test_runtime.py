@@ -1426,3 +1426,24 @@ def test_process_read_pages_default_to_inline_cap(tmp_path):
         assert page["truncated"] and len(page["stdout"]) < 20000
     finally:
         server.processes.stop(pid, True)
+
+
+def test_edits_return_a_capped_diff(tmp_path):
+    server = make(tmp_path)
+    assert "diff" not in server.cap.filesystem("write", "d.txt", "a\nb\nc\n")
+    replaced = server.cap.filesystem("replace_text", "d.txt", old_text="b", new_text="B")
+    assert replaced["diff"] == "@@ -1,3 +1,3 @@\n a\n-b\n+B\n c\n"
+    multi = server.cap.filesystem("multi_edit", "d.txt", edits=[{"old_text": "a", "new_text": "A"}])
+    assert "-a\n+A\n" in multi["diff"]
+    assert "diff" not in server.cap.filesystem("write", "d.txt", "A\nB\nc\n")
+    # Only the ---/+++ header is dropped, not removed lines that start with --.
+    server.cap.filesystem("write", "d.txt", "-- note\n")
+    assert "--- note\n" in server.cap.filesystem("replace_text", "d.txt", old_text="-- note", new_text="x")["diff"]
+    (tmp_path / "crlf.txt").write_bytes(b"x\r\ny\r\n")
+    crlf = server.cap.filesystem("replace_text", "crlf.txt", old_text="y", new_text="z")
+    assert "\r" not in crlf["diff"] and "-y\n+z\n" in crlf["diff"]
+    small = make(tmp_path, edit_diff_max_bytes=10)
+    cut = small.cap.filesystem("write", "d.txt", "1\n2\n3\n")
+    assert cut["diff_truncated"] and len(cut["diff"].encode()) <= 10
+    off = make(tmp_path, edit_diff_max_bytes=0)
+    assert "diff" not in off.cap.filesystem("write", "d.txt", "q\n")

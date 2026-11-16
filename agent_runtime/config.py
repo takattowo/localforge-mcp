@@ -43,6 +43,7 @@ class Config:
     max_inline_output_bytes: int = 30_000
     max_result_bytes: int = 200_000
     spill_dir: str | None = None
+    edit_diff_max_bytes: int = 4_000
 
     @classmethod
     def load(cls, path: str | None = None) -> "Config":
@@ -71,6 +72,8 @@ class Config:
         if int(cfg.max_read_chars) < 64:
             # Room for a line number plus the line-cut marker.
             raise ValueError("max_read_chars must be at least 64")
+        if int(cfg.edit_diff_max_bytes) < 0:
+            raise ValueError("edit_diff_max_bytes must be 0 (off) or positive")
         if not cfg.state_file:
             cfg.state_file = str(Path(cfg.config_path).parent / ".localforge-state.json")
         return cfg

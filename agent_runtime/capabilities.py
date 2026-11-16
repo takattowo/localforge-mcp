@@ -1,5 +1,6 @@
 from __future__ import annotations
 import contextlib
+import difflib
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import fnmatch
@@ -57,6 +58,24 @@ def _clip(data: str, cap: int):
     while len(cut.encode("utf-8")) > cap:
         cut = cut[:-1]
     return cut, True
+
+
+def _edit_diff(before: str, after: str, cap: int):
+    """Unified diff of an edit in the LF view, capped at cap bytes.
+
+    Lets the agent confirm an edit without reading the file again.
+    Returns (diff, truncated); diff is None when cap is 0 or nothing
+    changed.
+    """
+    if cap <= 0:
+        return None, False
+    lines = list(difflib.unified_diff(_lf(before).splitlines(keepends=True),
+                                      _lf(after).splitlines(keepends=True), n=2))
+    # Drop the ---/+++ header: the result already names the file.
+    body = "".join(line if line.endswith("\n") else line + "\n" for line in lines[2:])
+    if not body:
+        return None, False
+    return _clip(body, cap)
 
 
 def _clip_ends(data: str, cap: int):
@@ -439,9 +458,13 @@ class Capabilities:
                     # An existing file keeps its line endings; a new
                     # file is written exactly as sent.
                     eol = None
+                    before = None
                     try:
                         with target.open("r", encoding=encoding, errors="replace", newline="") as handle:
-                            eol = _detect_eol(handle.read(65536))
+                            head = handle.read(65536)
+                            eol = _detect_eol(head)
+                            if target.stat().st_size <= int(self.cfg.max_file_read_bytes):
+                                before = head + handle.read()
                     except FileNotFoundError:
                         pass
                     target.parent.mkdir(parents=True, exist_ok=True)
@@ -453,6 +476,8 @@ class Capabilities:
                 # Tells the agent its line endings were kept; delete
                 # the file first to change them.
                 result["eol"] = "CRLF" if eol == "\r\n" else "LF"
+            if before is not None:
+                self._add_diff(result, before, data)
             return result
         if action == "replace_text":
             if not target.is_file():
@@ -478,7 +503,9 @@ class Capabilities:
                     written = self._atomic_write(target, updated, encoding, write_eol)
                 except OSError as e:
                     _fs_error("replace_text", target, e)
-            return {"path": str(target), "replacements": counts[0], "bytes": written}
+            result = {"path": str(target), "replacements": counts[0], "bytes": written}
+            self._add_diff(result, original, updated)
+            return result
         if action == "multi_edit":
             if not isinstance(edits, list) or not edits:
                 raise RuntimeFault("invalid_arguments",
@@ -525,7 +552,9 @@ class Capabilities:
                 except OSError as e:
                     _fs_error("multi_edit", target, e)
             applied = [{"index": index, "replacements": count} for index, count in enumerate(counts)]
-            return {"path": str(target), "edits": applied, "bytes": written}
+            result = {"path": str(target), "edits": applied, "bytes": written}
+            self._add_diff(result, original, content)
+            return result
         if action == "apply_patch":
             if patch is None:
                 raise RuntimeFault("invalid_arguments", "apply_patch requires patch")
@@ -602,6 +631,13 @@ class Capabilities:
                     _fs_error("move", target, e)
             return {"source": str(target), "destination": str(dest)}
         raise RuntimeFault("invalid_action", f"Unknown filesystem action: {action}")
+
+    def _add_diff(self, result, before, after):
+        diff, cut = _edit_diff(before, after, int(self.cfg.edit_diff_max_bytes))
+        if diff is not None:
+            result["diff"] = diff
+            if cut:
+                result["diff_truncated"] = True
 
     def _read_lines(self, target, encoding, line_start, line_end):
         """Line-mode read as numbered text, one "N<TAB>line" per line.
