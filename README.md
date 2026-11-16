@@ -309,7 +309,9 @@ Complex quoting (multi-line PowerShell with `$vars`, nested `python -c`, bracket
 
 ### `process`
 
-Actions: `start`, `read`, `write`, `status`, `list`, `restart`, and `stop`.
+Actions: `start`, `read`, `wait`, `write`, `status`, `list`, `restart`, and `stop`.
+
+`wait` blocks until the process exits, a finished output line (stdout or stderr) matches the regex `pattern`, or `wait_ms` passes (default and max 60000), whichever comes first, so a build or test run needs no `read` polling. `pattern` is optional and looks only at output after `after` (default 0: all kept output); while the process runs, a line still being written is not matched, and once it exits its unfinished last line is. The result is the `status` plus `reason` (`matched`, `exited`, or `timeout`), `matched` (the matching line, or `null`), `tail` (the last `tail_lines` lines of the kept output, default 40, max 1000, both streams in arrival order, within `max_inline_output_bytes`; `tail_truncated` when cut), and `next_after`. An invalid `pattern` fails with `invalid_arguments`.
 
 Use `after` with the previous `next_after` value for incremental log reads. `cursor_lost=true` means older output was evicted from the bounded buffer. `execute` commands that outlive their timeout show up here with `exec-…` ids.
 

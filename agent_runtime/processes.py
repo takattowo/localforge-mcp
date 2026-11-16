@@ -3,6 +3,7 @@ import codecs
 from collections import deque
 from dataclasses import dataclass, field
 import os
+import re
 import signal
 import subprocess
 import threading
@@ -14,6 +15,9 @@ from .job import track as job_track
 from .security import coerce_command, command_for_spawn, redact, spawn_environment
 
 STDIN_WRITE_TIMEOUT_SECONDS = 30
+# Output lines process wait returns by default, and at most.
+WAIT_TAIL_LINES = 40
+MAX_WAIT_TAIL_LINES = 1000
 
 @dataclass
 class Chunk:
@@ -222,6 +226,70 @@ class ProcessManager:
             # object per 4 KB pipe read.
             for stream in ("stdout", "stderr"):
                 result[stream] = "".join(c["text"] for c in output if c["stream"] == stream)
+        return result
+
+    def wait(self, process_id, pattern=None, wait_ms=60_000, after=0, tail_lines=WAIT_TAIL_LINES):
+        """Block until the process exits, an output line matches pattern,
+        or wait_ms (max 60000) passes; saves polling read during long
+        builds and test runs.
+
+        pattern is a regex searched in each output line (either stream)
+        from the chunks after the after cursor; while the process runs,
+        only finished lines are matched, so a line still being written
+        cannot match half-way. Returns the status plus reason (matched,
+        exited, or timeout), the matched line (None without one), tail
+        (the last tail_lines lines of the kept output, both streams in
+        arrival order, within max_inline_output_bytes), and next_after.
+        """
+        try:
+            regex = re.compile(pattern) if pattern is not None else None
+        except re.error as e:
+            raise RuntimeFault("invalid_arguments", f"Invalid pattern: {e}") from e
+        tail_lines = max(1, min(int(tail_lines), MAX_WAIT_TAIL_LINES))
+        item = self._get(process_id)
+        deadline = time.monotonic() + min(max(int(wait_ms), 0), 60_000) / 1000
+        scanned, partial, matched, reason = int(after), {}, None, "timeout"
+
+        def first_match(lines):
+            return next((line.rstrip("\r") for line in lines if regex.search(line.rstrip("\r"))), None)
+
+        with item.lock:
+            while True:
+                exited = item.proc.poll() is not None and not held(item)
+                if regex is not None:
+                    for chunk in item.chunks:
+                        if chunk.seq <= scanned:
+                            continue
+                        scanned = chunk.seq
+                        *done, partial[chunk.stream] = (partial.get(chunk.stream, "") + chunk.text).split("\n")
+                        matched = first_match(done)
+                        if matched is not None:
+                            break
+                    if matched is None and exited:
+                        # Nothing more is coming: unfinished last lines count too.
+                        matched = first_match(line for line in partial.values() if line)
+                    if matched is not None:
+                        reason = "matched"
+                        break
+                if exited:
+                    reason = "exited"
+                    break
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    break
+                # Pumps notify on new output and when a stream closes; the
+                # short slice catches the exit itself, which nothing notifies.
+                item.chunk_cond.wait(min(remaining, 0.25))
+            chunks, last = list(item.chunks), item.next_seq - 1
+        text = "".join(c.text for c in chunks).replace("\r\n", "\n").rstrip("\n")
+        tail = "\n".join(text.split("\n")[-tail_lines:]) if text else ""
+        raw = tail.encode("utf-8", "replace")
+        cap = int(self.cfg.max_inline_output_bytes)
+        result = {**self.status(process_id), "reason": reason, "matched": matched, "next_after": last}
+        if len(raw) > cap:
+            tail = raw[len(raw) - cap:].decode("utf-8", "ignore")
+            result["tail_truncated"] = True
+        result["tail"] = tail
         return result
 
     def write(self, process_id, text, append_newline=True):

@@ -97,6 +97,30 @@ def test_process_lifecycle_restart_duplicate_and_concurrency(tmp_path):
     assert restarted["process_id"] == "worker-0"
     for process_id in ids: server.processes.stop(process_id, True)
 
+def test_process_wait_for_exit_pattern_or_timeout(tmp_path):
+    server = make(tmp_path)
+    lines = server.call("process", {"action": "start", "command": [
+        sys.executable, "-c", "for n in range(100): print('row', n)"]})["process_id"]
+    done = server.call("process", {"action": "wait", "process_id": lines, "wait_ms": 20000, "tail_lines": 5})
+    assert done["state"] == "exited" and done["exit_code"] == 0 and done["reason"] == "exited"
+    assert done["tail"].splitlines() == [f"row {n}" for n in range(95, 100)]
+    assert done["next_after"] >= 1 and done["matched"] is None
+    serve = server.call("process", {"action": "start", "command": [sys.executable, "-c", (
+        "import time; print('starting', flush=True); time.sleep(0.3); "
+        "print('READY on 8080', flush=True); time.sleep(30)")]})["process_id"]
+    started = time.monotonic()
+    ready = server.call("process", {"action": "wait", "process_id": serve, "pattern": r"READY on \d+", "wait_ms": 20000})
+    assert ready["reason"] == "matched" and ready["matched"] == "READY on 8080" and ready["state"] == "running"
+    assert time.monotonic() - started < 15
+    started = time.monotonic()
+    idle = server.call("process", {"action": "wait", "process_id": serve, "pattern": "never",
+                                   "after": ready["next_after"], "wait_ms": 500})
+    assert idle["reason"] == "timeout" and idle["state"] == "running" and time.monotonic() - started < 10
+    with pytest.raises(RuntimeFault) as exc:
+        server.call("process", {"action": "wait", "process_id": serve, "pattern": "(unclosed"})
+    assert exc.value.code == "invalid_arguments"
+    server.processes.stop(serve, True)
+
 def test_search_fallback_and_git(tmp_path, monkeypatch):
     server = make(tmp_path)
     (tmp_path / "src").mkdir()

@@ -262,15 +262,17 @@ SCHEMAS = {
         "env": {"type": "object", "description": "Extra environment variables; denied names raise environment_denied."},
         "input": {"type": "string", "description": "Optional stdin text, max 65536 chars."}}, "required": ["command"]},
     "process": {"type": "object", "properties": {
-        "action": {"enum": ["start", "read", "write", "status", "list", "restart", "stop"], "description": "start, read, write, status, list, restart, or stop. start needs command; read, write, status, restart, and stop need process_id."},
+        "action": {"enum": ["start", "read", "wait", "write", "status", "list", "restart", "stop"], "description": "start, read, wait, write, status, list, restart, or stop. start needs command; the others except list need process_id. wait blocks until the process exits, a new output line matches pattern, or wait_ms passes (default and max 60000), and returns reason (matched, exited, timeout), matched, tail (last tail_lines lines), and next_after: use it instead of polling read during builds and tests."},
         "process_id": {"type": "string", "description": "Stable id; auto-generated when start omits it."},
         "command": {"description": "Command to start. Prefer an argv array: no shell parsing, no quoting bugs. A string runs through the configured default_shell, so match its syntax.", "oneOf": [{"type": "array", "items": {"type": "string"}}, {"type": "string"}]},
         "cwd": {"type": "string", "description": "Working directory, defaults to runtime cwd."},
         "shell": {"type": "boolean", "description": "Rarely needed. Strings auto-enable the shell; set true only to force an argv array through the shell for pipes and operators."},
         "env": {"type": "object", "description": "Extra environment variables; denied names raise environment_denied."},
-        "after": {"type": "integer", "description": "Log cursor from previous next_after for incremental reads."},
+        "after": {"type": "integer", "description": "Log cursor from previous next_after for incremental reads; for wait, pattern only looks at output after it (default 0: all kept output)."},
         "limit_bytes": {"type": "integer", "description": "Max log bytes per read."},
-        "wait_ms": {"type": "integer", "description": "Wait in milliseconds for new output, max 60000."},
+        "wait_ms": {"type": "integer", "description": "Wait in milliseconds, max 60000: for read, for new output (default 0); for wait, the most it blocks (default 60000)."},
+        "pattern": {"type": "string", "description": "wait: regex searched in each finished output line (stdout or stderr); the first match ends the wait."},
+        "tail_lines": {"type": "integer", "description": "wait: how many last output lines to return, default 40, max 1000."},
         "format": {"enum": ["text", "chunks"], "description": "read output shape: text (default) returns stdout and stderr strings; chunks returns per-read chunks with seq and timestamps."},
         "text": {"type": "string", "description": "Stdin text for write."},
         "append_newline": {"type": "boolean", "description": "Append newline to stdin write, default true."},
@@ -314,7 +316,7 @@ DESCRIPTIONS = {
     "search": "Repository text or filename search with glob filters, default ignores, and context lines. Content matches come grouped by file: results [{path, matches: [{line, text, before?, after?}]}] plus match_count; max_results counts matches. Result paths under the runtime cwd are relative to it. Several searches: use multi_search (or batch) in one call, not one search per turn.",
     "git": "Common structured Git operations plus a generic argument-array action. Anything beyond the presets goes through run, e.g. {\"action\": \"run\", \"args\": [\"commit\", \"-m\", \"fix parser\", \"--\", \"src/parser.py\"]}. Stage explicit files only; git add -A / --all / . is blocked.",
     "execute": "Run a command and wait for it, with structured output; argv arrays preferred. {shell_note}Long output is cut to head and tail and saved at stdout_path/stderr_path (up to max_capture_bytes; past process_buffer_bytes the oldest part is dropped and marked). A command still running at its timeout keeps running in the background instead of being killed (so does one that exited while a process it started still holds its output); the result has the output so far, error_type backgrounded, and a process_id for the process tool (read, stop). For long waits or polling, use the process tool instead of a long-timeout execute. Do not edit files with it; prefer the filesystem write, replace_text, or apply_patch actions.",
-    "process": "Manage long-running processes with stable IDs, split streams, cursors, stdin, restart, and tree stop. execute commands that outlive their timeout appear here with exec-* ids. For file edits, prefer the filesystem write, replace_text, or apply_patch actions.",
+    "process": "Manage long-running processes with stable IDs, split streams, cursors, stdin, restart, and tree stop. wait blocks until a process exits or prints a line matching pattern (up to 60 s per call), so a build or test run needs no read polling. execute commands that outlive their timeout appear here with exec-* ids. For file edits, prefer the filesystem write, replace_text, or apply_patch actions.",
     "multi_search": "Run up to 16 independent searches in one call, e.g. {\"searches\": [{\"query\": \"UserService\", \"glob\": [\"*.py\"], \"label\": \"users\"}, {\"query\": \"TODO\", \"files_only\": true}]}. Each entry takes the same arguments as the search tool and returns the same grouped-by-file results. A failing entry is reported per-entry without failing the batch.",
     "batch": "Run up to 16 tool calls in one call, in parallel, e.g. {\"calls\": [{\"tool\": \"search\", \"arguments\": {\"query\": \"todo\"}}, {\"tool\": \"git\", \"arguments\": {\"action\": \"status\"}}]}. Each entry names a tool and its arguments; tool names may carry the host prefix (MyHost_localforge_mcp__search). Distinct paths run concurrently while edits to the same file serialize. Results come back with index and label; match on those. A failing call is reported per-call without failing the batch. For dependent steps (edit, then run tests, then git commit) pass sequential: true: calls run one at a time in order, and after the first failed call (an error, or a result with success false, such as a failing or backgrounded execute or git command) the rest come back as skipped, so the commit never runs when the tests fail. The reply adds completed (calls run without failure) and stopped_at (index of the failed call, or of the first call skipped because the run already took longer than execute_background_after_seconds, or null). Other results never stop the run: an edit whose check has ok false still counts as done, so check it yourself.",
     "todo": "Persistent task list (TodoWrite-style) with get, add, update, delete, and clear. Keep it current across turns: add before starting work, mark in_progress while working, completed when done. State survives server restarts.",
@@ -367,7 +369,7 @@ class Server:
         "git": ("action", "args", "cwd"),
         "execute": ("command", "cmd", "cwd", "timeout", "shell", "env", "input", "kill_on_timeout"),
         "process": ("action", "process_id", "id", "command", "cmd", "cwd", "shell", "env", "after", "limit_bytes",
-                    "wait_ms", "text", "append_newline", "force", "format"),
+                    "wait_ms", "text", "append_newline", "force", "format", "pattern", "tail_lines"),
         "multi_search": ("searches",),
         "batch": ("calls", "sequential"),
         "todo": ("action", "id", "title", "status"),
@@ -466,7 +468,7 @@ class Server:
         if name == "todo": return self._todo(args)
         action = args.pop("action")
         required_by_action = {
-            "start": ["command"], "read": ["process_id"], "write": ["process_id", "text"],
+            "start": ["command"], "read": ["process_id"], "wait": ["process_id"], "write": ["process_id", "text"],
             "status": ["process_id"], "restart": ["process_id"], "stop": ["process_id"], "list": [],
         }
         if action not in required_by_action:
@@ -476,6 +478,7 @@ class Server:
             raise RuntimeFault("invalid_arguments", f"Process {action} requires: {', '.join(missing)}")
         if action == "start": return self.processes.start(**args, base_cwd=self.cap.cwd)
         if action == "read": return self.processes.read(args.pop("process_id"), fmt=args.pop("format", "text"), **args)
+        if action == "wait": return self.processes.wait(args.pop("process_id"), **args)
         if action == "write": return self.processes.write(args.pop("process_id"), args.pop("text"), **args)
         if action == "status": return self.processes.status(args["process_id"])
         if action == "list": return self.processes.list()
