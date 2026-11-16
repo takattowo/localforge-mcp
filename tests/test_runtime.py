@@ -191,6 +191,33 @@ def test_utf8_bom_is_hidden_and_kept(tmp_path):
     server.cap.filesystem("write", "plain.txt", "y\n")
     assert (tmp_path / "plain.txt").read_bytes() == b"y\n"
 
+def test_replace_all_replaces_every_exact_match(tmp_path):
+    server = make(tmp_path)
+    path = tmp_path / "r.txt"
+    path.write_text("a = old\nb = old\nc = old()\n")
+    out = server.call("filesystem", {"action": "replace_text", "path": "r.txt", "old_text": "old", "new_text": "new",
+                                     "replace_all": "true"})
+    assert out["replacements"] == 3 and path.read_text() == "a = new\nb = new\nc = new()\n"
+    with pytest.raises(RuntimeFault) as exc:
+        server.cap.filesystem("replace_text", "r.txt", old_text="missing", new_text="x", replace_all=True)
+    assert exc.value.code == "content_mismatch" and "replace_all" in exc.value.message
+    with pytest.raises(RuntimeFault) as exc:
+        server.cap.filesystem("replace_text", "r.txt", old_text="new", new_text="x", replace_all=True, expected_occurrences=3)
+    assert exc.value.code == "invalid_arguments"
+    # Exact matches only: no typography fallback, which every match would repeat.
+    path.write_text("say \u201chi\u201d\nsay \u201chi\u201d\n", encoding="utf-8")
+    with pytest.raises(RuntimeFault):
+        server.cap.filesystem("replace_text", "r.txt", old_text='"hi"', new_text="'hi'", replace_all=True)
+    out = server.cap.filesystem("multi_edit", "r.txt", edits=[
+        {"old_text": "say", "new_text": "said", "replace_all": True},
+        {"old_text": "said", "new_text": "told", "expected_occurrences": 2}])
+    assert [entry["replacements"] for entry in out["edits"]] == [2, 2]
+    assert path.read_text(encoding="utf-8") == "told \u201chi\u201d\ntold \u201chi\u201d\n"
+    with pytest.raises(RuntimeFault) as exc:
+        server.cap.filesystem("multi_edit", "r.txt", edits=[
+            {"old_text": "told", "new_text": "x", "replace_all": True, "expected_occurrences": 2}])
+    assert exc.value.code == "invalid_arguments" and "edits[0]" in exc.value.message
+
 def test_search_fallback_and_git(tmp_path, monkeypatch):
     server = make(tmp_path)
     (tmp_path / "src").mkdir()

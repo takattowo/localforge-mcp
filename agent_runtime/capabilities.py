@@ -395,6 +395,10 @@ def _find_spans(view, old, new, expected):
     each fallback tier that did not count.
     """
     exact = _occurrences(view, old)
+    if expected is None:
+        # replace_all: exact matches only. A fallback match that is
+        # wrong would be repeated at every match, unseen.
+        return exact, "exact" if exact else None, []
     if exact or "\r" in old or "\r" in new or not old.strip():
         return exact, "exact" if len(exact) == expected else None, []
     tried = []
@@ -814,7 +818,7 @@ class Capabilities:
     def filesystem(self, action, path=".", content=None, destination=None, recursive=False,
                    encoding="utf-8", offset=0, max_bytes=None, expected_occurrences=None,
                    old_text=None, new_text=None, edits=None, line_start=None, line_end=None,
-                   limit=200, glob=None, include_hidden=False, patch=None, overwrite=False):
+                   limit=200, glob=None, include_hidden=False, patch=None, overwrite=False, replace_all=False):
         if action == "copy":
             if not destination:
                 raise RuntimeFault("invalid_arguments", "copy requires destination")
@@ -926,7 +930,8 @@ class Capabilities:
             if old_text == new_text:
                 raise RuntimeFault("invalid_arguments", "old_text and new_text are identical; nothing would change")
             self._guard_file_size("replace_text", target)
-            expected = 1 if expected_occurrences is None else int(expected_occurrences)
+            # None: replace_all, every exact match (at least one).
+            expected = self._expected(replace_all, expected_occurrences, old_text, "")
             with self._locked_paths([target]):
                 try:
                     original, eol, bom = self._read_text(target, encoding)
@@ -935,8 +940,9 @@ class Capabilities:
                 updated, counts, tiers, write_eol = self._apply_edits(
                     original, eol, [(old_text, new_text, expected)],
                     lambda index, want, found, hint: RuntimeFault(
-                        "content_mismatch", f"Expected {want} occurrence(s), found {found}. "
-                        f"Pass expected_occurrences to replace all of them at once.{hint}"))
+                        "content_mismatch", ("replace_all found no exact occurrence of old_text." if want is None else
+                                             f"Expected {want} occurrence(s), found {found}. Pass expected_occurrences "
+                                             "(or replace_all: true) to replace all of them at once.") + hint))
                 try:
                     written = self._atomic_write(target, updated, encoding, write_eol, bom)
                 except OSError as e:
@@ -971,8 +977,8 @@ class Capabilities:
                     raise RuntimeFault("invalid_arguments",
                                        f"edits[{index}] old_text and new_text "
                                        "are identical; nothing would change")
-                expected = edit.get("expected_occurrences")
-                specs.append((old, new, 1 if expected is None else int(expected)))
+                specs.append((old, new, self._expected(edit.get("replace_all"), edit.get("expected_occurrences"),
+                                                       old, f"edits[{index}]: ")))
             with self._locked_paths([target]):
                 try:
                     original, eol, bom = self._read_text(target, encoding)
@@ -985,10 +991,12 @@ class Capabilities:
                 content, counts, tiers, write_eol = self._apply_edits(
                     original, eol, specs,
                     lambda index, want, found, hint: RuntimeFault(
-                        "content_mismatch", f"edits[{index}]: expected {want} "
-                        f"occurrence(s), found {found}. Edits apply in order, so "
-                        "earlier edits may have changed the text; pass "
-                        f"expected_occurrences when it repeats.{hint}"))
+                        "content_mismatch", (f"edits[{index}]: replace_all found no exact occurrence of old_text. "
+                                             "Edits apply in order, so earlier edits may have changed the text."
+                                             if want is None else
+                                             f"edits[{index}]: expected {want} occurrence(s), found {found}. Edits "
+                                             "apply in order, so earlier edits may have changed the text; pass "
+                                             "expected_occurrences (or replace_all) when it repeats.") + hint))
                 try:
                     written = self._atomic_write(target, content, encoding, write_eol, bom)
                 except OSError as e:
@@ -1107,6 +1115,19 @@ class Capabilities:
         if not overwrite:
             raise RuntimeFault("invalid_arguments",
                                f"{name} destination already exists: {dest}. Pass overwrite: true to replace it.")
+
+    @staticmethod
+    def _expected(replace_all, expected_occurrences, old, where):
+        """Match count an edit needs: None for replace_all (every exact
+        match, at least one), else expected_occurrences or 1."""
+        if not replace_all:
+            return 1 if expected_occurrences is None else int(expected_occurrences)
+        if expected_occurrences is not None:
+            raise RuntimeFault("invalid_arguments",
+                               f"{where}replace_all replaces every occurrence; do not pass expected_occurrences with it")
+        if not old:
+            raise RuntimeFault("invalid_arguments", f"{where}replace_all needs a non-empty old_text")
+        return None
 
     @staticmethod
     def _list_dir(target, limit, offset, glob, include_hidden):
