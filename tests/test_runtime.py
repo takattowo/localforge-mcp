@@ -1356,6 +1356,49 @@ def test_apply_patch_zero_context_insert(tmp_path):
     assert (tmp_path / "g.txt").read_bytes() == b"1\n2\n3\nX\n"
 
 
+def test_apply_patch_places_hunks_by_content(tmp_path):
+    server = make(tmp_path)
+    body = "".join(f"line {n}\n" for n in range(1, 21))
+    (tmp_path / "f.txt").write_text(body)
+    # git headers, line numbers 2 and 5 lines off, and counts that do not match the bodies.
+    diff = ("diff --git a/f.txt b/f.txt\nindex 1111111..2222222 100644\n--- a/f.txt\n+++ b/f.txt\n"
+            "@@ -5,9 +5,9 @@\n line 7\n-line 8\n+LINE 8\n line 9\n"
+            "@@ -10,1 +10,7 @@\n line 15\n-line 16\n+LINE 16\n line 17\n")
+    server.cap.filesystem("apply_patch", ".", patch=diff)
+    assert (tmp_path / "f.txt").read_text() == body.replace("line 8\n", "LINE 8\n").replace("line 16\n", "LINE 16\n")
+    created = ("diff --git a/new.txt b/new.txt\nnew file mode 100644\nindex 0000000..3333333\n"
+               "--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1,5 @@\n+hello\n")
+    server.cap.filesystem("apply_patch", ".", patch=created)
+    assert (tmp_path / "new.txt").read_text() == "hello\n"
+    # A removed line starting "-- " is not the next file's header.
+    (tmp_path / "sql.txt").write_text("-- note\nkeep\n")
+    server.cap.filesystem("apply_patch", ".", patch="--- a/sql.txt\n+++ b/sql.txt\n@@ -1,2 +1,1 @@\n--- note\n keep\n")
+    assert (tmp_path / "sql.txt").read_text() == "keep\n"
+
+
+def test_apply_patch_refuses_ambiguous_places_and_renames(tmp_path):
+    server = make(tmp_path)
+    (tmp_path / "amb.txt").write_text("x\nb\nm\nm\nx\nb\n")
+    # Stated at line 3: the matches at lines 1 and 5 are equally near.
+    with pytest.raises(RuntimeFault) as exc:
+        server.cap.filesystem("apply_patch", ".", patch="--- a/amb.txt\n+++ b/amb.txt\n@@ -3,2 +3,2 @@\n x\n-b\n+B\n")
+    assert exc.value.code == "content_mismatch" and "lines 1 and 5" in exc.value.message
+    assert (tmp_path / "amb.txt").read_text() == "x\nb\nm\nm\nx\nb\n"
+    # Hunks apply in order: the second may not land before the first.
+    with pytest.raises(RuntimeFault):
+        server.cap.filesystem("apply_patch", ".", patch=(
+            "--- a/amb.txt\n+++ b/amb.txt\n@@ -5,2 +5,2 @@\n x\n-b\n+B\n@@ -1,2 +1,2 @@\n m\n-m\n+M\n"))
+    (tmp_path / "old.txt").write_text("x\n")
+    renames = ["diff --git a/old.txt b/new.txt\nsimilarity index 90%\nrename from old.txt\nrename to new.txt\n"
+               "--- a/old.txt\n+++ b/new.txt\n@@ -1 +1 @@\n-x\n+y\n",
+               "--- a/old.txt\n+++ b/new.txt\n@@ -1 +1 @@\n-x\n+y\n"]
+    for diff in renames:
+        with pytest.raises(RuntimeFault) as exc:
+            server.cap.filesystem("apply_patch", ".", patch=diff)
+        assert exc.value.code == "invalid_arguments" and "renames old.txt to new.txt" in exc.value.message
+    assert (tmp_path / "old.txt").read_text() == "x\n" and not (tmp_path / "new.txt").exists()
+
+
 @pytest.mark.parametrize("engine", ["ripgrep", "python"])
 def test_search_folder_glob_and_exact_truncation(tmp_path, monkeypatch, engine):
     if engine == "ripgrep" and not shutil.which("rg"):

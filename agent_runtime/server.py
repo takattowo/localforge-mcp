@@ -235,7 +235,7 @@ SCHEMAS = {
         "limit": {"type": "integer", "description": "Max list entries returned, default 200, clamped 1..1000."},
         "glob": {"type": "array", "items": {"type": "string"}, "description": "Fnmatch filters on entry name for list."},
         "include_hidden": {"type": "boolean", "description": "Include dotfiles in list, default false."},
-        "patch": {"type": "string", "description": "Unified diff for apply_patch: modify or create files, exact context, all-or-nothing."}}, "required": ["action"]},
+        "patch": {"type": "string", "description": "Unified diff for apply_patch (git diff headers are fine): modify or create files, all-or-nothing. Each hunk goes where its context and removed lines match exactly, nearest the stated line; header line counts are not checked. Renames and copies are refused (move first)."}}, "required": ["action"]},
     "search": {"type": "object", "properties": {
         "query": {"type": "string", "description": "Text or regex to find; omit only with files_only."},
         "path": {"type": "string", "description": "File or directory to search, relative to cwd or absolute."},
