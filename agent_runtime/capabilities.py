@@ -1,5 +1,6 @@
 from __future__ import annotations
 import codecs
+from collections import deque
 import contextlib
 import base64
 import bisect
@@ -274,6 +275,8 @@ def _glob_regex(pattern, folders=True):
 
 MAX_BATCH_SEARCHES = 16
 MAX_READ_LINES = 2000
+# Last lines a line-mode read past the end of the file shows.
+PAST_END_LINES = 100
 LINE_CUT = " ...[line cut]"
 BATCH_SEARCH_WORKERS = 8
 GIT_ROOT_TTL_SECONDS = 30
@@ -1106,7 +1109,9 @@ class Capabilities:
         Reads in bounded pieces, so memory stays bounded however long
         a line or the file is, and stops at MAX_READ_LINES lines or
         max_read_chars. next_line says where to continue; total_lines
-        appears only when the read reaches the end of the file.
+        appears only when the read reaches the end of the file. A
+        line_start past the end returns the file's last lines (up to
+        PAST_END_LINES) and a note, instead of nothing.
         """
         start = max(1, int(line_start or 1))
         last = int(line_end) if line_end is not None else None
@@ -1118,6 +1123,8 @@ class Capabilities:
                 if b"\x00" in handle.read(8192):
                     raise RuntimeFault("binary_file", "Binary file read is not supported")
             out, used, n, end, more = [], 0, 0, start - 1, False
+            # The lines skipped before start, in case it is past the end.
+            skipped = deque(maxlen=PAST_END_LINES)
             # newline="\n": only LF ends a line, like ripgrep, so a
             # lone CR stays inside its line.
             with target.open("r", encoding=encoding, errors="replace", newline="\n") as handle:
@@ -1132,6 +1139,7 @@ class Capabilities:
                         while (rest := handle.readline(65536)) and not rest.endswith("\n"):
                             pass
                     if n < start:
+                        skipped.append((n, line))
                         continue
                     text = f"{n}\t" + line.rstrip("\r\n")
                     if len(text) > budget:
@@ -1148,8 +1156,19 @@ class Capabilities:
         except OSError as e:
             _fs_error("read", target, e)
         if not more and start > max(n, 1):
-            raise RuntimeFault("invalid_arguments",
-                               f"line_start {start} is past the end of the file ({n} lines)")
+            # Show where the file ends, newest lines kept within budget.
+            for number, line in reversed(skipped):
+                text = f"{number}\t" + line.rstrip("\r\n")
+                if len(text) > budget:
+                    text = text[:max(0, budget - len(LINE_CUT))] + LINE_CUT
+                if out and used + len(text) + 1 > budget:
+                    break
+                out.insert(0, text)
+                used += len(text) + 1
+            return {"path": str(target), "content": "\n".join(out),
+                    "line_start": n - len(out) + 1, "line_end": n, "truncated": False, "total_lines": n,
+                    "note": f"line_start {start} is past the end; the file has {n} lines."
+                            + (f" Showing its last {len(out)}." if out else "")}
         result = {"path": str(target), "content": "\n".join(out), "line_start": start,
                   "line_end": end, "truncated": more}
         if more:

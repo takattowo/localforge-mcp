@@ -186,8 +186,9 @@ def test_list_pagination_and_read_lines(tmp_path):
     assert tail["line_end"] == 3 and tail["truncated"] is False
     with pytest.raises(RuntimeFault):
         server.cap.filesystem("read", "a.txt", line_start=3, line_end=2)
-    with pytest.raises(RuntimeFault):
-        server.cap.filesystem("read", "a.txt", line_start=9)
+    # Past the end: a note and the last lines instead of an error.
+    past = server.cap.filesystem("read", "a.txt", line_start=9)
+    assert past["content"].endswith("3\tthird line") and "past the end" in past["note"]
 
 
 def test_read_on_a_directory_lists_it(tmp_path):
@@ -1109,8 +1110,7 @@ def test_eol_detection_edge_cases(tmp_path):
     out = server.cap.filesystem("write", "single.txt", "a\r\nb")
     assert single.read_bytes() == b"a\r\nb" and "eol" not in out
     (tmp_path / "empty.txt").write_text("")
-    with pytest.raises(RuntimeFault):
-        server.cap.filesystem("read", "empty.txt", line_start=2)
+    assert "the file has 0 lines" in server.cap.filesystem("read", "empty.txt", line_start=2)["note"]
 
 
 def test_edits_keep_untouched_line_bytes(tmp_path):
@@ -1154,6 +1154,25 @@ def test_read_lines_bounded_and_lf_only(tmp_path):
     assert first["truncated"] and first["next_line"] == 2 and "total_lines" not in first
     second = server.cap.filesystem("read", "huge.txt", line_start=2)
     assert second["content"] == "2\tafter" and second["total_lines"] == 2
+
+
+def test_read_lines_past_the_end_shows_the_last_lines(tmp_path):
+    server = make(tmp_path)
+    (tmp_path / "a.txt").write_text("".join(f"row {n}\n" for n in range(1, 151)))
+    out = server.cap.filesystem("read", "a.txt", line_start=200)
+    assert "line_start 200 is past the end; the file has 150 lines" in out["note"]
+    shown = out["content"].split("\n")
+    assert len(shown) == 100 and shown[0] == "51\trow 51" and shown[-1] == "150\trow 150"
+    assert out["line_start"] == 51 and out["line_end"] == 150 and out["total_lines"] == 150
+    assert out["truncated"] is False and "next_line" not in out
+    # Still within max_read_chars, keeping the last lines.
+    small = make(tmp_path, max_read_chars=64)
+    tail = small.cap.filesystem("read", "a.txt", line_start=151)
+    assert len(tail["content"]) <= 64 and tail["content"].endswith("149\trow 149\n150\trow 150")
+    (tmp_path / "empty.txt").write_text("")
+    empty = server.cap.filesystem("read", "empty.txt", line_start=5)
+    assert empty["content"] == "" and empty["total_lines"] == 0
+    assert "line_start 5 is past the end; the file has 0 lines" in empty["note"]
 
 
 @pytest.mark.parametrize("engine", ["ripgrep", "python"])

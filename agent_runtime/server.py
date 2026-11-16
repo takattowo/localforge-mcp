@@ -92,7 +92,7 @@ SCHEMAS = {
                 "new_text": {"type": "string", "description": "Replacement text."},
                 "expected_occurrences": {"type": "integer", "description": "Required match count, default 1."}},
                 "required": ["old_text", "new_text"]}},
-        "line_start": {"type": "integer", "description": "1-based first line for line-mode read, default 1."},
+        "line_start": {"type": "integer", "description": "1-based first line for line-mode read, default 1. Past the end of the file, the last lines come back with a note."},
         "line_end": {"type": "integer", "description": "Inclusive last line for line-mode read, default end of file."},
         "limit": {"type": "integer", "description": "Max list entries returned, default 200, clamped 1..1000."},
         "glob": {"type": "array", "items": {"type": "string"}, "description": "Fnmatch filters on entry name for list."},
