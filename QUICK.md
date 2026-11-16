@@ -31,7 +31,7 @@ NEVER edit files by shelling out. Do not use `execute`, `process`, or any code-e
 ## Commands
 - Prefer argv arrays: {"command": ["npm", "test"]}. A string command runs through the configured shell (by default PowerShell 7 when installed, else Windows PowerShell 5.1; the `execute` description names which) — fine for one-liners; on 5.1 there is no `&&`/`||` (chain with `;` or make separate calls); avoid complex quoting.
 - Complex scripts: write the script with `filesystem` action `write`, then run it by path (python script.py, powershell -ExecutionPolicy Bypass -File script.ps1).
-- Long waits: `process` action `start` + `read` with wait_ms and after/next_after polling (output arrives as stdout/stderr strings). Do not use long `execute` timeouts — they block the server and risk gateway timeouts.
+- Long waits: `process` action `start` + `read` with wait_ms and after/next_after polling (output arrives as stdout/stderr strings). Do not use long `execute` timeouts — they block the server and risk gateway timeouts. An `execute` still running at its timeout (default 120 s) moves to the background: `error_type` `backgrounded` with a `process_id`; follow it with `process read` (after=next_after) or end it with `process stop`, and do not start a second copy.
 - Environment variables set inside a command do not carry over to the next call; pass `env` per call. The working directory carries over only through `workspace` action `set_cwd`, not `cd` inside a command.
 - Programs started through `execute` or `process` are closed when the server exits (Quick restart included), unless kill_children_on_exit is false.
 - After LocalForge is updated or its config changes, the server only picks it up after a Quick restart.

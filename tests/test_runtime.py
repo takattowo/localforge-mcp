@@ -72,7 +72,7 @@ def test_execute_results_shell_timeout_large_env_and_network(tmp_path):
     assert auto["success"] and "invalid" in auto["stdout"]
     bad = server.cap.execute([sys.executable, "-c", "raise SystemExit(7)"])
     assert bad["exit_code"] == 7 and bad["error_type"] == "process_exit"
-    timeout = server.cap.execute([sys.executable, "-c", "import time;time.sleep(2)"], timeout=.05)
+    timeout = server.cap.execute([sys.executable, "-c", "import time;time.sleep(2)"], timeout=.05, kill_on_timeout=True)
     assert timeout["error_type"] == "timeout"
     capped = make(tmp_path, max_capture_bytes=1000)
     big = capped.cap.execute([sys.executable, "-c", "print('x'*5000)"])
@@ -1949,3 +1949,70 @@ def test_missing_path_suggests_similar_names(tmp_path):
         server.cap.filesystem("read", str(tmp_path.parent / "nope-lf" / "x.txt"))
     assert outside.value.code == "path_not_found" and "nearest" not in outside.value.message
     assert "Did you mean" not in outside.value.message
+
+
+def _exec_entries(server):
+    return [p["process_id"] for p in server.processes.list() if p["process_id"].startswith("exec-")]
+
+
+def test_execute_moves_to_background_on_timeout(tmp_path):
+    server = make(tmp_path)
+    code = "import time\nprint('started', flush=True)\ntime.sleep(1.5)\nprint('later', flush=True)\ntime.sleep(30)"
+    out = server.cap.execute([sys.executable, "-c", code], timeout=0.8)
+    pid = out.get("process_id")
+    try:
+        assert out["success"] is False and out["error_type"] == "backgrounded" and out["exit_code"] is None
+        assert "started" in out["stdout"] and "later" not in out["stdout"]
+        assert pid and pid in out["hint"] and "process" in out["hint"]
+        assert server.processes.status(pid)["state"] == "running"
+        # Output keeps flowing; next_after skips what the result already showed.
+        page = server.processes.read(pid, after=out["next_after"], wait_ms=10000)
+        assert "later" in page["stdout"] and "started" not in page["stdout"]
+    finally:
+        if pid:
+            server.processes.stop(pid, True)
+
+
+def test_execute_kill_on_timeout_and_cleanup(tmp_path):
+    server = make(tmp_path)
+    sleeper = [sys.executable, "-c", "import time; print('x', flush=True); time.sleep(30)"]
+    killed = server.cap.execute(sleeper, timeout=0.5, kill_on_timeout=True)
+    assert killed["error_type"] == "timeout" and "process_id" not in killed
+    assert _exec_entries(server) == []
+    # A command that ends in time leaves no process entry behind.
+    ok = server.cap.execute([sys.executable, "-c", "print('ok')"])
+    assert ok["success"] and "process_id" not in ok and _exec_entries(server) == []
+    # No timeout given: the foreground wait is execute_background_after_seconds.
+    short = make(tmp_path, execute_background_after_seconds=1)
+    started = time.monotonic()
+    out = short.cap.execute(sleeper)
+    try:
+        assert out["error_type"] == "backgrounded" and time.monotonic() - started < 10
+    finally:
+        short.processes.stop(out["process_id"], True)
+
+
+def test_execute_kills_on_timeout_when_process_limit_is_reached(tmp_path):
+    server = make(tmp_path, max_processes=1, process_ttl_seconds=1000)
+    hog = server.processes.start([sys.executable, "-c", "import time; time.sleep(30)"])["process_id"]
+    try:
+        out = server.cap.execute([sys.executable, "-c", "import time; time.sleep(30)"], timeout=0.5)
+        assert out["error_type"] == "timeout" and "max_processes" in out["hint"]
+        assert _exec_entries(server) == []
+    finally:
+        server.processes.stop(hog, True)
+
+
+def test_edit_checks_stay_bounded(tmp_path):
+    slow = [sys.executable, "-c", "import time; time.sleep(30)", "{path}"]
+    server = make(tmp_path, edit_checks={"*.chk": slow}, edit_check_timeout_seconds=1)
+    check = server.cap.filesystem("write", "a.chk", "x")["check"]
+    assert check["ok"] is False and check["error_type"] == "timeout"
+    assert _exec_entries(server) == []
+
+
+def test_execute_marks_output_past_the_process_buffer(tmp_path):
+    server = make(tmp_path, process_buffer_bytes=5000)
+    out = server.cap.execute([sys.executable, "-c", "import sys\nfor n in range(100): print(str(n) * 100, flush=True)"])
+    assert out["success"] and out["stdout_truncated"]
+    assert out["stdout"].startswith("...[earlier output dropped") and out["stdout"].rstrip().endswith("99" * 100)

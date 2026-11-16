@@ -11,17 +11,16 @@ import json
 import os
 import re
 import shutil
-import signal
 import subprocess
 import sys
 import tempfile
 import threading
 import time
+import uuid
 from .errors import RuntimeFault
-from .job import adopt as job_adopt
 from .patch import build_new as build_patched
 from .patch import parse as parse_diff
-from .security import coerce_command, command_for_spawn, redact, safe_environment, spawn_environment
+from .security import coerce_command, redact, safe_environment
 
 def _fs_error(action, target, exc):
     if isinstance(exc, FileNotFoundError):
@@ -925,7 +924,8 @@ class Capabilities:
             return
         command = [part.replace("{path}", str(target)) for part in argv]
         try:
-            run = self.execute(command, timeout=self.cfg.edit_check_timeout_seconds)
+            # kill_on_timeout: a check must never outlive its timeout.
+            run = self.execute(command, timeout=self.cfg.edit_check_timeout_seconds, kill_on_timeout=True)
         except RuntimeFault as e:
             result["check"] = {"ok": False, "command": command, "error": e.message}
             return
@@ -1373,23 +1373,20 @@ class Capabilities:
                         f"Refusing to stage a likely secret: {spec}. Private keys must never enter git history.")
         # core.quotepath=false: show non-ASCII paths as themselves, not
         # octal escapes like "f\303\251.txt".
-        return self.execute(["git", "-c", "core.quotepath=false", "-C", str(work)] + subcommand + ([] if action == "run" else list(args or [])), cwd=str(work))
+        # kill_on_timeout: a git command must not linger in the background.
+        return self.execute(["git", "-c", "core.quotepath=false", "-C", str(work)] + subcommand + ([] if action == "run" else list(args or [])), cwd=str(work),
+                            kill_on_timeout=True)
 
     @staticmethod
-    def _creation():
-        return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if os.name == "nt" else {"start_new_session": True}
-
-    @staticmethod
-    def _kill_tree(proc):
-        if proc.poll() is not None:
-            return
-        if os.name == "nt":
-            subprocess.run(["taskkill", "/PID", str(proc.pid), "/T", "/F"], capture_output=True, timeout=15)
-        else:
-            try:
-                os.killpg(proc.pid, signal.SIGKILL)
-            except ProcessLookupError:
-                pass
+    def _feed_stdin(proc, data):
+        # On a thread: a child that never reads stdin must not block the call.
+        try:
+            proc.stdin.write(data)
+        except OSError:
+            pass
+        finally:
+            with contextlib.suppress(OSError):
+                proc.stdin.close()
 
     def spill(self, prefix, text, suffix=".log"):
         """Save text to the spill folder and return the file path.
@@ -1440,7 +1437,8 @@ class Capabilities:
                 pass
         return shown, full_cut or shown_cut, path
 
-    def execute(self, command, cwd=None, timeout=None, shell=False, env=None, input=None):
+    def execute(self, command, cwd=None, timeout=None, shell=False, env=None, input=None,
+                kill_on_timeout=False):
         work = self.paths.resolve(cwd or ".", cwd=self.cwd, access="read", must_exist=True)
         command = coerce_command(command)
         stdin_bytes = None
@@ -1451,36 +1449,67 @@ class Capabilities:
         shell = bool(shell or isinstance(command, str))
         self.policy.authorize_command(command, work, shell)
         started = time.monotonic()
-        proc = None
-        effective_timeout = float(timeout or self.cfg.default_timeout_seconds)
+        # With no timeout given, a command that may move to the background
+        # waits execute_background_after_seconds, well inside host and
+        # gateway timeouts; one that must stay bounded keeps the old default.
+        fallback = self.cfg.default_timeout_seconds if kill_on_timeout else self.cfg.execute_background_after_seconds
+        effective_timeout = float(timeout or fallback)
+        deadline = started + effective_timeout
         try:
-            proc = subprocess.Popen(command_for_spawn(self.cfg, command, shell), cwd=work, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                                    stdin=subprocess.PIPE if stdin_bytes is not None else subprocess.DEVNULL,
-                                    env=spawn_environment(self.cfg, shell, env), **self._creation())
-            if self.cfg.kill_children_on_exit:
-                # Kernel-side cleanup: the child dies with
-                # this process however it dies, not just on
-                # a clean exit (see agent_runtime/job.py).
-                job_adopt(proc.pid)
-            stdout, stderr = proc.communicate(input=stdin_bytes, timeout=effective_timeout)
-            error_type = None if proc.returncode == 0 else "process_exit"
-        except subprocess.TimeoutExpired:
-            self._kill_tree(proc)
-            stdout, stderr = proc.communicate()
-            error_type = "timeout"
+            # A process entry, so a command still running at its timeout
+            # can keep running and be followed with the process tool.
+            item = self.processes.spawn(command, str(work), shell, env, f"exec-{uuid.uuid4().hex[:10]}",
+                                        enforce_limit=False)
         except OSError as e:
             return {"success": False, "command": command, "cwd": str(work), "exit_code": None,
                     "stdout": "", "stderr": str(e), "duration_ms": int((time.monotonic() - started) * 1000),
                     "error_type": "process_start"}
-        out, err = redact(stdout.decode("utf-8", "replace")), redact(stderr.decode("utf-8", "replace"))
+        proc = item.proc
+        if stdin_bytes:
+            threading.Thread(target=self._feed_stdin, args=(proc, stdin_bytes), daemon=True).start()
+        else:
+            proc.stdin.close()
+        try:
+            proc.wait(timeout=max(0.0, deadline - time.monotonic()))
+        except subprocess.TimeoutExpired:
+            pass
+        error_type, hint = None, None
+        if proc.poll() is None:
+            # active() counts this command too, so <= leaves it room.
+            if not kill_on_timeout and self.processes.active() <= int(self.cfg.max_processes):
+                error_type = "backgrounded"
+            else:
+                if not kill_on_timeout:
+                    hint = (f"max_processes ({self.cfg.max_processes}) reached, so the command was "
+                            "stopped at its timeout instead of moving to the background.")
+                self.processes.stop(item.id, True)
+                error_type = "timeout"
+        elif proc.returncode != 0:
+            error_type = "process_exit"
+        if error_type != "backgrounded":
+            # Let the readers drain the pipes; a grandchild that holds
+            # them open must not hold up the reply past the deadline.
+            for pump in item.pumps:
+                pump.join(max(1.0, deadline - time.monotonic()))
+            self.processes.discard(item)
+        with item.lock:
+            chunks, last = list(item.chunks), item.next_seq - 1
+        # Chunks are redacted one read at a time; redacting the whole
+        # again also catches a secret split across two reads.
+        out, err = (redact("".join(c.text for c in chunks if c.stream == stream)) for stream in ("stdout", "stderr"))
+        # Over process_buffer_bytes the oldest output is gone.
+        lost = (chunks[0].seq if chunks else item.next_seq) > 1
+        if lost:
+            out = "...[earlier output dropped: over process_buffer_bytes]...\n" + out
         # PowerShell 5.1 rejects && and || with this (unlocalized) error id.
         and_or_failed = (shell and isinstance(command, str) and ("&&" in command or "||" in command)
                          and "InvalidEndOfLine" in err)
-        if not out and not err and (proc.returncode != 0 or error_type is not None):
+        if not out and not err and error_type not in (None, "backgrounded"):
             err = ("[no output captured on stdout/stderr; the child may have written directly "
                    "to the console or died during startup (e.g. missing environment)]")
         out, out_cut, out_path = self._inline_output("stdout", out)
         err, err_cut, err_path = self._inline_output("stderr", err)
+        out_cut = out_cut or lost
         result = {"success": proc.returncode == 0 and error_type is None, "command": command, "cwd": str(work),
                 "exit_code": proc.returncode, "stdout": out, "stderr": err,
                 "stdout_truncated": out_cut, "stderr_truncated": err_cut,
@@ -1489,9 +1518,17 @@ class Capabilities:
             result["stdout_path"] = out_path
         if err_path:
             result["stderr_path"] = err_path
+        if error_type == "backgrounded":
+            result["process_id"] = item.id
+            result["next_after"] = last
+            hint = (f"Still running after {effective_timeout:g} s, so it keeps running in the background "
+                    f"as process {item.id}: process read with that process_id (after={last}, wait_ms) "
+                    "shows new output, process stop ends it. Do not start another copy while it runs.")
         if and_or_failed:
-            result["hint"] = ("Windows PowerShell 5.1 has no && or ||. Chain with ; "
-                              "(or 'if ($?) { ... }'), or make separate calls.")
+            hint = ("Windows PowerShell 5.1 has no && or ||. Chain with ; "
+                    "(or 'if ($?) { ... }'), or make separate calls.")
+        if hint:
+            result["hint"] = hint
         if timeout is not None and effective_timeout > float(self.cfg.default_timeout_seconds):
             result["warning"] = (
                 "timeout exceeds the configured default "

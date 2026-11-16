@@ -37,6 +37,7 @@ class Managed:
     lock: threading.RLock = field(default_factory=threading.RLock)
     stdin_lock: threading.Lock = field(default_factory=threading.Lock)
     chunk_cond: threading.Condition = field(init=False)
+    pumps: list = field(default_factory=list)
 
     def __post_init__(self):
         self.chunk_cond = threading.Condition(self.lock)
@@ -107,13 +108,22 @@ class ProcessManager:
             pipe.close()
 
     def start(self, command, cwd=None, shell=False, env=None, process_id=None, base_cwd=None):
+        return self.status(self.spawn(command, cwd, shell, env, process_id, base_cwd).id)
+
+    def spawn(self, command, cwd=None, shell=False, env=None, process_id=None, base_cwd=None,
+              enforce_limit=True):
+        """Start a managed process and return its entry.
+
+        enforce_limit=False skips the max_processes check; execute
+        uses it and checks the limit itself before keeping a command.
+        """
         # base_cwd is the runtime cwd; a relative or missing cwd
         # resolves against it, like execute.
         work = self.paths.resolve(cwd or ".", cwd=base_cwd, access="read", must_exist=True)
         command = coerce_command(command)
         shell = bool(shell or isinstance(command, str))
         self.policy.authorize_command(command, work, shell)
-        if self._gc() >= int(self.cfg.max_processes):
+        if self._gc() >= int(self.cfg.max_processes) and enforce_limit:
             raise RuntimeFault("process_limit", f"Too many processes (max {self.cfg.max_processes})")
         pid = process_id or f"proc-{uuid.uuid4().hex[:10]}"
         with self.lock:
@@ -128,8 +138,20 @@ class ProcessManager:
             item = Managed(pid, proc, command, str(work), shell, env, time.time())
             self.items[pid] = item
         for stream, pipe in (("stdout", proc.stdout), ("stderr", proc.stderr)):
-            threading.Thread(target=self._pump, args=(item, pipe, stream), daemon=True).start()
-        return self.status(pid)
+            pump = threading.Thread(target=self._pump, args=(item, pipe, stream), daemon=True)
+            item.pumps.append(pump)
+            pump.start()
+        return item
+
+    def active(self):
+        """Number of running processes, after pruning old exited ones."""
+        return self._gc()
+
+    def discard(self, item):
+        """Forget an entry, unless its id now names another process."""
+        with self.lock:
+            if self.items.get(item.id) is item:
+                del self.items[item.id]
 
     def read(self, process_id, after=0, limit_bytes=None, wait_ms=0, fmt="text"):
         if fmt not in {"text", "chunks"}:
@@ -196,7 +218,7 @@ class ProcessManager:
                     item.proc.stdin.write(data)
                     item.proc.stdin.flush()
                     outcome["ok"] = True
-                except (BrokenPipeError, OSError) as e:
+                except (BrokenPipeError, OSError, ValueError) as e:
                     outcome["error"] = e
 
             writer = threading.Thread(target=_do_write, daemon=True)

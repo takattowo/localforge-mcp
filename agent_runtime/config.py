@@ -20,6 +20,9 @@ class Config:
     # powershell (Windows PowerShell 5.1), or sh off Windows.
     default_shell: str = "auto"
     default_timeout_seconds: int = 600
+    # execute with no timeout waits this long in the foreground, then
+    # leaves the command running in the background as a process entry.
+    execute_background_after_seconds: int = 120
     max_capture_bytes: int = 1_000_000
     max_file_read_bytes: int = 1_000_000
     max_read_chars: int = 60_000
@@ -80,7 +83,7 @@ class Config:
             raise ValueError(f"invalid mode: {cfg.mode}")
         if cfg.network not in NETWORK_MODES:
             raise ValueError("network must be 'disabled' or 'unrestricted'")
-        for name in ("default_timeout_seconds", "max_capture_bytes", "max_file_read_bytes", "max_read_chars", "process_buffer_bytes", "process_ttl_seconds", "max_processes", "max_concurrency", "max_inline_output_bytes", "max_result_bytes", "edit_check_timeout_seconds", "max_project_instruction_bytes"):
+        for name in ("default_timeout_seconds", "execute_background_after_seconds", "max_capture_bytes", "max_file_read_bytes", "max_read_chars", "process_buffer_bytes", "process_ttl_seconds", "max_processes", "max_concurrency", "max_inline_output_bytes", "max_result_bytes", "edit_check_timeout_seconds", "max_project_instruction_bytes"):
             if int(getattr(cfg, name)) <= 0:
                 raise ValueError(f"{name} must be positive")
         if int(cfg.max_read_chars) < 64:
