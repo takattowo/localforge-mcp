@@ -1,6 +1,7 @@
 from __future__ import annotations
 import contextlib
 import ctypes
+import functools
 import os
 import sys
 import threading
@@ -51,8 +52,29 @@ class _EXTENDED_LIMIT_INFORMATION(ctypes.Structure):
     ]
 
 
+@functools.lru_cache(maxsize=None)
+def _kernel32():
+    """kernel32 with the job functions typed, set up once per process."""
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.CreateJobObjectW.restype = wintypes.HANDLE
+    # LPSECURITY_ATTRIBUTES is not in ctypes.wintypes; passing None
+    # (default security) only needs a pointer-sized argument.
+    kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
+    kernel32.SetInformationJobObject.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD]
+    kernel32.SetInformationJobObject.restype = wintypes.BOOL
+    kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
+    kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
+    kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel32.CloseHandle.restype = wintypes.BOOL
+    kernel32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+    kernel32.TerminateJobObject.restype = wintypes.BOOL
+    return kernel32
+
+
 class WindowsJob:
-    """Kill-on-close Job Object for child processes.
+    """Job Object for child processes, kill-on-close by default.
 
     atexit cannot run when the server dies hard (taskkill, crash,
     host restart after hibernation), which would otherwise orphan
@@ -62,24 +84,14 @@ class WindowsJob:
     best-effort: if the server itself already runs inside a job
     (some hosts sandbox MCP servers), children stay in the host's
     job and behavior is unchanged from before.
+
+    With kill_on_close=False it is a plain job with no limits: track()
+    gives each spawned process one, nested in the kill-on-close job, so
+    terminate() can stop its whole tree even after its root exited.
     """
 
     def __init__(self, kill_on_close=True):
-        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
-        kernel32.CreateJobObjectW.restype = wintypes.HANDLE
-        # LPSECURITY_ATTRIBUTES is not in ctypes.wintypes; passing None
-        # (default security) only needs a pointer-sized argument.
-        kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
-        kernel32.SetInformationJobObject.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD]
-        kernel32.SetInformationJobObject.restype = wintypes.BOOL
-        kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]
-        kernel32.AssignProcessToJobObject.restype = wintypes.BOOL
-        kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
-        kernel32.OpenProcess.restype = wintypes.HANDLE
-        kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
-        kernel32.CloseHandle.restype = wintypes.BOOL
-        kernel32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
-        kernel32.TerminateJobObject.restype = wintypes.BOOL
+        kernel32 = _kernel32()
         self._kernel32 = kernel32
         job = kernel32.CreateJobObjectW(None, None)
         if not job:

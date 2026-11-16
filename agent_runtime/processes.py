@@ -70,10 +70,14 @@ class ProcessManager:
         now = time.time()
         ttl = int(self.cfg.process_ttl_seconds)
         with self.lock:
+            def held(v):
+                # Something it started still holds its output: it can
+                # still be read and stopped, so it is not pruned.
+                return any(p.is_alive() for p in v.pumps)
             live = {k: v for k, v in self.items.items()
-                    if v.proc.poll() is None or (now - v.started) < ttl}
+                    if v.proc.poll() is None or held(v) or (now - v.started) < ttl}
             if len(live) > int(self.cfg.max_processes):
-                exited = sorted(((k, v) for k, v in live.items() if v.proc.poll() is not None),
+                exited = sorted(((k, v) for k, v in live.items() if v.proc.poll() is not None and not held(v)),
                                 key=lambda kv: kv[1].started)
                 drop = len(live) - int(self.cfg.max_processes)
                 for key, _ in exited[:drop]:
@@ -256,10 +260,16 @@ class ProcessManager:
                 if force:
                     command.append("/F")
                 subprocess.run(command, capture_output=True, stdin=subprocess.DEVNULL, timeout=15)
-            elif item.job is not None:
-                # taskkill /T cannot reach them through a dead PID.
+            # Exited before or during taskkill: /T cannot reach what it
+            # started through a dead PID, the job can.
+            if item.job is not None and item.proc.poll() is not None:
                 item.job.terminate()
         else:
+            if item.proc.poll() is not None and not any(p.is_alive() for p in item.pumps):
+                # The leader is gone and nothing holds its output, so the
+                # group is most likely empty, and its id may already
+                # belong to an unrelated group.
+                return
             # The process group outlives its leader while members remain.
             try:
                 os.killpg(item.proc.pid, signal.SIGKILL if force else signal.SIGTERM)

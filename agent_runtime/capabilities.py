@@ -1198,8 +1198,10 @@ class Capabilities:
         with the dominant ending instead.
         Returns (content, counts, tiers, eol_for_write), tiers naming how
         each edit matched; mismatch(index, expected, found, hint) builds
-        the error when the LF view does not match, hint being
-        _miss_hint's text for the failing edit.
+        the error when the LF view does not match. found is a count, or
+        the per-tier summary ("0 exact, 2 ignoring typography, ...") when
+        a fallback tier found the wrong number; hint is _miss_hint's
+        closest lines or _fallback_miss's match lines.
         """
         view, exact = _lf(original), original
         counts, tiers = [], []
@@ -1708,6 +1710,10 @@ class Capabilities:
                     # entry is dropped below all the same.
                     pass
                 error_type = "timeout"
+                if not running:
+                    exited = (f"The command exited with code {proc.returncode}, but a process it "
+                              "started still held its output open at the timeout, so that was stopped.")
+                    hint = f"{exited} {hint}" if hint else exited
                 drain()
         elif proc.returncode != 0:
             error_type = "process_exit"

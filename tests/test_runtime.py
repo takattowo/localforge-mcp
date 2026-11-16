@@ -2140,6 +2140,75 @@ def test_execute_kills_a_grandchild_holding_the_pipes_on_kill_on_timeout(tmp_pat
     out = server.cap.execute(_GRANDCHILD, timeout=5, kill_on_timeout=True)
     assert out["error_type"] == "timeout" and "process_id" not in out and _exec_entries(server) == [], out
     assert "parent" in out["stdout"] and _pipes_close(dropped[0])
+    # It exited 0, so say why the reply is still a timeout.
+    assert "exited" in out.get("hint", ""), out
+
+
+def _fake_entry(code, pumps=(), job=None, started=None):
+    import types
+    return types.SimpleNamespace(proc=types.SimpleNamespace(pid=4242, poll=lambda: code), pumps=list(pumps),
+                                 job=job, started=time.time() if started is None else started)
+
+
+def _held_pump():
+    import threading
+    hold = threading.Event()
+    pump = threading.Thread(target=hold.wait, daemon=True)
+    pump.start()
+    return hold, pump
+
+
+def test_posix_stop_never_signals_a_group_that_is_gone(tmp_path, monkeypatch):
+    import agent_runtime.processes as procs
+    server = make(tmp_path)
+    calls = []
+    hold, pump = _held_pump()
+    try:
+        # No Path objects inside: pathlib picks its flavour from os.name.
+        with monkeypatch.context() as m:
+            m.setattr(procs.os, "name", "posix")
+            m.setattr(procs.os, "killpg", lambda pid, sig: calls.append(pid), raising=False)
+            # Exited and nothing holds its pipes: the group is gone, and
+            # its id may already belong to an unrelated group.
+            server.processes._terminate_tree(_fake_entry(0))
+            gone = list(calls)
+            server.processes._terminate_tree(_fake_entry(None))
+            server.processes._terminate_tree(_fake_entry(0, [pump]))
+        assert gone == [] and calls == [4242, 4242]
+    finally:
+        hold.set()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="taskkill and job objects")
+def test_stop_ends_the_job_when_the_process_exits_during_taskkill(tmp_path, monkeypatch):
+    import types
+    import agent_runtime.processes as procs
+    server = make(tmp_path)
+    state, ended = {"code": None}, []
+
+    def taskkill(*args, **kwargs):
+        state["code"] = 0  # exits while taskkill runs, so taskkill finds no PID
+        return types.SimpleNamespace(returncode=128)
+
+    entry = _fake_entry(None, job=types.SimpleNamespace(terminate=lambda: ended.append(True)))
+    entry.proc.poll = lambda: state["code"]
+    monkeypatch.setattr(procs.subprocess, "run", taskkill)
+    server.processes._terminate_tree(entry, True)
+    assert ended == [True]
+
+
+def test_gc_keeps_an_exited_entry_whose_pipes_are_still_held(tmp_path):
+    server = make(tmp_path, max_processes=1, process_ttl_seconds=1)
+    hold, pump = _held_pump()
+    old = time.time() - 100
+    try:
+        server.processes.items = {"held": _fake_entry(0, [pump], started=old), "done": _fake_entry(0, started=old),
+                                  "recent1": _fake_entry(0), "recent2": _fake_entry(0)}
+        server.processes._gc()
+        # Past the TTL and over max_processes, but still stoppable: kept.
+        assert set(server.processes.items) == {"held"}
+    finally:
+        hold.set()
 
 
 @pytest.mark.parametrize("engine", ["ripgrep", "python"])
