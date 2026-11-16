@@ -4,12 +4,14 @@ import difflib
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 import fnmatch
+import hashlib
 import json
 import os
 import re
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -260,6 +262,11 @@ GIT_ROOT_TTL_SECONDS = 30
 PATH_LOCK_STRIPES = 256
 # Saved outputs kept in the spill folder; older ones are pruned.
 SPILL_KEEP = 100
+# Every spill file starts with this; pruning touches nothing else.
+SPILL_PREFIX = "lf-"
+# difflib grows worse than quadratically on big repetitive files,
+# so edits above this many characters (before + after) skip the diff.
+EDIT_DIFF_MAX_INPUT = 128_000
 # Failure output an edit check returns inline.
 EDIT_CHECK_OUTPUT_BYTES = 4000
 
@@ -281,10 +288,21 @@ class Capabilities:
         # Oversized outputs are saved here so the reply can stay
         # small. The folder is added to the read roots so the agent
         # can read a saved output back with filesystem read or search.
-        spill = Path(cfg.spill_dir or Path(tempfile.gettempdir()) / "localforge-results")
-        spill.mkdir(parents=True, exist_ok=True)
-        self.spill_dir = spill.resolve()
-        if self.spill_dir not in paths.read_roots:
+        self.spill_dir = None
+        try:
+            if cfg.spill_dir:
+                spill = paths._canonical(cfg.spill_dir)
+            else:
+                # One folder per config, so instances with different
+                # policies never read or prune each other's output.
+                key = str(cfg.config_path or cfg.workspace_root)
+                digest = hashlib.sha256(key.encode("utf-8", "surrogatepass")).hexdigest()[:12]
+                spill = Path(tempfile.gettempdir()) / "localforge-results" / digest
+            spill.mkdir(parents=True, exist_ok=True)
+            self.spill_dir = spill.resolve()
+        except (OSError, RuntimeFault) as e:
+            print(f"localforge: spill_dir unusable, large output will only be clipped: {e}", file=sys.stderr)
+        if self.spill_dir is not None and self.spill_dir not in paths.read_roots:
             paths.read_roots.append(self.spill_dir)
         if self.store is not None:
             saved = self.store.load().get("cwd")
@@ -357,17 +375,21 @@ class Capabilities:
         found = []
         for folder in folders:
             for name in self.cfg.project_instruction_files:
-                if budget <= 0:
-                    return found
                 try:
                     target = self.paths.resolve(folder / name, access="read", must_exist=True)
                     if not target.is_file():
+                        continue
+                    if budget <= 0:
+                        found.append({"path": str(target), "skipped": "budget"})
                         continue
                     with target.open("rb") as handle:
                         raw = handle.read(budget + 1)
                 except (RuntimeFault, OSError):
                     continue
-                content, cut = _clip(raw.decode("utf-8", "replace"), budget)
+                cut = len(raw) > budget
+                # "ignore" on a cut read drops the partial character at the end.
+                content, extra = _clip(raw[:budget].decode("utf-8", "ignore" if cut else "replace"), budget)
+                cut = cut or extra
                 budget -= len(content.encode("utf-8"))
                 entry = {"path": str(target), "content": content}
                 if cut:
@@ -498,11 +520,13 @@ class Capabilities:
                     # file is written exactly as sent.
                     eol = None
                     before = None
+                    existed = False
                     try:
                         with target.open("r", encoding=encoding, errors="replace", newline="") as handle:
+                            existed = True
                             head = handle.read(65536)
                             eol = _detect_eol(head)
-                            if target.stat().st_size <= int(self.cfg.max_file_read_bytes):
+                            if target.stat().st_size <= EDIT_DIFF_MAX_INPUT:
                                 before = head + handle.read()
                     except FileNotFoundError:
                         pass
@@ -517,6 +541,8 @@ class Capabilities:
                 result["eol"] = "CRLF" if eol == "\r\n" else "LF"
             if before is not None:
                 self._add_diff(result, before, data)
+            elif existed and int(self.cfg.edit_diff_max_bytes) > 0:
+                result["diff_skipped"] = "too_large"
             self._add_check(result, target)
             return result
         if action == "replace_text":
@@ -677,6 +703,14 @@ class Capabilities:
         raise RuntimeFault("invalid_action", f"Unknown filesystem action: {action}")
 
     def _add_diff(self, result, before, after):
+        if int(self.cfg.edit_diff_max_bytes) <= 0:
+            return
+        if len(before) + len(after) > EDIT_DIFF_MAX_INPUT:
+            result["diff_skipped"] = "too_large"
+            return
+        if "\x00" in before or "\x00" in after:
+            result["diff_skipped"] = "binary"
+            return
         diff, cut = _edit_diff(before, after, int(self.cfg.edit_diff_max_bytes))
         if diff is not None:
             result["diff"] = diff
@@ -706,6 +740,9 @@ class Capabilities:
         output, _ = _clip_ends((run["stdout"] + run["stderr"]).strip(), EDIT_CHECK_OUTPUT_BYTES)
         result["check"] = {"ok": False, "command": command, "exit_code": run["exit_code"],
                            "error_type": run["error_type"], "output": output}
+        for key in ("stdout_path", "stderr_path"):
+            if key in run:
+                result["check"][key] = run[key]
 
     def _read_lines(self, target, encoding, line_start, line_end):
         """Line-mode read as numbered text, one "N<TAB>line" per line.
@@ -1157,19 +1194,32 @@ class Capabilities:
     def spill(self, prefix, text, suffix=".log"):
         """Save text to the spill folder and return the file path.
 
-        Only the newest SPILL_KEEP files are kept, so the folder
-        stays bounded over long sessions.
+        Only the newest SPILL_KEEP spill files are kept, so the folder
+        stays bounded over long sessions. Raises OSError when there is
+        no usable spill folder.
         """
-        fd, name = tempfile.mkstemp(prefix=f"{prefix}-", suffix=suffix, dir=self.spill_dir)
+        if self.spill_dir is None:
+            raise OSError("no usable spill_dir")
+        fd, name = tempfile.mkstemp(prefix=f"{SPILL_PREFIX}{prefix}-", suffix=suffix, dir=self.spill_dir)
         with os.fdopen(fd, "wb") as handle:
-            handle.write(text.encode("utf-8"))
-        try:
-            saved = sorted(self.spill_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)
-            for old in saved[SPILL_KEEP:]:
-                old.unlink()
-        except OSError:
-            # A concurrent prune got there first; the next one retries.
-            pass
+            # "replace": a lone surrogate (possible in Windows file
+            # names) has no UTF-8 encoding.
+            handle.write(text.encode("utf-8", "replace"))
+        # Prune only our own files, and skip any that fail (locked by
+        # a reader, or already pruned by a concurrent call).
+        saved = []
+        for item in self.spill_dir.glob(f"{SPILL_PREFIX}*"):
+            try:
+                if item.is_file():
+                    saved.append((item.stat().st_mtime, str(item)))
+            except OSError:
+                continue
+        saved.sort(reverse=True)
+        for _, old in saved[SPILL_KEEP:]:
+            try:
+                os.unlink(old)
+            except OSError:
+                continue
         return name
 
     def _inline_output(self, stream, text):
@@ -1223,6 +1273,9 @@ class Capabilities:
                     "stdout": "", "stderr": str(e), "duration_ms": int((time.monotonic() - started) * 1000),
                     "error_type": "process_start"}
         out, err = redact(stdout.decode("utf-8", "replace")), redact(stderr.decode("utf-8", "replace"))
+        # PowerShell 5.1 rejects && and || with this (unlocalized) error id.
+        and_or_failed = (shell and isinstance(command, str) and ("&&" in command or "||" in command)
+                         and "InvalidEndOfLine" in err)
         if not out and not err and (proc.returncode != 0 or error_type is not None):
             err = ("[no output captured on stdout/stderr; the child may have written directly "
                    "to the console or died during startup (e.g. missing environment)]")
@@ -1236,7 +1289,7 @@ class Capabilities:
             result["stdout_path"] = out_path
         if err_path:
             result["stderr_path"] = err_path
-        if shell and "is not a valid statement separator" in err:
+        if and_or_failed:
             result["hint"] = ("Windows PowerShell 5.1 has no && or ||. Chain with ; "
                               "(or 'if ($?) { ... }'), or make separate calls.")
         if timeout is not None and effective_timeout > float(self.cfg.default_timeout_seconds):

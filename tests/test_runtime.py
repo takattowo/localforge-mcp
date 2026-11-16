@@ -11,6 +11,8 @@ from agent_runtime.server import Server
 from agent_runtime.errors import RuntimeFault
 
 def make(tmp, mode="DEVELOPMENT", network="unrestricted", **kwargs):
+    # Keep saved output out of the real %TEMP% folder and out of tmp.
+    kwargs.setdefault("spill_dir", str(Path(tmp).parent / (Path(tmp).name + "-spill")))
     cfg = Config(str(tmp), mode=mode, allowed_read_roots=[str(tmp)], allowed_write_roots=[str(tmp)],
                  network=network, inherit_environment=["PATH"], default_shell="cmd" if os.name == "nt" else "sh", **kwargs)
     return Server(cfg)
@@ -1391,9 +1393,13 @@ def test_spill_folder_is_pruned(tmp_path, monkeypatch):
     import agent_runtime.capabilities as caps
     monkeypatch.setattr(caps, "SPILL_KEEP", 3)
     server = make(tmp_path, spill_dir=str(tmp_path / "spill"))
+    (tmp_path / "spill" / "user-file.txt").write_text("keep")
+    paths = []
     for n in range(5):
-        server.cap.spill("t", str(n))
-    assert len(list((tmp_path / "spill").iterdir())) == 3
+        paths.append(server.cap.spill("t", str(n)))
+        os.utime(paths[-1], (n + 1, n + 1))
+    assert sorted(os.listdir(tmp_path / "spill")) == sorted(
+        ["user-file.txt"] + [os.path.basename(p) for p in paths[2:]])
 
 
 def test_oversized_result_is_saved_with_preview(tmp_path):
@@ -1412,6 +1418,12 @@ def test_oversized_result_is_saved_with_preview(tmp_path):
     saved = json.loads(Path(value["result_path"]).read_text(encoding="utf-8"))
     assert saved["content"] == "x" * 20000
     assert "result_too_large" not in json.loads(call({"action": "stat", "path": "big.txt"}))
+    # A batch is fitted as a whole.
+    response = server.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/call", "params": {
+        "name": "batch", "arguments": {"calls": [{"tool": "filesystem", "arguments": {"action": "read", "path": "big.txt"}}] * 2}}})
+    batch = json.loads(response["result"]["content"][0]["text"])
+    assert batch["result_too_large"]
+    assert len(json.loads(Path(batch["result_path"]).read_text(encoding="utf-8"))["results"]) == 2
 
 
 def test_process_read_pages_default_to_inline_cap(tmp_path):
@@ -1423,7 +1435,9 @@ def test_process_read_pages_default_to_inline_cap(tmp_path):
         while server.processes.status(pid)["state"] == "running" and time.monotonic() < deadline:
             time.sleep(0.05)
         page = server.processes.read(pid)
-        assert page["truncated"] and len(page["stdout"]) < 20000
+        explicit = server.processes.read(pid, limit_bytes=1000)
+        whole = server.processes.read(pid, limit_bytes=200_000)
+        assert page["truncated"] and page["next_after"] == explicit["next_after"] < whole["next_after"]
     finally:
         server.processes.stop(pid, True)
 
@@ -1491,7 +1505,8 @@ def test_workspace_get_returns_project_instructions(tmp_path):
     small = make(tmp_path, max_project_instruction_bytes=4)
     small.cap.workspace("set_cwd", "sub")
     cut = small.cap.workspace("get")["project_instructions"]
-    assert cut == [{"path": str((tmp_path / "AGENTS.md").resolve()), "content": "root", "truncated": True}]
+    assert cut == [{"path": str((tmp_path / "AGENTS.md").resolve()), "content": "root", "truncated": True},
+                   {"path": str((tmp_path / "sub" / "CLAUDE.md").resolve()), "skipped": "budget"}]
     denied = make(tmp_path, denied_paths=[str(tmp_path / "AGENTS.md")])
     assert "project_instructions" not in denied.cap.workspace("get")
     off = make(tmp_path, project_instruction_files=[])
@@ -1509,3 +1524,53 @@ def test_windows_powershell_curl_and_and_hint(tmp_path):
     chained = server.cap.execute("echo a && echo b")
     assert not chained["success"] and "&&" in chained["hint"]
     assert "hint" not in server.cap.execute("echo a; echo b")
+    # Statements that must open a script still work behind the prelude.
+    using = server.cap.execute("using namespace System.Text\n[StringBuilder]::new('ok').ToString()")
+    assert using["success"] and using["stdout"].strip() == "ok"
+    # The prelude shares line 1, so error line numbers stay as written.
+    assert "At line:1" in server.cap.execute("throw 'x'")["stderr"]
+
+
+def test_result_with_lone_surrogate_still_fits(tmp_path):
+    server = make(tmp_path, max_result_bytes=800)
+    value = {"name": "bad\udc80name", "pad": "p" * 2000}
+    fitted, text = server._fit_result("filesystem", value, json.dumps(value, ensure_ascii=False, separators=(",", ":")))
+    assert fitted["result_too_large"] and len(text.encode("utf-8")) <= 800
+    assert "bad?name" in Path(fitted["result_path"]).read_text(encoding="utf-8")
+    small = {"name": "x\udc80"}
+    small_text = json.dumps(small, ensure_ascii=False)
+    assert server._fit_result("filesystem", small, small_text) == (small, small_text)
+
+
+def test_diff_skipped_for_large_or_binary_files(tmp_path):
+    server = make(tmp_path)
+    big = "line\n" * 30000
+    server.cap.filesystem("write", "big.txt", big)
+    assert server.cap.filesystem("write", "big.txt", big + "x\n")["diff_skipped"] == "too_large"
+    replaced = server.cap.filesystem("replace_text", "big.txt", old_text="line", new_text="LINE", expected_occurrences=30000)
+    assert replaced["diff_skipped"] == "too_large" and "diff" not in replaced
+    (tmp_path / "bin.dat").write_bytes(b"a\x00b\n")
+    assert server.cap.filesystem("write", "bin.dat", "text\n")["diff_skipped"] == "binary"
+    off = make(tmp_path, edit_diff_max_bytes=0)
+    assert "diff_skipped" not in off.cap.filesystem("write", "big.txt", "small\n")
+
+
+def test_spill_dir_paths_and_failures(tmp_path, monkeypatch):
+    monkeypatch.setenv("LF_SPILL_TEST", str(tmp_path))
+    expanded = make(tmp_path, spill_dir=os.path.join("$LF_SPILL_TEST", "s"))
+    assert expanded.cap.spill_dir == (tmp_path / "s").resolve()
+    relative = make(tmp_path, spill_dir="rel")
+    assert relative.cap.spill_dir == (tmp_path / "rel").resolve()
+    # Each config gets its own default folder.
+    (tmp_path / "a").mkdir()
+    (tmp_path / "b").mkdir()
+    first, second = make(tmp_path / "a", spill_dir=None), make(tmp_path / "b", spill_dir=None)
+    assert first.cap.spill_dir != second.cap.spill_dir
+    # An unusable folder turns saving off instead of failing startup.
+    (tmp_path / "file").write_text("x")
+    broken = make(tmp_path, spill_dir=str(tmp_path / "file"), max_inline_output_bytes=1000)
+    assert broken.cap.spill_dir is None
+    big = broken.cap.execute([sys.executable, "-c", "print('a' * 3000)"])
+    assert big["stdout_truncated"] and "stdout_path" not in big
+    fitted, _ = broken._fit_result("filesystem", {"x": "y" * 300000}, json.dumps({"x": "y" * 300000}))
+    assert fitted["result_path"] is None and "failed" in fitted["hint"]

@@ -118,7 +118,16 @@ class Policy:
 # Windows PowerShell 5.1 aliases curl and wget to Invoke-WebRequest,
 # which takes none of their flags. Drop the aliases so the real
 # curl.exe runs. pwsh 6+ has no such aliases.
-POWERSHELL_PRELUDE = "Remove-Item Alias:curl, Alias:wget -Force -ErrorAction SilentlyContinue\n"
+# Same line as the command, so error line numbers stay as written.
+POWERSHELL_PRELUDE = "Remove-Item Alias:curl, Alias:wget -Force -ErrorAction SilentlyContinue; "
+# Statements PowerShell accepts only at the very start of a script;
+# such commands run without the prelude.
+_PS_SCRIPT_START = ("using ", "#requires", "param(", "param (", "[cmdletbinding")
+
+def _powershell_script(command):
+    if command.lstrip().lower().startswith(_PS_SCRIPT_START):
+        return command
+    return POWERSHELL_PRELUDE + command
 
 def command_for_spawn(cfg, command, shell):
     if not shell:
@@ -126,7 +135,7 @@ def command_for_spawn(cfg, command, shell):
     kind = cfg.default_shell.lower()
     if kind == "powershell":
         executable = "powershell.exe" if os.name == "nt" else "pwsh"
-        return [executable, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", POWERSHELL_PRELUDE + command]
+        return [executable, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", _powershell_script(command)]
     if kind == "pwsh":
         return ["pwsh", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command]
     if kind == "cmd":

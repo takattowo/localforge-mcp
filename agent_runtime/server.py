@@ -172,11 +172,19 @@ DESCRIPTIONS = {
     "filesystem": "Policy-checked real filesystem operations: line or byte reads, paginated lists, atomic writes, guarded text replacement, multi_edit for several exact replacements per file (all-or-nothing), policy-checked copy. Edits return a short diff (and a check result when edit_checks is configured), so no re-read is needed to confirm them. Never edit files via execute, process, or scripts; use write, replace_text, multi_edit, and apply_patch.",
     "search": "Repository text or filename search with glob filters, default ignores, and context lines. Result paths under the runtime cwd are relative to it. Several searches: use multi_search (or batch) in one call, not one search per turn.",
     "git": "Common structured Git operations plus a generic argument-array action. Anything beyond the presets goes through run, e.g. {\"action\": \"run\", \"args\": [\"commit\", \"-m\", \"fix parser\", \"--\", \"src/parser.py\"]}. Stage explicit files only; git add -A / --all / . is blocked.",
-    "execute": "Run a bounded foreground process with structured output; argv arrays preferred. String commands run in Windows PowerShell 5.1 by default: no && or ||, chain with ; or make separate calls. Long output is cut to head and tail and saved whole at stdout_path/stderr_path. For long waits or polling, use the process tool instead of a long-timeout execute. Do not edit files with it; prefer the filesystem write, replace_text, or apply_patch actions.",
+    "execute": "Run a bounded foreground process with structured output; argv arrays preferred. {shell_note}Long output is cut to head and tail and saved whole at stdout_path/stderr_path. For long waits or polling, use the process tool instead of a long-timeout execute. Do not edit files with it; prefer the filesystem write, replace_text, or apply_patch actions.",
     "process": "Manage long-running processes with stable IDs, split streams, cursors, stdin, restart, and tree stop. For file edits, prefer the filesystem write, replace_text, or apply_patch actions.",
     "multi_search": "Run up to 16 independent searches in one call, e.g. {\"searches\": [{\"query\": \"UserService\", \"glob\": [\"*.py\"], \"label\": \"users\"}, {\"query\": \"TODO\", \"files_only\": true}]}. Each entry takes the same arguments as the search tool. A failing entry is reported per-entry without failing the batch.",
     "batch": "Run up to 16 tool calls in one call, in parallel, e.g. {\"calls\": [{\"tool\": \"search\", \"arguments\": {\"query\": \"todo\"}}, {\"tool\": \"git\", \"arguments\": {\"action\": \"status\"}}]}. Each entry names a tool and its arguments; tool names may carry the host prefix (MyHost_localforge_mcp__search). Distinct paths run concurrently while edits to the same file serialize. Results come back with index and label; match on those. A failing call is reported per-call without failing the batch.",
     "todo": "Persistent task list (TodoWrite-style) with get, add, update, delete, and clear. Keep it current across turns: add before starting work, mark in_progress while working, completed when done. State survives server restarts.",
+}
+
+# Filled into the execute description from default_shell.
+SHELL_NOTES = {
+    "powershell": "String commands run in Windows PowerShell 5.1: no && or ||, chain with ; or make separate calls. ",
+    "pwsh": "String commands run in PowerShell 7 (pwsh). ",
+    "cmd": "String commands run in cmd.exe. ",
+    "sh": "String commands run in /bin/sh. ",
 }
 
 class Server:
@@ -204,7 +212,9 @@ class Server:
         self.pool.shutdown(wait=False)
 
     def tools(self):
-        return [{"name": name, "description": DESCRIPTIONS[name], "inputSchema": SCHEMAS[name]} for name in DESCRIPTIONS]
+        shell_note = SHELL_NOTES.get(str(self.cfg.default_shell).lower(), "")
+        return [{"name": name, "description": DESCRIPTIONS[name].replace("{shell_note}", shell_note),
+                 "inputSchema": SCHEMAS[name]} for name in DESCRIPTIONS]
 
     ARG_KEYS = {
         "workspace": ("action", "path", "dir"),
@@ -418,19 +428,30 @@ class Server:
         and replaced by a short preview plus the saved path.
         Returns (value, text).
         """
-        size = len(text.encode("utf-8"))
-        if size <= int(self.cfg.max_result_bytes):
+        limit = int(self.cfg.max_result_bytes)
+        # surrogatepass: results can hold lone surrogates (Windows
+        # file names), which plain UTF-8 encoding rejects.
+        size = len(text.encode("utf-8", "surrogatepass"))
+        if size <= limit:
             return value, text
         try:
             path = self.cap.spill(f"{_bare_tool_name(name)}-result",
                                   json.dumps(value, ensure_ascii=False, indent=1), ".json")
         except OSError:
             path = None
-        preview, _ = _clip(text, min(2000, int(self.cfg.max_result_bytes) // 2))
-        value = {"result_too_large": True, "bytes": size, "result_path": path, "preview": preview,
-                 "hint": "Read result_path with filesystem read line_start/line_end or search it, "
-                         "or narrow the call (max_results, line ranges, fewer batch entries)."}
-        return value, json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+        narrow = "narrow the call (max_results, line ranges, fewer batch entries)."
+        value = {"result_too_large": True, "bytes": size, "result_path": path,
+                 "hint": ("Read result_path with filesystem read line_start/line_end or search it, or " + narrow)
+                         if path else "Saving the full result failed; " + narrow}
+        safe = text.encode("utf-8", "replace").decode("utf-8")
+        # JSON escaping can grow the preview, so shrink it until the reply fits.
+        cap = min(2000, limit // 2)
+        while True:
+            value["preview"], _ = _clip(safe, cap)
+            out = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+            if len(out.encode("utf-8")) <= limit or cap == 0:
+                return value, out
+            cap //= 2
 
     def handle(self, request):
         if not isinstance(request, dict) or request.get("jsonrpc") != "2.0" or not isinstance(request.get("method"), str):
