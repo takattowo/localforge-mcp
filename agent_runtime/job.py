@@ -86,8 +86,9 @@ class WindowsJob:
     job and behavior is unchanged from before.
 
     With kill_on_close=False it is a plain job with no limits: track()
-    gives each spawned process one, nested in the kill-on-close job, so
-    terminate() can stop its whole tree even after its root exited.
+    gives each spawned process one (nested in the kill-on-close job when
+    the process is in it), so terminate() can stop its whole tree even
+    after its root exited.
     """
 
     def __init__(self, kill_on_close=True):

@@ -47,6 +47,16 @@ class Managed:
     def __post_init__(self):
         self.chunk_cond = threading.Condition(self.lock)
 
+
+def held(item):
+    """True while something it started still holds its output pipes.
+
+    Such an entry can still be read and stopped even after its own
+    process exited, so it is kept and counted like a running one.
+    """
+    return any(p.is_alive() for p in item.pumps)
+
+
 class ProcessManager:
     def __init__(self, cfg, paths, policy):
         self.cfg, self.paths, self.policy = cfg, paths, policy
@@ -70,10 +80,6 @@ class ProcessManager:
         now = time.time()
         ttl = int(self.cfg.process_ttl_seconds)
         with self.lock:
-            def held(v):
-                # Something it started still holds its output: it can
-                # still be read and stopped, so it is not pruned.
-                return any(p.is_alive() for p in v.pumps)
             live = {k: v for k, v in self.items.items()
                     if v.proc.poll() is None or held(v) or (now - v.started) < ttl}
             if len(live) > int(self.cfg.max_processes):
@@ -83,7 +89,7 @@ class ProcessManager:
                 for key, _ in exited[:drop]:
                     live.pop(key, None)
             self.items = live
-            active = sum(1 for v in self.items.values() if v.proc.poll() is None)
+            active = sum(1 for v in self.items.values() if v.proc.poll() is None or held(v))
             return active
 
     def _pump(self, item, pipe, stream):
@@ -157,7 +163,8 @@ class ProcessManager:
         return item
 
     def active(self):
-        """Number of running processes, after pruning old exited ones."""
+        """Running processes plus exited ones whose output is still held,
+        after pruning old exited ones."""
         return self._gc()
 
     def discard(self, item):
@@ -265,10 +272,12 @@ class ProcessManager:
             if item.job is not None and item.proc.poll() is not None:
                 item.job.terminate()
         else:
-            if item.proc.poll() is not None and not any(p.is_alive() for p in item.pumps):
+            if item.proc.poll() is not None and not held(item):
                 # The leader is gone and nothing holds its output, so the
                 # group is most likely empty, and its id may already
-                # belong to an unrelated group.
+                # belong to an unrelated group. (If what holds the output
+                # left the group with setsid, the group can be empty and
+                # its id reused all the same; that is not detected.)
                 return
             # The process group outlives its leader while members remain.
             try:
@@ -284,6 +293,11 @@ class ProcessManager:
         except subprocess.TimeoutExpired:
             self._terminate_tree(item, True)
             item.proc.wait(timeout=10)
+        if item.job is not None:
+            # The leader may have exited only after _terminate_tree looked
+            # (a graceful close, or taskkill /F finishing late), so end what
+            # it left running through its job now that it is gone.
+            item.job.terminate()
         return self.status(process_id)
 
     def restart(self, process_id):

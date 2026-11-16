@@ -22,6 +22,7 @@ import uuid
 from .errors import RuntimeFault
 from .patch import build_new as build_patched
 from .patch import parse as parse_diff
+from .processes import held
 from .security import coerce_command, redact, safe_environment
 
 def _fs_error(action, target, exc):
@@ -1691,18 +1692,13 @@ class Capabilities:
             drain()
         error_type, hint = None, None
         running = proc.poll() is None
-        if running or any(pump.is_alive() for pump in item.pumps):
+        if running or held(item):
             # Still running, or exited while a process it started holds
             # its output open: either way it can move to the background.
-            # active() counts a running command, so <= leaves it room; an
-            # exited one is not counted, so it needs a free slot.
-            room = int(self.cfg.max_processes) - (0 if running else 1)
-            if not kill_on_timeout and self.processes.active() <= room:
+            # active() counts this command either way, so <= leaves it room.
+            if not kill_on_timeout and self.processes.active() <= int(self.cfg.max_processes):
                 error_type = "backgrounded"
             else:
-                if not kill_on_timeout:
-                    hint = (f"max_processes ({self.cfg.max_processes}) reached, so the command was "
-                            "stopped at its timeout instead of moving to the background.")
                 try:
                     self.processes.stop(item.id, True)
                 except subprocess.TimeoutExpired:
@@ -1710,11 +1706,17 @@ class Capabilities:
                     # entry is dropped below all the same.
                     pass
                 error_type = "timeout"
-                if not running:
-                    exited = (f"The command exited with code {proc.returncode}, but a process it "
-                              "started still held its output open at the timeout, so that was stopped.")
-                    hint = f"{exited} {hint}" if hint else exited
                 drain()
+                limit = "" if kill_on_timeout else (
+                    f" instead of moving to the background, as max_processes ({self.cfg.max_processes}) is reached")
+                if running:
+                    if not kill_on_timeout:
+                        hint = f"The command was stopped at its timeout{limit}."
+                else:
+                    left = ("stopping what it left running was tried, but something still holds its output"
+                            if held(item) else "what it left running was stopped")
+                    hint = (f"The command exited with code {proc.returncode}, but a process it started "
+                            f"still held its output open at the timeout, so {left}{limit}.")
         elif proc.returncode != 0:
             error_type = "process_exit"
         if error_type != "backgrounded":

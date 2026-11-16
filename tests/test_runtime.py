@@ -2142,6 +2142,8 @@ def test_execute_kills_a_grandchild_holding_the_pipes_on_kill_on_timeout(tmp_pat
     assert "parent" in out["stdout"] and _pipes_close(dropped[0])
     # It exited 0, so say why the reply is still a timeout.
     assert "exited" in out.get("hint", ""), out
+    # The command had already exited: only what it left running was stopped.
+    assert "what it left running" in out["hint"] and "the command was stopped" not in out["hint"], out
 
 
 def _fake_entry(code, pumps=(), job=None, started=None):
@@ -2159,15 +2161,15 @@ def _held_pump():
 
 
 def test_posix_stop_never_signals_a_group_that_is_gone(tmp_path, monkeypatch):
+    import types
     import agent_runtime.processes as procs
     server = make(tmp_path)
     calls = []
     hold, pump = _held_pump()
     try:
-        # No Path objects inside: pathlib picks its flavour from os.name.
+        # Only processes.py sees POSIX: the global os module is untouched.
         with monkeypatch.context() as m:
-            m.setattr(procs.os, "name", "posix")
-            m.setattr(procs.os, "killpg", lambda pid, sig: calls.append(pid), raising=False)
+            m.setattr(procs, "os", types.SimpleNamespace(name="posix", killpg=lambda pid, sig: calls.append(pid)))
             # Exited and nothing holds its pipes: the group is gone, and
             # its id may already belong to an unrelated group.
             server.processes._terminate_tree(_fake_entry(0))
@@ -2175,6 +2177,33 @@ def test_posix_stop_never_signals_a_group_that_is_gone(tmp_path, monkeypatch):
             server.processes._terminate_tree(_fake_entry(None))
             server.processes._terminate_tree(_fake_entry(0, [pump]))
         assert gone == [] and calls == [4242, 4242]
+    finally:
+        hold.set()
+
+
+def test_stop_ends_the_job_after_the_process_exits_on_its_own(tmp_path):
+    import types
+    server = make(tmp_path)
+    ended = []
+    entry = _fake_entry(None, job=types.SimpleNamespace(terminate=lambda: ended.append(True)))
+    entry.proc.wait = lambda timeout=None: 0
+    entry.command, entry.cwd = ["x"], str(tmp_path)
+    server.processes.items = {"p": entry}
+    # A graceful stop: the leader exits by itself after the stop request,
+    # so _terminate_tree saw it running and never ended the job.
+    server.processes._terminate_tree = lambda item, force=False: None
+    server.processes.stop("p")
+    assert ended == [True]
+
+
+def test_active_counts_entries_whose_pipes_are_still_held(tmp_path):
+    server = make(tmp_path, max_processes=5)
+    hold, pump = _held_pump()
+    try:
+        server.processes.items = {"held": _fake_entry(0, [pump]), "done": _fake_entry(0),
+                                  "running": _fake_entry(None)}
+        # The held one can still be read and stopped, so it takes a slot.
+        assert server.processes.active() == 2
     finally:
         hold.set()
 
