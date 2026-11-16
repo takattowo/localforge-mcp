@@ -43,6 +43,19 @@ def _lf(text: str):
     return text.replace("\r\n", "\n")
 
 
+BOM = "\ufeff"
+
+
+def _split_bom(text: str):
+    """(text without a leading byte order mark, whether it had one).
+
+    Reads hide the mark and edits write it back, as they keep line
+    endings, so it never shows in returned text or breaks a match on
+    line 1.
+    """
+    return (text[1:], True) if text.startswith(BOM) else (text, False)
+
+
 def _detect_eol(text: str):
     """Return the dominant line ending of decoded text; LF on a tie.
 
@@ -851,7 +864,10 @@ class Capabilities:
             data = data[:cap]
             if b"\x00" in data:
                 raise RuntimeFault("binary_file", "Binary file read is not supported")
-            return {"path": str(target), "content": data.decode(encoding, "replace"), "offset": offset,
+            content = data.decode(encoding, "replace")
+            if offset == 0:
+                content, _ = _split_bom(content)
+            return {"path": str(target), "content": content, "offset": offset,
                     "bytes_returned": len(data), "size": target.stat().st_size, "truncated": truncated}
         if action == "list":
             if not target.is_dir():
@@ -873,17 +889,21 @@ class Capabilities:
                     eol = None
                     before = None
                     existed = False
+                    bom = False
                     try:
                         with target.open("r", encoding=encoding, errors="replace", newline="") as handle:
                             existed = True
-                            head = handle.read(65536)
+                            head, bom = _split_bom(handle.read(65536))
                             eol = _detect_eol(head)
                             if target.stat().st_size <= EDIT_DIFF_MAX_INPUT:
                                 before = head + handle.read()
                     except FileNotFoundError:
                         pass
                     target.parent.mkdir(parents=True, exist_ok=True)
-                    written = self._atomic_write(target, data, encoding, eol)
+                    # A file that starts with a byte order mark keeps it,
+                    # like its line endings, unless the content has its own.
+                    data, own_bom = _split_bom(data)
+                    written = self._atomic_write(target, data, encoding, eol, bom or own_bom)
                 except OSError as e:
                     _fs_error("write", target, e)
             result = {"path": str(target), "bytes": written}
@@ -909,7 +929,7 @@ class Capabilities:
             expected = 1 if expected_occurrences is None else int(expected_occurrences)
             with self._locked_paths([target]):
                 try:
-                    original, eol = self._read_text(target, encoding)
+                    original, eol, bom = self._read_text(target, encoding)
                 except OSError as e:
                     _fs_error("replace_text", target, e)
                 updated, counts, tiers, write_eol = self._apply_edits(
@@ -918,7 +938,7 @@ class Capabilities:
                         "content_mismatch", f"Expected {want} occurrence(s), found {found}. "
                         f"Pass expected_occurrences to replace all of them at once.{hint}"))
                 try:
-                    written = self._atomic_write(target, updated, encoding, write_eol)
+                    written = self._atomic_write(target, updated, encoding, write_eol, bom)
                 except OSError as e:
                     _fs_error("replace_text", target, e)
             result = {"path": str(target), "replacements": counts[0], "bytes": written}
@@ -955,7 +975,7 @@ class Capabilities:
                 specs.append((old, new, 1 if expected is None else int(expected)))
             with self._locked_paths([target]):
                 try:
-                    original, eol = self._read_text(target, encoding)
+                    original, eol, bom = self._read_text(target, encoding)
                 except OSError as e:
                     _fs_error("multi_edit", target, e)
                 # Edits apply in order against the evolving content and
@@ -970,7 +990,7 @@ class Capabilities:
                         "earlier edits may have changed the text; pass "
                         f"expected_occurrences when it repeats.{hint}"))
                 try:
-                    written = self._atomic_write(target, content, encoding, write_eol)
+                    written = self._atomic_write(target, content, encoding, write_eol, bom)
                 except OSError as e:
                     _fs_error("multi_edit", target, e)
             applied = [{"index": index, "replacements": count} for index, count in enumerate(counts)]
@@ -1000,7 +1020,7 @@ class Capabilities:
                     if creating:
                         if dest.exists():
                             raise RuntimeFault("invalid_arguments", f"Patch creates existing file: {dest}")
-                        original, eol = "", None
+                        original, eol, bom = "", None, False
                     else:
                         if not dest.exists():
                             raise RuntimeFault("path_not_found", f"Path not found: {dest}")
@@ -1012,16 +1032,16 @@ class Capabilities:
                             _fs_error("apply_patch", dest, e)
                         if b"\x00" in raw[:8192]:
                             raise RuntimeFault("binary_file", "Binary file patch is not supported")
-                        original = raw.decode(encoding, "replace")
+                        original, bom = _split_bom(raw.decode(encoding, "replace"))
                         eol = _detect_eol(original)
-                    planned.append((dest, build_patched(original, fp, rel, eol), creating))
+                    planned.append((dest, build_patched(original, fp, rel, eol), creating, bom))
                 results = []
-                for dest, updated, creating in planned:
+                for dest, updated, creating, bom in planned:
                     try:
                         dest.parent.mkdir(parents=True, exist_ok=True)
                         # build_new keeps untouched lines byte-exact,
                         # so the result is written verbatim.
-                        written = self._atomic_write(dest, updated, encoding)
+                        written = self._atomic_write(dest, updated, encoding, bom=bom)
                     except OSError as e:
                         _fs_error("apply_patch", dest, e)
                     results.append({"path": str(dest), "created": creating, "bytes": written})
@@ -1190,6 +1210,8 @@ class Capabilities:
                     if not line:
                         break
                     n += 1
+                    if n == 1:
+                        line, _ = _split_bom(line)
                     length, piece = len(line), line
                     if not line.endswith("\n"):
                         # Over-long line: skip the rest without
@@ -1243,9 +1265,10 @@ class Capabilities:
 
     @staticmethod
     def _read_text(target, encoding):
-        """Read a file as text, line endings untouched, plus its dominant ending."""
-        text = target.read_bytes().decode(encoding)
-        return text, _detect_eol(text)
+        """Read a file as text, line endings untouched, plus its dominant
+        ending and whether it starts with a byte order mark (removed)."""
+        text, bom = _split_bom(target.read_bytes().decode(encoding))
+        return text, _detect_eol(text), bom
 
     @staticmethod
     def _apply_edits(original, eol, edits, mismatch):
@@ -1291,17 +1314,20 @@ class Capabilities:
         return view, counts, tiers, eol
 
     @staticmethod
-    def _atomic_write(target, data, encoding, eol=None):
+    def _atomic_write(target, data, encoding, eol=None, bom=False):
         """Write data atomically and return the bytes written.
 
         eol "\n" or "\r\n" normalizes every line ending to it; None
-        writes data verbatim. Bytes are written directly, so Python
-        never translates LF to the platform line ending.
+        writes data verbatim. bom puts a byte order mark first. Bytes
+        are written directly, so Python never translates LF to the
+        platform line ending.
         """
         if eol is not None:
             data = _lf(data)
             if eol == "\r\n":
                 data = data.replace("\n", "\r\n")
+        if bom:
+            data = BOM + data
         raw = data.encode(encoding)
         fd, temp = tempfile.mkstemp(prefix=".localforge-", dir=target.parent)
         os.close(fd)

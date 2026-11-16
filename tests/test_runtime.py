@@ -169,6 +169,28 @@ def test_read_lines_negative_start_reads_from_the_end(tmp_path):
     assert small["truncated"] and small["content"].endswith("200\trow 200") and len(small["content"]) <= 64
     assert small["line_start"] > 151 and "note" in small
 
+def test_utf8_bom_is_hidden_and_kept(tmp_path):
+    server = make(tmp_path)
+    bom = b"\xef\xbb\xbf"
+    path = tmp_path / "b.txt"
+    path.write_bytes(bom + b"first\nsecond\n")
+    assert server.cap.filesystem("read", "b.txt")["content"] == "first\nsecond\n"
+    assert server.cap.filesystem("read", "b.txt", line_start=1)["content"] == "1\tfirst\n2\tsecond"
+    server.cap.filesystem("apply_patch", ".", patch="--- a/b.txt\n+++ b/b.txt\n@@ -1,2 +1,2 @@\n-first\n+FIRST\n second\n")
+    assert path.read_bytes() == bom + b"FIRST\nsecond\n"
+    replaced = server.cap.filesystem("replace_text", "b.txt", old_text="FIRST", new_text="one")
+    assert "\ufeff" not in replaced["diff"] and path.read_bytes() == bom + b"one\nsecond\n"
+    edited = server.cap.filesystem("multi_edit", "b.txt", edits=[{"old_text": "one", "new_text": "uno"}])
+    assert "\ufeff" not in edited["diff"] and path.read_bytes() == bom + b"uno\nsecond\n"
+    written = server.cap.filesystem("write", "b.txt", "new\n")
+    assert path.read_bytes() == bom + b"new\n" and "\ufeff" not in written["diff"]
+    server.cap.filesystem("write", "b.txt", "\ufeffown\n")
+    assert path.read_bytes() == bom + b"own\n"
+    # A file without one never gets one.
+    (tmp_path / "plain.txt").write_bytes(b"x\n")
+    server.cap.filesystem("write", "plain.txt", "y\n")
+    assert (tmp_path / "plain.txt").read_bytes() == b"y\n"
+
 def test_search_fallback_and_git(tmp_path, monkeypatch):
     server = make(tmp_path)
     (tmp_path / "src").mkdir()
