@@ -2759,6 +2759,19 @@ def test_execute_backgrounds_a_grandchild_holding_the_pipes(tmp_path):
     assert _pipes_close(item)
 
 
+def test_process_wait_ends_soon_after_exit_while_output_is_held(tmp_path):
+    server = make(tmp_path)
+    pid = server.call("process", {"action": "start", "command": _GRANDCHILD})["process_id"]
+    try:
+        started = time.monotonic()
+        out = server.call("process", {"action": "wait", "process_id": pid, "wait_ms": 20000})
+        elapsed = time.monotonic() - started
+        assert out["reason"] == "exited" and out["state"] == "exited" and out["output_held"] is True, out
+        assert elapsed < 10, elapsed
+    finally:
+        server.processes.stop(pid, True)
+
+
 def test_execute_kills_a_grandchild_holding_the_pipes_on_kill_on_timeout(tmp_path, monkeypatch):
     server = make(tmp_path)
     dropped = []

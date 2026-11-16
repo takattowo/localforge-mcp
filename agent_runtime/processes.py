@@ -20,6 +20,8 @@ WAIT_TAIL_LINES = 40
 MAX_WAIT_TAIL_LINES = 1000
 # wait match marks kept per process (see Managed.marks).
 MAX_WAIT_MARKS = 32
+# How long wait gives output still held after the process exits.
+EXIT_GRACE_SECONDS = 1.0
 
 @dataclass
 class Chunk:
@@ -248,7 +250,9 @@ class ProcessManager:
         max_inline_output_bytes), and next_after: after a match, the
         chunk holding the matched line, and a wait from it goes on with
         the line after the match (a read from it skips the rest of that
-        chunk, which tail shows); otherwise the newest chunk.
+        chunk, which tail shows); otherwise the newest chunk. A process
+        whose pipes something it started still holds counts as exited
+        EXIT_GRACE_SECONDS after it exits, with output_held true.
         """
         try:
             regex = re.compile(pattern) if pattern is not None else None
@@ -271,8 +275,16 @@ class ProcessManager:
             for seq in skip:
                 # The text before the mark ends with the matched line.
                 partial.pop(next((c.stream for c in item.chunks if c.seq == seq), None), None)
+            exit_seen = None
             while True:
-                exited = item.proc.poll() is not None and not held(item)
+                code = item.proc.poll()
+                if code is not None and exit_seen is None:
+                    exit_seen = time.monotonic()
+                # Something it started may hold its output pipes for long:
+                # past a short grace for the rest of its own output, it
+                # counts as exited all the same (output_held says so).
+                exited = code is not None and (not held(item)
+                                               or time.monotonic() - exit_seen >= EXIT_GRACE_SECONDS)
                 if regex is not None:
                     for chunk in item.chunks:
                         if chunk.seq <= scanned:
@@ -288,7 +300,7 @@ class ProcessManager:
                             end = sum(len(line) + 1 for line in done[:index + 1]) - len(head) + start
                             hit = (chunk.seq, end)
                             break
-                    if matched is None and exited:
+                    if matched is None and exited and not held(item):
                         # Nothing more is coming: unfinished last lines count too.
                         for stream, line in partial.items():
                             if line and regex.search(line.rstrip("\r")):
@@ -322,6 +334,8 @@ class ProcessManager:
         if len(raw) > cap:
             tail = raw[len(raw) - cap:].decode("utf-8", "ignore")
             result["tail_truncated"] = True
+        if reason == "exited" and held(item):
+            result["output_held"] = True
         result["tail"] = tail
         return result
 
