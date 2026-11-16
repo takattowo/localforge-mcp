@@ -758,15 +758,51 @@ class Capabilities:
                                f"max_file_read_bytes ({self.cfg.max_file_read_bytes}). "
                                "Raise the limit in the config for large files.")
 
-    def _resolve_existing(self, path, access):
-        """Resolve a path that must exist; a miss suggests similar names."""
+    def _resolve_existing(self, path, access, retry=False, cwd=None):
+        """Resolve a path that must exist; a miss suggests similar names.
+
+        Returns (target, note). A relative path missing from the cwd
+        that exists from the Git root (copied from git status after a
+        set_cwd into a subfolder, say) is used from there when retry is
+        set, for read-only actions, with a note saying so; otherwise
+        the error names it. Either way it passes the same path policy.
+        """
+        cwd = cwd or self.cwd
         try:
-            return self.paths.resolve(path, cwd=self.cwd, access=access, must_exist=True)
+            return self.paths.resolve(path, cwd=cwd, access=access, must_exist=True), None
         except RuntimeFault as e:
-            if e.code == "path_not_found":
+            if e.code != "path_not_found":
+                raise
+            found = self._from_git_root(path, access, cwd)
+            if found is not None and retry:
+                return found, f"{path} is not in the cwd ({cwd}); used {found}, relative to the Git root."
+            if found is not None:
+                e.message += f"\nRelative to the Git root it is {found}; pass that path (edits are not retried there)."
+            else:
                 e.message += self._missing_hint(path)
-                e.args = (e.message,)
+            e.args = (e.message,)
             raise
+
+    def _from_git_root(self, path, access, cwd):
+        """path resolved from the Git root of cwd, when it is relative,
+        the root is not cwd itself, and it exists there under the path
+        policy; else None."""
+        raw = Path(os.path.expandvars(os.path.expanduser(str(path or "."))))
+        if raw.is_absolute() or raw.drive or raw.root:
+            return None
+        root = self._git_root(cwd)
+        if not root or Path(root).resolve() == Path(cwd).resolve():
+            return None
+        try:
+            return self.paths.resolve(str(path), cwd=Path(root), access=access, must_exist=True)
+        except RuntimeFault:
+            return None
+
+    @staticmethod
+    def _noted(result, note):
+        if note:
+            result["note"] = f"{result['note']} {note}" if result.get("note") else note
+        return result
 
     def _missing_hint(self, path):
         """"Did you mean" text for a missing path, or "".
@@ -822,7 +858,7 @@ class Capabilities:
         if action == "copy":
             if not destination:
                 raise RuntimeFault("invalid_arguments", "copy requires destination")
-            src = self._resolve_existing(path, "read")
+            src, _ = self._resolve_existing(path, "read")
             dest = self.paths.resolve(destination, cwd=self.cwd, access="write", must_exist=False)
             self.policy.authorize_path("copy")
             with self._locked_paths([src, dest]):
@@ -845,20 +881,22 @@ class Capabilities:
             raise RuntimeFault("not_file", f"Not a file or directory: {src}")
         access = "read" if action in {"read", "list", "stat"} else "write"
         must_exist = action not in {"write", "mkdir"}
+        note = None
         if must_exist:
-            target = self._resolve_existing(path, access)
+            target, note = self._resolve_existing(path, access, retry=access == "read")
         else:
             target = self.paths.resolve(path, cwd=self.cwd, access=access, must_exist=False)
         self.policy.authorize_path(action)
         if action == "read":
             if target.is_dir():
                 # Like CLI agents: reading a folder lists it, as list does.
-                return {**self._list_dir(target, limit, offset, glob, include_hidden),
-                        "note": f"{target} is a directory, so its entries are listed, as by action list."}
+                return self._noted({**self._list_dir(target, limit, offset, glob, include_hidden),
+                                    "note": f"{target} is a directory, so its entries are listed, as by action list."},
+                                   note)
             if not target.is_file():
                 raise RuntimeFault("not_file", f"Not a file: {target}")
             if line_start is not None or line_end is not None:
-                return self._read_lines(target, encoding, line_start, line_end)
+                return self._noted(self._read_lines(target, encoding, line_start, line_end), note)
             cap = min(int(max_bytes or self.cfg.max_file_read_bytes), self.cfg.max_file_read_bytes)
             offset = max(0, int(offset))
             with target.open("rb") as handle:
@@ -871,19 +909,20 @@ class Capabilities:
             content = data.decode(encoding, "replace")
             if offset == 0:
                 content, _ = _split_bom(content)
-            return {"path": str(target), "content": content, "offset": offset,
-                    "bytes_returned": len(data), "size": target.stat().st_size, "truncated": truncated}
+            return self._noted({"path": str(target), "content": content, "offset": offset,
+                                "bytes_returned": len(data), "size": target.stat().st_size,
+                                "truncated": truncated}, note)
         if action == "list":
             if not target.is_dir():
                 raise RuntimeFault("not_directory", f"Not a directory: {target}")
-            return self._list_dir(target, limit, offset, glob, include_hidden)
+            return self._noted(self._list_dir(target, limit, offset, glob, include_hidden), note)
         if action == "stat":
             try:
                 stat = target.stat()
             except OSError as e:
                 _fs_error("stat", target, e)
-            return {"path": str(target), "type": "dir" if target.is_dir() else "file",
-                    "size": stat.st_size, "modified": stat.st_mtime, "created": stat.st_ctime}
+            return self._noted({"path": str(target), "type": "dir" if target.is_dir() else "file",
+                                "size": stat.st_size, "modified": stat.st_mtime, "created": stat.st_ctime}, note)
         if action == "write":
             data = content or ""
             with self._locked_paths([target]):
@@ -1372,7 +1411,7 @@ class Capabilities:
         # Read the cwd once: a parallel set_cwd must not change the
         # base between resolving the root and shortening result paths.
         base = self.cwd
-        root = self.paths.resolve(path, cwd=base, access="read", must_exist=True)
+        root, note = self._resolve_existing(path, "read", retry=True, cwd=base)
         maximum = max(1, min(int(max_results), 5000))
         rg = shutil.which("rg")
         if root.is_file():
@@ -1388,7 +1427,7 @@ class Capabilities:
             out = self._search_python(root, query, glob or [], applied, case_sensitive, maximum, files_only, fixed_string, context, int(max_file_size_bytes), bool(include_hidden))
         if not files_only:
             self._group_by_file(out)
-        return self._short_paths(base, out)
+        return self._noted(self._short_paths(base, out), note)
 
     @staticmethod
     def _group_by_file(out):

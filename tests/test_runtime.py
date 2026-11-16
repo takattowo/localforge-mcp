@@ -218,6 +218,35 @@ def test_replace_all_replaces_every_exact_match(tmp_path):
             {"old_text": "told", "new_text": "x", "replace_all": True, "expected_occurrences": 2}])
     assert exc.value.code == "invalid_arguments" and "edits[0]" in exc.value.message
 
+def test_missing_relative_path_is_retried_from_the_git_root(tmp_path):
+    if shutil.which("git") is None:
+        pytest.skip("git unavailable")
+    server = make(tmp_path)
+    assert server.cap.execute(["git", "init", "-q"])["success"]
+    (tmp_path / "src").mkdir()
+    (tmp_path / "docs").mkdir()
+    (tmp_path / "src" / "app.py").write_text("needle\n")
+    server.cap.workspace("set_cwd", "docs")
+    # A path copied from git status, after set_cwd into a subfolder.
+    read = server.cap.filesystem("read", "src/app.py", line_start=1)
+    assert read["content"] == "1\tneedle" and "Git root" in read["note"]
+    assert "Git root" in server.cap.filesystem("stat", "src/app.py")["note"]
+    listed = server.cap.filesystem("list", "src")
+    assert [entry["name"] for entry in listed["entries"]] == ["app.py"] and "Git root" in listed["note"]
+    found = server.cap.search("needle", path="src")
+    assert found["match_count"] == 1 and "Git root" in found["note"]
+    # Writes are not retried there; the error names the Git-root path instead.
+    with pytest.raises(RuntimeFault) as exc:
+        server.cap.filesystem("replace_text", "src/app.py", old_text="needle", new_text="pin")
+    assert exc.value.code == "path_not_found" and "Git root" in exc.value.message and "app.py" in exc.value.message
+    assert (tmp_path / "src" / "app.py").read_text() == "needle\n"
+    # The same path policy applies from the Git root.
+    denied = make(tmp_path, denied_paths=[str(tmp_path / "src")])
+    denied.cap.workspace("set_cwd", "docs")
+    with pytest.raises(RuntimeFault) as exc:
+        denied.cap.filesystem("read", "src/app.py")
+    assert exc.value.code == "path_not_found" and "Git root" not in exc.value.message
+
 def test_search_fallback_and_git(tmp_path, monkeypatch):
     server = make(tmp_path)
     (tmp_path / "src").mkdir()
