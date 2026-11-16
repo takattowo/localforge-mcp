@@ -2143,7 +2143,7 @@ def test_execute_kills_a_grandchild_holding_the_pipes_on_kill_on_timeout(tmp_pat
     # It exited 0, so say why the reply is still a timeout.
     assert "exited" in out.get("hint", ""), out
     # The command had already exited: only what it left running was stopped.
-    assert "what it left running" in out["hint"] and "the command was stopped" not in out["hint"], out
+    assert "what it left running" in out["hint"] and "the command was stopped" not in out["hint"].lower(), out
 
 
 def _fake_entry(code, pumps=(), job=None, started=None):

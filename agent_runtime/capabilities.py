@@ -1707,16 +1707,17 @@ class Capabilities:
                     pass
                 error_type = "timeout"
                 drain()
-                limit = "" if kill_on_timeout else (
-                    f" instead of moving to the background, as max_processes ({self.cfg.max_processes}) is reached")
+                limit = f"max_processes ({self.cfg.max_processes}) is reached"
                 if running:
                     if not kill_on_timeout:
-                        hint = f"The command was stopped at its timeout{limit}."
+                        hint = f"The command was stopped at its timeout instead of moving to the background, as {limit}."
                 else:
-                    left = ("stopping what it left running was tried, but something still holds its output"
-                            if held(item) else "what it left running was stopped")
                     hint = (f"The command exited with code {proc.returncode}, but a process it started "
-                            f"still held its output open at the timeout, so {left}{limit}.")
+                            "still held its output open at the timeout")
+                    if not kill_on_timeout:
+                        hint += f"; as {limit}, it was not moved to the background"
+                    hint += ("; stopping what it left running was tried, but something still holds its output."
+                             if held(item) else ", so what it left running was stopped.")
         elif proc.returncode != 0:
             error_type = "process_exit"
         if error_type != "backgrounded":

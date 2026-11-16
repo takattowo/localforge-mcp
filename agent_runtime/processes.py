@@ -141,8 +141,12 @@ class ProcessManager:
         command = coerce_command(command)
         shell = bool(shell or isinstance(command, str))
         self.policy.authorize_command(command, work, shell)
-        if self._gc() >= int(self.cfg.max_processes) and enforce_limit:
-            raise RuntimeFault("process_limit", f"Too many processes (max {self.cfg.max_processes})")
+        active = self._gc()
+        if active >= int(self.cfg.max_processes) and enforce_limit:
+            raise RuntimeFault("process_limit",
+                               f"Too many processes: {active} running or still holding their output "
+                               f"(max {self.cfg.max_processes}). Stop one with process stop; "
+                               "process list shows them, including exited ones whose output is still held.")
         pid = process_id or f"proc-{uuid.uuid4().hex[:10]}"
         with self.lock:
             if pid in self.items and self.items[pid].proc.poll() is None:
