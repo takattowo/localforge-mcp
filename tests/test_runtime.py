@@ -1847,3 +1847,69 @@ def test_spill_dir_paths_and_failures(tmp_path, monkeypatch):
     assert big["stdout_truncated"] and "stdout_path" not in big
     fitted, _ = broken._fit_result("filesystem", {"x": "y" * 300000}, json.dumps({"x": "y" * 300000}))
     assert fitted["result_path"] is None and "failed" in fitted["hint"]
+
+
+def test_edit_miss_shows_closest_lines(tmp_path):
+    server = make(tmp_path)
+    (tmp_path / "app.py").write_text("import os\n\ndef total(items):\n    return  sum(items)\n\ndef other():\n    pass\n")
+    with pytest.raises(RuntimeFault) as exc:
+        server.cap.filesystem("replace_text", "app.py", old_text="def total(items):\n    return sum( items )",
+                              new_text="def total(xs):\n    return sum(xs)")
+    message = exc.value.message
+    assert exc.value.code == "content_mismatch" and "found 0" in message
+    # Numbered like line-mode read, and only the matched span.
+    assert "3\tdef total(items):\n4\t    return  sum(items)" in message
+    assert "import os" not in message and "other" not in message
+    # Fewer than half of old_text's lines agree: no hint.
+    with pytest.raises(RuntimeFault) as weak:
+        server.cap.filesystem("replace_text", "app.py", old_text="import os\nnothing here\nnor here", new_text="x")
+    assert "\t" not in weak.value.message
+    # Padding old_text with unmatched lines reveals nothing past the last match.
+    (tmp_path / "v.txt").write_text("x = 1\ny = 2\nz = 3\nw = 4\n")
+    with pytest.raises(RuntimeFault) as padded:
+        server.cap.filesystem("replace_text", "v.txt", old_text="x = 1\ny = 2\nQQQ", new_text="x")
+    assert "1\tx = 1\n2\ty = 2" in padded.value.message and "z = 3" not in padded.value.message
+    # At most 12 lines, each cut to 200 characters; CRLF files hint from the LF view.
+    rows = "".join(f"row {n}\r\n" for n in range(1, 21))
+    (tmp_path / "rows.txt").write_bytes(("k" + "x" * 300 + "\r\n" + rows).encode())
+    old = "k" + "x" * 300 + "\n" + rows.replace("\r\n", "\n").replace("row 5\n", "row five\n")
+    with pytest.raises(RuntimeFault) as wide:
+        server.cap.filesystem("replace_text", "rows.txt", old_text=old, new_text="x")
+    shown = [line for line in wide.value.message.split("\n") if "\t" in line]
+    assert len(shown) == 12 and shown[0].startswith("1\tk") and shown[-1] == "12\trow 11"
+    assert len(shown[0]) < 230 and "\r" not in wide.value.message
+
+
+def test_edit_miss_says_when_already_applied(tmp_path):
+    server = make(tmp_path)
+    (tmp_path / "a.py").write_text("value = compute_total(alpha, beta)\n")
+    with pytest.raises(RuntimeFault) as exc:
+        server.cap.filesystem("replace_text", "a.py", old_text="value = compute(alpha)",
+                              new_text="value = compute_total(alpha, beta)")
+    assert "already" in exc.value.message
+    # Short new_text is too common to mean anything.
+    with pytest.raises(RuntimeFault) as short:
+        server.cap.filesystem("replace_text", "a.py", old_text="nope", new_text="alpha")
+    assert "already" not in short.value.message
+
+
+def test_edit_miss_hints_multi_edit_and_repeated_matches(tmp_path):
+    server = make(tmp_path)
+    (tmp_path / "m.txt").write_text("one\ntwo\nthree\n")
+    # The hint for a failing edit reflects the earlier edits.
+    with pytest.raises(RuntimeFault) as exc:
+        server.cap.filesystem("multi_edit", "m.txt", edits=[
+            {"old_text": "one", "new_text": "uno"},
+            {"old_text": "uno\n two \nfour", "new_text": "x"},
+        ])
+    assert "edits[1]" in exc.value.message and "1\tuno\n2\ttwo" in exc.value.message
+    assert (tmp_path / "m.txt").read_text() == "one\ntwo\nthree\n"
+    # Too many matches for the expected one: say where they are.
+    (tmp_path / "r.txt").write_text("x\ny\nx\nz\nx\n")
+    with pytest.raises(RuntimeFault) as many:
+        server.cap.filesystem("replace_text", "r.txt", old_text="x", new_text="X")
+    assert "found 3" in many.value.message and "lines 1, 3, 5" in many.value.message
+    (tmp_path / "s.txt").write_text("x\n" * 15)
+    with pytest.raises(RuntimeFault) as capped:
+        server.cap.filesystem("multi_edit", "s.txt", edits=[{"old_text": "x", "new_text": "X"}])
+    assert "lines 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, ..." in capped.value.message

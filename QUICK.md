@@ -23,7 +23,7 @@ NEVER edit files by shelling out. Do not use `execute`, `process`, or any code-e
 
 ## Reading and searching
 - Start each task with `workspace` action `get`: it returns the project's AGENTS.md/CLAUDE.md as `project_instructions`. Follow them.
-- Edits return a `diff` (and a `check` result when edit_checks is configured); do not re-read a file just to confirm an edit.
+- Edits return a `diff` (and a `check` result when edit_checks is configured); do not re-read a file just to confirm an edit. A failed edit (`content_mismatch`) shows the closest lines or the lines of each match; fix old_text from them instead of re-reading the file.
 - A cut `execute` output has `stdout_path`/`stderr_path`, and an oversized result has `result_path`: read or search that file instead of re-running the command.
 - `filesystem` action `read` with line_start/line_end for line ranges (returns numbered text, one 'N<TAB>line' per line, up to 2000 lines; continue from next_line); `list` for directories; `stat` for metadata.
 - `search` for content (query, glob, context_lines) or filenames (files_only=true).

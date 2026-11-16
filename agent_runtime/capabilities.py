@@ -287,6 +287,72 @@ SPILL_PREFIX = "lf-"
 EDIT_DIFF_MAX_INPUT = 128_000
 # Failure output an edit check returns inline.
 EDIT_CHECK_OUTPUT_BYTES = 4000
+# Hint for an edit that finds old_text the wrong number of times.
+HINT_LINES = 12
+HINT_LINE_CHARS = 200
+HINT_MATCH_LINES = 10
+
+
+def _miss_hint(view, old, new, found, expected):
+    """Hint for an edit whose old_text matched found times, not expected.
+
+    Lets the agent retry without reading the file again. For a miss:
+    new_text is already there (the edit may already be applied), or the
+    lines closest to old_text, numbered like line-mode read. Lines vote
+    for where old_text starts when they match ignoring whitespace; only
+    lines with a letter or digit vote, and at least half of them must
+    agree. Only the span from the first to the last matched line is
+    shown, so padding old_text reveals nothing past it. For too many
+    matches, the lines they start on. view is the LF view; returns ""
+    when there is nothing useful to say.
+    """
+    if found > 1 and expected == 1:
+        starts, at = [], view.find(old)
+        while at != -1 and len(starts) <= HINT_MATCH_LINES:
+            starts.append(view.count("\n", 0, at) + 1)
+            at = view.find(old, at + len(old))
+        more = ", ..." if len(starts) > HINT_MATCH_LINES else ""
+        return f" Matches start on lines {', '.join(map(str, starts[:HINT_MATCH_LINES]))}{more}."
+    if found:
+        return ""
+    stripped = new.strip()
+    if len(stripped) >= 20 and stripped in view:
+        return " new_text is already in the file, so this edit may already be applied."
+
+    def key(line):
+        return re.sub(r"\s+", "", line)
+
+    def votes_for(text):
+        return any(c.isalnum() for c in text)
+
+    lines = view.split("\n")
+    positions = {}
+    for number, line in enumerate(lines):
+        if votes_for(k := key(line)):
+            positions.setdefault(k, []).append(number)
+    search = old.split("\n")
+    votes, wanted = {}, 0
+    for offset, line in enumerate(search):
+        if not votes_for(k := key(line)):
+            continue
+        wanted += 1
+        for number in positions.get(k, ()):
+            votes[number - offset] = votes.get(number - offset, 0) + 1
+    if not votes:
+        return ""
+    start, count = max(votes.items(), key=lambda vote: (vote[1], -vote[0]))
+    if count * 2 < wanted:
+        return ""
+    matched = [start + offset for offset, line in enumerate(search)
+               if key(line) and 0 <= start + offset < len(lines) and key(lines[start + offset]) == key(line)]
+    first = matched[0]
+    shown = []
+    for number in range(first, min(matched[-1] + 1, first + HINT_LINES)):
+        line = lines[number]
+        if len(line) > HINT_LINE_CHARS:
+            line = line[:HINT_LINE_CHARS] + LINE_CUT
+        shown.append(f"{number + 1}\t{line}")
+    return "\nClosest lines in the file (N<TAB>line):\n" + "\n".join(shown)
 
 class Capabilities:
     def __init__(self, cfg, paths, policy, processes, store=None):
@@ -582,9 +648,9 @@ class Capabilities:
                     _fs_error("replace_text", target, e)
                 updated, counts, write_eol = self._apply_edits(
                     original, eol, [(old_text, new_text, expected)],
-                    lambda index, want, found: RuntimeFault(
+                    lambda index, want, found, hint: RuntimeFault(
                         "content_mismatch", f"Expected {want} occurrence(s), found {found}. "
-                        "Pass expected_occurrences to replace all of them at once."))
+                        f"Pass expected_occurrences to replace all of them at once.{hint}"))
                 try:
                     written = self._atomic_write(target, updated, encoding, write_eol)
                 except OSError as e:
@@ -629,11 +695,11 @@ class Capabilities:
                 # coherent multi-part change never lands half-applied.
                 content, counts, write_eol = self._apply_edits(
                     original, eol, specs,
-                    lambda index, want, found: RuntimeFault(
+                    lambda index, want, found, hint: RuntimeFault(
                         "content_mismatch", f"edits[{index}]: expected {want} "
                         f"occurrence(s), found {found}. Edits apply in order, so "
                         "earlier edits may have changed the text; pass "
-                        "expected_occurrences when it repeats."))
+                        f"expected_occurrences when it repeats.{hint}"))
                 try:
                     written = self._atomic_write(target, content, encoding, write_eol)
                 except OSError as e:
@@ -843,7 +909,8 @@ class Capabilities:
         Otherwise the normalized result is written back with the
         dominant ending.
         Returns (content, counts, eol_for_write); mismatch(index,
-        expected, found) builds the error when the LF view does not match.
+        expected, found, hint) builds the error when the LF view does not
+        match, hint being _miss_hint's text for the failing edit.
         """
         def run(text, edit_eol):
             counts = []
@@ -852,14 +919,15 @@ class Capabilities:
                     old, new = old.replace("\n", "\r\n"), new.replace("\n", "\r\n")
                 found = text.count(old)
                 if found != expected:
-                    return None, (index, expected, found)
+                    return None, (index, expected, found, text, old, new)
                 text = text.replace(old, new)
                 counts.append(found)
             return text, counts
 
         normalized, counts = run(_lf(original), None)
         if normalized is None:
-            raise mismatch(*counts)
+            index, expected, found, text, old, new = counts
+            raise mismatch(index, expected, found, _miss_hint(text, old, new, found, expected))
         exact, _ = run(original, eol)
         if exact is not None and _lf(exact) == normalized:
             return exact, counts, None
