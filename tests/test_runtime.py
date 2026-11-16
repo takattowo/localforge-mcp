@@ -151,6 +151,24 @@ def test_search_timeout_says_what_to_do(tmp_path, monkeypatch):
             server.cap.search(**kwargs)
         assert exc.value.code == "timeout" and "timed out" in exc.value.message and "glob" in exc.value.message
 
+def test_read_lines_negative_start_reads_from_the_end(tmp_path):
+    server = make(tmp_path)
+    (tmp_path / "f.txt").write_text("".join(f"row {n}\n" for n in range(1, 201)))
+    out = server.cap.filesystem("read", "f.txt", line_start=-50)
+    lines = out["content"].split("\n")
+    assert len(lines) == 50 and lines[0] == "151\trow 151" and lines[-1] == "200\trow 200"
+    assert out["line_start"] == 151 and out["line_end"] == 200 and out["total_lines"] == 200 and not out["truncated"]
+    (tmp_path / "s.txt").write_text("a\nb\n")
+    short = server.cap.filesystem("read", "s.txt", line_start=-10)
+    assert short["content"] == "1\ta\n2\tb" and short["line_start"] == 1 and short["total_lines"] == 2
+    assert server.call("filesystem", {"action": "read", "path": "s.txt", "line_start": "-1"})["content"] == "2\tb"
+    with pytest.raises(RuntimeFault) as exc:
+        server.cap.filesystem("read", "f.txt", line_start=-5, line_end=10)
+    assert exc.value.code == "invalid_arguments"
+    small = make(tmp_path, max_read_chars=64).cap.filesystem("read", "f.txt", line_start=-50)
+    assert small["truncated"] and small["content"].endswith("200\trow 200") and len(small["content"]) <= 64
+    assert small["line_start"] > 151 and "note" in small
+
 def test_search_fallback_and_git(tmp_path, monkeypatch):
     server = make(tmp_path)
     (tmp_path / "src").mkdir()

@@ -1159,9 +1159,18 @@ class Capabilities:
         max_read_chars. next_line says where to continue; total_lines
         appears only when the read reaches the end of the file. A
         line_start past the end returns the file's last lines (up to
-        PAST_END_LINES) and a note, instead of nothing.
+        PAST_END_LINES) and a note, instead of nothing. A negative
+        line_start -K returns the last K lines (up to MAX_READ_LINES),
+        numbered as they are in the file.
         """
-        start = max(1, int(line_start or 1))
+        tail = None
+        if line_start is not None and int(line_start) < 0:
+            if line_end is not None:
+                raise RuntimeFault("invalid_arguments",
+                                   "line_end cannot be combined with a negative line_start, which reads the last lines")
+            tail = min(-int(line_start), MAX_READ_LINES)
+        # A tail read keeps its lines in skipped, as start is past any file.
+        start = sys.maxsize if tail else max(1, int(line_start or 1))
         last = int(line_end) if line_end is not None else None
         if last is not None and last < start:
             raise RuntimeFault("invalid_arguments", "line_end must be >= line_start")
@@ -1172,7 +1181,7 @@ class Capabilities:
                     raise RuntimeFault("binary_file", "Binary file read is not supported")
             out, used, n, end, more = [], 0, 0, start - 1, False
             # The lines skipped before start, in case it is past the end.
-            skipped = deque(maxlen=PAST_END_LINES)
+            skipped = deque(maxlen=tail or PAST_END_LINES)
             # newline="\n": only LF ends a line, like ripgrep, so a
             # lone CR stays inside its line.
             with target.open("r", encoding=encoding, errors="replace", newline="\n") as handle:
@@ -1213,6 +1222,13 @@ class Capabilities:
                     break
                 out.insert(0, text)
                 used += len(text) + 1
+            if tail:
+                wanted = min(tail, n)
+                result = {"path": str(target), "content": "\n".join(out), "line_start": n - len(out) + 1,
+                          "line_end": n, "truncated": len(out) < wanted, "total_lines": n}
+                if result["truncated"]:
+                    result["note"] = f"Only the last {len(out)} of the {wanted} lines asked for fit in max_read_chars."
+                return result
             return {"path": str(target), "content": "\n".join(out),
                     "line_start": n - len(out) + 1, "line_end": n, "truncated": False, "total_lines": n,
                     "note": f"line_start {start} is past the end; the file has {n} lines."
