@@ -1447,3 +1447,30 @@ def test_edits_return_a_capped_diff(tmp_path):
     assert cut["diff_truncated"] and len(cut["diff"].encode()) <= 10
     off = make(tmp_path, edit_diff_max_bytes=0)
     assert "diff" not in off.cap.filesystem("write", "d.txt", "q\n")
+
+
+def test_edit_checks_run_on_matching_files(tmp_path):
+    check = [sys.executable, "-c",
+             "import sys\nif 'bad' in open(sys.argv[1]).read(): sys.exit('bad: ' + sys.argv[1])", "{path}"]
+    server = make(tmp_path, edit_checks={"*.chk": check})
+    assert server.cap.filesystem("write", "a.chk", "fine\n")["check"] == {"ok": True}
+    bad = server.cap.filesystem("replace_text", "a.chk", old_text="fine", new_text="bad")
+    assert bad["check"]["ok"] is False and bad["check"]["exit_code"] == 1
+    assert "bad: " + str(tmp_path / "a.chk") in bad["check"]["output"]
+    assert (tmp_path / "a.chk").read_text() == "bad\n"
+    multi = server.cap.filesystem("multi_edit", "a.chk", edits=[{"old_text": "bad", "new_text": "ok"}])
+    assert multi["check"] == {"ok": True}
+    patched = server.cap.filesystem("apply_patch", ".", patch="--- /dev/null\n+++ b/new.chk\n@@ -0,0 +1 @@\n+bad\n")
+    assert patched["files"][0]["check"]["ok"] is False
+    assert "check" not in server.cap.filesystem("write", "plain.txt", "bad")
+    # A mode without process execution reports the check as not run.
+    no_exec = make(tmp_path, mode="WORKSPACE", edit_checks={"*.chk": check})
+    denied = no_exec.cap.filesystem("write", "a.chk", "x")["check"]
+    assert denied["ok"] is False and "execution" in denied["error"]
+
+
+def test_config_rejects_bad_edit_checks(tmp_path):
+    path = tmp_path / "lf.json"
+    path.write_text(json.dumps({"workspace_root": str(tmp_path), "edit_checks": {"*.py": "python"}}))
+    with pytest.raises(ValueError):
+        Config.load(str(path))

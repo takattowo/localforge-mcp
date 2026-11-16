@@ -260,6 +260,8 @@ GIT_ROOT_TTL_SECONDS = 30
 PATH_LOCK_STRIPES = 256
 # Saved outputs kept in the spill folder; older ones are pruned.
 SPILL_KEEP = 100
+# Failure output an edit check returns inline.
+EDIT_CHECK_OUTPUT_BYTES = 4000
 
 class Capabilities:
     def __init__(self, cfg, paths, policy, processes, store=None):
@@ -478,6 +480,7 @@ class Capabilities:
                 result["eol"] = "CRLF" if eol == "\r\n" else "LF"
             if before is not None:
                 self._add_diff(result, before, data)
+            self._add_check(result, target)
             return result
         if action == "replace_text":
             if not target.is_file():
@@ -505,6 +508,7 @@ class Capabilities:
                     _fs_error("replace_text", target, e)
             result = {"path": str(target), "replacements": counts[0], "bytes": written}
             self._add_diff(result, original, updated)
+            self._add_check(result, target)
             return result
         if action == "multi_edit":
             if not isinstance(edits, list) or not edits:
@@ -554,6 +558,7 @@ class Capabilities:
             applied = [{"index": index, "replacements": count} for index, count in enumerate(counts)]
             result = {"path": str(target), "edits": applied, "bytes": written}
             self._add_diff(result, original, content)
+            self._add_check(result, target)
             return result
         if action == "apply_patch":
             if patch is None:
@@ -599,6 +604,8 @@ class Capabilities:
                     except OSError as e:
                         _fs_error("apply_patch", dest, e)
                     results.append({"path": str(dest), "created": creating, "bytes": written})
+            for entry in results:
+                self._add_check(entry, Path(entry["path"]))
             return {"base": str(target), "files": results}
         if action == "mkdir":
             with self._locked_paths([target]):
@@ -638,6 +645,30 @@ class Capabilities:
             result["diff"] = diff
             if cut:
                 result["diff_truncated"] = True
+
+    def _add_check(self, result, target):
+        """Run the edit_checks command whose glob matches the edited file.
+
+        Runs after the write, outside the path lock; the edit stays
+        written either way. A pass is just {"ok": true}; a failure
+        carries the command, exit code, and clipped output.
+        """
+        argv = next((cmd for pattern, cmd in self.cfg.edit_checks.items()
+                     if fnmatch.fnmatch(target.name, pattern)), None)
+        if argv is None or not target.is_file():
+            return
+        command = [part.replace("{path}", str(target)) for part in argv]
+        try:
+            run = self.execute(command, timeout=self.cfg.edit_check_timeout_seconds)
+        except RuntimeFault as e:
+            result["check"] = {"ok": False, "command": command, "error": e.message}
+            return
+        if run["success"]:
+            result["check"] = {"ok": True}
+            return
+        output, _ = _clip_ends((run["stdout"] + run["stderr"]).strip(), EDIT_CHECK_OUTPUT_BYTES)
+        result["check"] = {"ok": False, "command": command, "exit_code": run["exit_code"],
+                           "error_type": run["error_type"], "output": output}
 
     def _read_lines(self, target, encoding, line_start, line_end):
         """Line-mode read as numbered text, one "N<TAB>line" per line.

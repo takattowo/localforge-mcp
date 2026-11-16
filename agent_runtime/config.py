@@ -44,6 +44,10 @@ class Config:
     max_result_bytes: int = 200_000
     spill_dir: str | None = None
     edit_diff_max_bytes: int = 4_000
+    # Glob on the file name -> argv run after each edit of a
+    # matching file; "{path}" becomes the edited file's path.
+    edit_checks: dict[str, list[str]] = field(default_factory=dict)
+    edit_check_timeout_seconds: int = 30
 
     @classmethod
     def load(cls, path: str | None = None) -> "Config":
@@ -66,7 +70,7 @@ class Config:
             raise ValueError(f"invalid mode: {cfg.mode}")
         if cfg.network not in NETWORK_MODES:
             raise ValueError("network must be 'disabled' or 'unrestricted'")
-        for name in ("default_timeout_seconds", "max_capture_bytes", "max_file_read_bytes", "max_read_chars", "process_buffer_bytes", "process_ttl_seconds", "max_processes", "max_concurrency", "max_inline_output_bytes", "max_result_bytes"):
+        for name in ("default_timeout_seconds", "max_capture_bytes", "max_file_read_bytes", "max_read_chars", "process_buffer_bytes", "process_ttl_seconds", "max_processes", "max_concurrency", "max_inline_output_bytes", "max_result_bytes", "edit_check_timeout_seconds"):
             if int(getattr(cfg, name)) <= 0:
                 raise ValueError(f"{name} must be positive")
         if int(cfg.max_read_chars) < 64:
@@ -74,6 +78,10 @@ class Config:
             raise ValueError("max_read_chars must be at least 64")
         if int(cfg.edit_diff_max_bytes) < 0:
             raise ValueError("edit_diff_max_bytes must be 0 (off) or positive")
+        if not isinstance(cfg.edit_checks, dict) or not all(
+                isinstance(argv, list) and argv and all(isinstance(part, str) for part in argv)
+                for argv in cfg.edit_checks.values()):
+            raise ValueError('edit_checks must map a file glob to an argv array, e.g. {"*.py": ["python", "-m", "py_compile", "{path}"]}')
         if not cfg.state_file:
             cfg.state_file = str(Path(cfg.config_path).parent / ".localforge-state.json")
         return cfg
