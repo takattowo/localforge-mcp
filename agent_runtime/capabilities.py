@@ -2,6 +2,7 @@ from __future__ import annotations
 import codecs
 import contextlib
 import base64
+import bisect
 import difflib
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -292,6 +293,108 @@ HINT_LINE_CHARS = 200
 HINT_MATCH_LINES = 10
 
 
+# Typographic variants, each mapped to one ASCII character so offsets
+# into the normalized text stay valid for the original.
+_TYPOGRAPHY = str.maketrans({**dict.fromkeys("\u2018\u2019\u201a\u201b", "'"),
+                             **dict.fromkeys("\u201c\u201d\u201e\u201f", '"'),
+                             **dict.fromkeys("\u2010\u2011\u2012\u2013\u2014\u2015\u2212", "-"),
+                             **dict.fromkeys("\u00a0\u2000\u2001\u2002\u2003\u2004\u2005\u2006"
+                                             "\u2007\u2008\u2009\u200a\u202f\u205f\u3000", " ")})
+
+
+def _typography(text):
+    return text.translate(_TYPOGRAPHY)
+
+
+def _occurrences(text, needle, step=None):
+    """(start, end) spans of needle in text; step=1 also finds overlapping ones."""
+    if not needle:
+        # Like str.count and str.replace: once at every position.
+        return [(i, i) for i in range(len(text) + 1)]
+    spans, at = [], text.find(needle)
+    while at != -1:
+        spans.append((at, at + len(needle)))
+        at = text.find(needle, at + (step or len(needle)))
+    return spans
+
+
+def _trim_end(line):
+    # Trailing whitespace, but not a CR: a stray CR is content.
+    end = len(line)
+    while end and line[end - 1].isspace() and line[end - 1] != "\r":
+        end -= 1
+    return line[:end]
+
+
+def _line_occurrences(view, old):
+    """Spans of runs of whole lines equal to old's lines, ignoring
+    trailing whitespace and typographic variants."""
+    def key(line):
+        return _typography(_trim_end(line))
+
+    trailing = old.endswith("\n")
+    wanted = old.split("\n")
+    if trailing:
+        wanted.pop()
+    wanted = [key(line) for line in wanted]
+    parts = view.split("\n")
+    if view.endswith("\n"):
+        parts.pop()
+    lines, pos = [], 0
+    for part in parts:
+        end = pos + len(part)
+        lines.append((pos, end, key(part), end < len(view)))
+        pos = end + 1
+    spans = []
+    for first in range(len(lines) - len(wanted) + 1):
+        if all(lines[first + k][2] == want for k, want in enumerate(wanted)):
+            last = lines[first + len(wanted) - 1]
+            if trailing and not last[3]:
+                continue
+            spans.append((lines[first][0], last[1] + 1 if trailing else last[1]))
+    return spans
+
+
+def _find_spans(view, old, new, expected):
+    """Matches of old in the LF view, and the tier that found them.
+
+    Exact matches win. Only when there are none, and the edit has no
+    lone CR (one asks for exact bytes, as when old and new differ only
+    in line endings), retry ignoring typographic variants, then per
+    line ignoring trailing whitespace too. A fallback tier counts only
+    with exactly expected matches, none overlapping. Returns (spans,
+    tier); tier None is a mismatch, spans then being the exact matches.
+    """
+    exact = _occurrences(view, old)
+    if exact or "\r" in old or "\r" in new or not old.strip():
+        return exact, "exact" if len(exact) == expected else None
+    for tier, find in (("typography", lambda: _occurrences(_typography(view), _typography(old), step=1)),
+                       ("trailing_whitespace", lambda: _line_occurrences(view, old))):
+        spans = find()
+        if spans:
+            apart = all(a[1] <= b[0] for a, b in zip(spans, spans[1:]))
+            return (spans, tier) if apart and len(spans) == expected else ([], None)
+    return [], None
+
+
+def _replace_spans(text, spans, new):
+    out, at = [], 0
+    for start, end in spans:
+        out += [text[at:start], new]
+        at = end
+    out.append(text[at:])
+    return "".join(out)
+
+
+def _source_spans(source, spans):
+    """Map spans in the LF view of source back to source itself."""
+    # View offset of the LF of each CRLF; a span boundary moves right by
+    # the CRs removed before it, so a CRLF pair is never split.
+    removed = [m.start() - n for n, m in enumerate(re.finditer("\r\n", source))]
+    return [(start + bisect.bisect_left(removed, start), end + bisect.bisect_left(removed, end))
+            for start, end in spans]
+
+
 def _miss_hint(view, old, new, found, expected):
     """Hint for an edit whose old_text matched found times, not expected.
 
@@ -315,11 +418,11 @@ def _miss_hint(view, old, new, found, expected):
     if found:
         return ""
     stripped = new.strip()
-    if len(stripped) >= 20 and stripped in view:
+    if len(stripped) >= 20 and _typography(stripped) in _typography(view):
         return " new_text is already in the file, so this edit may already be applied."
 
     def key(line):
-        return re.sub(r"\s+", "", line)
+        return re.sub(r"\s+", "", _typography(line))
 
     def votes_for(text):
         return any(c.isalnum() for c in text)
@@ -754,7 +857,7 @@ class Capabilities:
                     original, eol = self._read_text(target, encoding)
                 except OSError as e:
                     _fs_error("replace_text", target, e)
-                updated, counts, write_eol = self._apply_edits(
+                updated, counts, tiers, write_eol = self._apply_edits(
                     original, eol, [(old_text, new_text, expected)],
                     lambda index, want, found, hint: RuntimeFault(
                         "content_mismatch", f"Expected {want} occurrence(s), found {found}. "
@@ -764,6 +867,9 @@ class Capabilities:
                 except OSError as e:
                     _fs_error("replace_text", target, e)
             result = {"path": str(target), "replacements": counts[0], "bytes": written}
+            if tiers[0] != "exact":
+                # Not an exact match: say which fallback found it.
+                result["match"] = tiers[0]
             self._add_diff(result, original, updated)
             self._add_check(result, target)
             return result
@@ -801,7 +907,7 @@ class Capabilities:
                 # are all validated before anything is written: a
                 # failing edit leaves the file untouched, so a
                 # coherent multi-part change never lands half-applied.
-                content, counts, write_eol = self._apply_edits(
+                content, counts, tiers, write_eol = self._apply_edits(
                     original, eol, specs,
                     lambda index, want, found, hint: RuntimeFault(
                         "content_mismatch", f"edits[{index}]: expected {want} "
@@ -813,6 +919,9 @@ class Capabilities:
                 except OSError as e:
                     _fs_error("multi_edit", target, e)
             applied = [{"index": index, "replacements": count} for index, count in enumerate(counts)]
+            for entry, tier in zip(applied, tiers):
+                if tier != "exact":
+                    entry["match"] = tier
             result = {"path": str(target), "edits": applied, "bytes": written}
             self._add_diff(result, original, content)
             self._add_check(result, target)
@@ -1008,39 +1117,37 @@ class Capabilities:
         """Apply (old, new, expected) edits in order, all-or-nothing.
 
         Edit strings arrive with LF line breaks. The LF-normalized view
-        is what the agent reads, so it decides match counts and errors.
-        The same edits also run on the file text as-is, converted to
-        its dominant line ending; that result is used, and written
-        verbatim, only when it makes the same change, so untouched
-        lines keep their exact bytes (mixed endings, stray CRs) but it
-        never produces a different result in the LF view or splits a
-        CRLF pair.
-        Otherwise the normalized result is written back with the
-        dominant ending.
-        Returns (content, counts, eol_for_write); mismatch(index,
-        expected, found, hint) builds the error when the LF view does not
-        match, hint being _miss_hint's text for the failing edit.
+        is what the agent reads, so matches are found there (exactly, or
+        through the fallback tiers of _find_spans) and decide counts and
+        errors. Each match is mapped back to the file text as-is and
+        replaced there with new_text in the dominant line ending, so
+        untouched bytes (mixed endings, stray CRs) stay exact and a
+        match never splits a CRLF pair. When that would give a different
+        result in the LF view, the normalized result is written back
+        with the dominant ending instead.
+        Returns (content, counts, tiers, eol_for_write), tiers naming how
+        each edit matched; mismatch(index, expected, found, hint) builds
+        the error when the LF view does not match, hint being
+        _miss_hint's text for the failing edit.
         """
-        def run(text, edit_eol):
-            counts = []
-            for index, (old, new, expected) in enumerate(edits):
-                if edit_eol == "\r\n":
-                    old, new = old.replace("\n", "\r\n"), new.replace("\n", "\r\n")
-                found = text.count(old)
-                if found != expected:
-                    return None, (index, expected, found, text, old, new)
-                text = text.replace(old, new)
-                counts.append(found)
-            return text, counts
-
-        normalized, counts = run(_lf(original), None)
-        if normalized is None:
-            index, expected, found, text, old, new = counts
-            raise mismatch(index, expected, found, _miss_hint(text, old, new, found, expected))
-        exact, _ = run(original, eol)
-        if exact is not None and _lf(exact) == normalized:
-            return exact, counts, None
-        return normalized, counts, eol
+        view, exact = _lf(original), original
+        counts, tiers = [], []
+        for index, (old, new, expected) in enumerate(edits):
+            spans, tier = _find_spans(view, old, new, expected)
+            if tier is None:
+                found = len(spans)
+                raise mismatch(index, expected, found, _miss_hint(view, old, new, found, expected))
+            if exact is not None:
+                written = new.replace("\n", "\r\n") if eol == "\r\n" else new
+                exact = _replace_spans(exact, _source_spans(exact, spans), written)
+            view = _replace_spans(view, spans, new)
+            if exact is not None and _lf(exact) != view:
+                exact = None
+            counts.append(len(spans))
+            tiers.append(tier)
+        if exact is not None:
+            return exact, counts, tiers, None
+        return view, counts, tiers, eol
 
     @staticmethod
     def _atomic_write(target, data, encoding, eol=None):

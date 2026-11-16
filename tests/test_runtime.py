@@ -2045,3 +2045,73 @@ def test_search_groups_matches_by_file(tmp_path, monkeypatch, engine):
     assert multi["results"][0]["match_count"] == 1
     # files_only keeps its shape.
     assert {"path": "b.txt"} in server.cap.search(files_only=True)["results"]
+
+
+def test_edit_falls_back_to_typography_and_trailing_whitespace(tmp_path):
+    server = make(tmp_path)
+    (tmp_path / "t.py").write_text("msg = \u201chello\u201d \u2013 world\u00a0x\nkeep\n", encoding="utf-8")
+    out = server.cap.filesystem("replace_text", "t.py", old_text='msg = "hello" - world x', new_text='msg = "bye"')
+    assert out["match"] == "typography" and out["replacements"] == 1
+    assert (tmp_path / "t.py").read_text(encoding="utf-8") == 'msg = "bye"\nkeep\n'
+    (tmp_path / "w.py").write_text("def f():   \n    return \u2018a\u2019  \n\nother\n", encoding="utf-8")
+    out = server.cap.filesystem("replace_text", "w.py", old_text="def f():\n    return 'a'\n",
+                                new_text="def g():\n    return 'b'\n")
+    assert out["match"] == "trailing_whitespace"
+    assert (tmp_path / "w.py").read_text(encoding="utf-8") == "def g():\n    return 'b'\n\nother\n"
+    # Exact matches win and say nothing extra.
+    (tmp_path / "e.py").write_text('a = "x"\na = \u201cx\u201d\n', encoding="utf-8")
+    out = server.cap.filesystem("replace_text", "e.py", old_text='a = "x"', new_text='a = "y"')
+    assert "match" not in out
+    assert (tmp_path / "e.py").read_text(encoding="utf-8") == 'a = "y"\na = \u201cx\u201d\n'
+    # expected_occurrences applies to the fallback too.
+    (tmp_path / "two.py").write_text("q(\u201cz\u201d)\nq(\u201cz\u201d)\n", encoding="utf-8")
+    out = server.cap.filesystem("replace_text", "two.py", old_text='q("z")', new_text="q(1)", expected_occurrences=2)
+    assert out["match"] == "typography" and (tmp_path / "two.py").read_text(encoding="utf-8") == "q(1)\nq(1)\n"
+
+
+def test_edit_fallback_keeps_crlf_bytes(tmp_path):
+    server = make(tmp_path)
+    path = tmp_path / "c.txt"
+    path.write_bytes("a = \u201cx\u201d\r\nkeep  \r\nb = 1   \r\nc\r\n".encode("utf-8"))
+    server.cap.filesystem("replace_text", "c.txt", old_text='a = "x"', new_text='a = "y"')
+    assert path.read_bytes() == 'a = "y"\r\nkeep  \r\nb = 1   \r\nc\r\n'.encode("utf-8")
+    out = server.cap.filesystem("multi_edit", "c.txt", edits=[
+        {"old_text": 'a = "y"', "new_text": 'a = "z"'},
+        {"old_text": "b = 1\nc\n", "new_text": "b = 2\nc\n"}])
+    assert "match" not in out["edits"][0] and out["edits"][1]["match"] == "trailing_whitespace"
+    assert path.read_bytes() == b'a = "z"\r\nkeep  \r\nb = 2\r\nc\r\n'
+    # An edit over a minority-ending line leaves the other lines' endings alone.
+    path.write_bytes(b"keep\nX\r\nb\nc\r\nd\r\n")
+    server.cap.filesystem("replace_text", "c.txt", old_text="b\nc", new_text="B\nC")
+    assert path.read_bytes() == b"keep\nX\r\nB\r\nC\r\nd\r\n"
+
+
+def test_edit_fallback_refuses_ambiguous_or_line_ending_edits(tmp_path):
+    server = make(tmp_path)
+    ambiguous = "x = \u201ca\u201d\ny = 1\nx = \u201ca\u201d\n"
+    (tmp_path / "a.py").write_text(ambiguous, encoding="utf-8")
+    with pytest.raises(RuntimeFault) as exc:
+        server.cap.filesystem("replace_text", "a.py", old_text='x = "a"', new_text='x = "b"')
+    assert exc.value.code == "content_mismatch" and "found 0" in exc.value.message
+    (tmp_path / "b.py").write_text("foo  \nfoo \n")
+    with pytest.raises(RuntimeFault):
+        server.cap.filesystem("multi_edit", "b.py", edits=[{"old_text": "foo\n", "new_text": "bar\n"}])
+    # Overlapping fallback matches are ambiguous too.
+    (tmp_path / "o.txt").write_text("\u2013\u2013\u2013\n", encoding="utf-8")
+    with pytest.raises(RuntimeFault):
+        server.cap.filesystem("replace_text", "o.txt", old_text="--", new_text="+")
+    # A lone CR in the edit asks for exact bytes: no fallback.
+    (tmp_path / "r.txt").write_text("a  \nb\n")
+    with pytest.raises(RuntimeFault):
+        server.cap.filesystem("replace_text", "r.txt", old_text="a\r", new_text="a")
+    assert (tmp_path / "a.py").read_text(encoding="utf-8") == ambiguous
+    assert (tmp_path / "b.py").read_text() == "foo  \nfoo \n" and (tmp_path / "r.txt").read_text() == "a  \nb\n"
+    assert (tmp_path / "o.txt").read_text(encoding="utf-8") == "\u2013\u2013\u2013\n"
+
+
+def test_edit_miss_hint_ignores_typography(tmp_path):
+    server = make(tmp_path)
+    (tmp_path / "h.py").write_text("say(\u201chi\u201d)\nnext\n", encoding="utf-8")
+    with pytest.raises(RuntimeFault) as exc:
+        server.cap.filesystem("replace_text", "h.py", old_text='say("hi")\nnope', new_text="x")
+    assert "1\tsay(\u201chi\u201d)" in exc.value.message

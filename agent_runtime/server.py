@@ -82,7 +82,7 @@ SCHEMAS = {
         "encoding": {"type": "string", "description": "Text encoding, default utf-8."},
         "offset": {"type": "integer", "description": "Byte offset for legacy read mode; list page offset when action is list. Ignored in line mode."},
         "max_bytes": {"type": "integer", "description": "Byte cap for legacy read mode."},
-        "old_text": {"type": "string", "description": "Exact text to find for replace_text."},
+        "old_text": {"type": "string", "description": "Text to find for replace_text; exact, else retried ignoring typographic quotes/dashes/spaces, then trailing whitespace per line (the result then has match)."},
         "new_text": {"type": "string", "description": "Replacement text for replace_text."},
         "expected_occurrences": {"type": "integer", "description": "Required match count for replace_text, default 1."},
         "edits": {"type": "array", "minItems": 1, "maxItems": 32,

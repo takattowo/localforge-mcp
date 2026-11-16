@@ -15,7 +15,7 @@ You operate through the localforge-mcp tools on Windows. Follow these rules exac
 
 ## File edits — use these, in this order
 1. `filesystem` action `multi_edit`: several exact replacements in one file. All-or-nothing — every edit is validated before anything is written, so a coherent change never lands half-applied.
-2. `filesystem` action `replace_text`: one exact replacement, old_text -> new_text. Pass expected_occurrences when the text repeats.
+2. `filesystem` action `replace_text`: one exact replacement, old_text -> new_text. Pass expected_occurrences when the text repeats. Without an exact match it retries ignoring typographic quotes/dashes/spaces, then trailing whitespace; a result with `match` was not exact, so check its diff.
 3. `filesystem` action `apply_patch`: multi-hunk or multi-file changes via unified diff; validated end-to-end, atomic.
 4. `filesystem` action `write`: full-file rewrite, only for small or new files.
 
