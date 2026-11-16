@@ -1496,3 +1496,16 @@ def test_workspace_get_returns_project_instructions(tmp_path):
     assert "project_instructions" not in denied.cap.workspace("get")
     off = make(tmp_path, project_instruction_files=[])
     assert "project_instructions" not in off.cap.workspace("get")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows PowerShell only")
+def test_windows_powershell_curl_and_and_hint(tmp_path):
+    server = make(tmp_path)
+    server.cfg.default_shell = "powershell"
+    # make() inherits only PATH; PowerShell needs the default set to start.
+    server.cfg.inherit_environment = Config(str(tmp_path)).inherit_environment
+    curl = server.cap.execute("(Get-Command curl).CommandType; (Get-Command wget -ErrorAction SilentlyContinue).CommandType")
+    assert curl["success"] and curl["stdout"].split() == ["Application"]
+    chained = server.cap.execute("echo a && echo b")
+    assert not chained["success"] and "&&" in chained["hint"]
+    assert "hint" not in server.cap.execute("echo a; echo b")

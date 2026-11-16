@@ -115,13 +115,18 @@ class Policy:
         return {"command": display, "cwd": str(cwd), "shell": shell, "network_classified": network}
 
 
+# Windows PowerShell 5.1 aliases curl and wget to Invoke-WebRequest,
+# which takes none of their flags. Drop the aliases so the real
+# curl.exe runs. pwsh 6+ has no such aliases.
+POWERSHELL_PRELUDE = "Remove-Item Alias:curl, Alias:wget -Force -ErrorAction SilentlyContinue\n"
+
 def command_for_spawn(cfg, command, shell):
     if not shell:
         return command
     kind = cfg.default_shell.lower()
     if kind == "powershell":
         executable = "powershell.exe" if os.name == "nt" else "pwsh"
-        return [executable, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command]
+        return [executable, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", POWERSHELL_PRELUDE + command]
     if kind == "pwsh":
         return ["pwsh", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command]
     if kind == "cmd":

@@ -1236,6 +1236,9 @@ class Capabilities:
             result["stdout_path"] = out_path
         if err_path:
             result["stderr_path"] = err_path
+        if shell and "is not a valid statement separator" in err:
+            result["hint"] = ("Windows PowerShell 5.1 has no && or ||. Chain with ; "
+                              "(or 'if ($?) { ... }'), or make separate calls.")
         if timeout is not None and effective_timeout > float(self.cfg.default_timeout_seconds):
             result["warning"] = (
                 "timeout exceeds the configured default "
