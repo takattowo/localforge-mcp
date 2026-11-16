@@ -10,7 +10,7 @@ import time
 import uuid
 from .errors import RuntimeFault
 from .job import adopt as job_adopt
-from .security import coerce_command, command_for_spawn, redact, safe_environment
+from .security import coerce_command, command_for_spawn, redact, spawn_environment
 
 STDIN_WRITE_TIMEOUT_SECONDS = 30
 
@@ -57,7 +57,7 @@ class ProcessManager:
         return subprocess.Popen(
             command_for_spawn(self.cfg, command, shell), cwd=cwd, shell=False, stdin=subprocess.PIPE,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=False,
-            env=safe_environment(self.cfg, env), **self._creation(),
+            env=spawn_environment(self.cfg, shell, env), **self._creation(),
         )
 
     def _gc(self):

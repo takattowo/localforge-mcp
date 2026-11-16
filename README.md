@@ -314,7 +314,7 @@ This is command classification, not packet filtering. Use Windows Firewall, a co
 
 Supported `default_shell` values:
 
-- `auto` (default): `pwsh` when PowerShell 7 is installed (found on `PATH` or in its MSI or Store/winget install folder), otherwise `powershell` (Windows PowerShell 5.1), or `sh` off Windows. Resolved once at startup; restart the server after installing PowerShell 7.
+- `auto` (default): `pwsh` when PowerShell 7 is installed, on any OS (on Windows it is also found in its MSI or Store/winget install folder when it is not on `PATH`); otherwise `powershell` (Windows PowerShell 5.1) on Windows and `sh` elsewhere. Resolved once at startup; restart the server after installing PowerShell 7. Shell commands under `pwsh` get `NO_COLOR=1`, so errors come back without ANSI colour codes.
 - `powershell`
 - `pwsh`
 - `cmd`

@@ -20,7 +20,7 @@ from .errors import RuntimeFault
 from .job import adopt as job_adopt
 from .patch import build_new as build_patched
 from .patch import parse as parse_diff
-from .security import coerce_command, command_for_spawn, redact, safe_environment
+from .security import coerce_command, command_for_spawn, redact, safe_environment, spawn_environment
 
 def _fs_error(action, target, exc):
     if isinstance(exc, FileNotFoundError):
@@ -1259,7 +1259,7 @@ class Capabilities:
         try:
             proc = subprocess.Popen(command_for_spawn(self.cfg, command, shell), cwd=work, shell=False, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
                                     stdin=subprocess.PIPE if stdin_bytes is not None else subprocess.DEVNULL,
-                                    env=safe_environment(self.cfg, env), **self._creation())
+                                    env=spawn_environment(self.cfg, shell, env), **self._creation())
             if self.cfg.kill_children_on_exit:
                 # Kernel-side cleanup: the child dies with
                 # this process however it dies, not just on

@@ -182,7 +182,7 @@ DESCRIPTIONS = {
 # Filled into the execute description from default_shell.
 SHELL_NOTES = {
     "powershell": "String commands run in Windows PowerShell 5.1: no && or ||, chain with ; or make separate calls. ",
-    "pwsh": "String commands run in PowerShell 7 (pwsh). ",
+    "pwsh": "String commands run in PowerShell 7 (pwsh): && and || work. ",
     "cmd": "String commands run in cmd.exe. ",
     "sh": "String commands run in /bin/sh. ",
 }

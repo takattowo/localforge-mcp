@@ -1563,7 +1563,7 @@ def test_auto_shell_picks_pwsh_when_installed(tmp_path, monkeypatch):
 @pytest.mark.skipif(os.name != "nt", reason="Windows install locations")
 def test_find_pwsh_checks_install_folders(tmp_path, monkeypatch):
     import agent_runtime.security as sec
-    monkeypatch.setattr(sec.shutil, "which", lambda name: None)
+    monkeypatch.setattr(sec.shutil, "which", lambda name: str(tmp_path / "pwsh.cmd"))
     monkeypatch.setenv("ProgramFiles", str(tmp_path / "pf"))
     monkeypatch.delenv("ProgramW6432", raising=False)
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local"))
@@ -1591,12 +1591,37 @@ def test_pwsh_string_commands_support_and_and(tmp_path):
         pytest.skip("PowerShell 7 not installed")
     server = make(tmp_path)
     server.cfg.default_shell = "pwsh"
-    # make() inherits only PATH; pwsh needs the default set to start.
+    # make() inherits only PATH; Get-Command curl needs PATHEXT to find curl.exe.
     server.cfg.inherit_environment = Config(str(tmp_path)).inherit_environment
     ran = server.cap.execute("echo a && echo b")
     assert ran["success"] and ran["stdout"].split() == ["a", "b"] and "hint" not in ran
     curl = server.cap.execute("(Get-Command curl).CommandType")
     assert curl["stdout"].strip() == "Application"
+    # NO_COLOR keeps pwsh errors free of ANSI colour codes, in both runners.
+    failed = server.cap.execute("throw 'boom'")
+    assert not failed["success"] and "boom" in failed["stderr"] and "\x1b" not in failed["stderr"]
+    pid = server.processes.start("throw 'boom'")["process_id"]
+    try:
+        deadline = time.monotonic() + 15
+        while server.processes.status(pid)["state"] == "running" and time.monotonic() < deadline:
+            time.sleep(0.05)
+        err = server.processes.read(pid)["stderr"]
+        assert "boom" in err and "\x1b" not in err
+    finally:
+        server.processes.stop(pid, True)
+    # Auto set after construction still spawns a real shell.
+    server.cfg.default_shell = "auto"
+    assert server.cap.execute("echo a && echo b")["success"]
+
+
+def test_spawn_environment_adds_no_color_only_for_pwsh_shells(tmp_path, monkeypatch):
+    import agent_runtime.security as sec
+    monkeypatch.setattr(sec, "find_pwsh", lambda: "C:/fake/pwsh.exe")
+    pwsh = Config(str(tmp_path), default_shell="pwsh", inherit_environment=["PATH"])
+    assert sec.spawn_environment(pwsh, True)["NO_COLOR"] == "1"
+    assert "NO_COLOR" not in sec.spawn_environment(pwsh, False)
+    assert sec.spawn_environment(pwsh, True, {"NO_COLOR": ""})["NO_COLOR"] == ""
+    assert "NO_COLOR" not in sec.spawn_environment(Config(str(tmp_path), default_shell="cmd"), True)
 
 
 def test_result_with_lone_surrogate_still_fits(tmp_path):

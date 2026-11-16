@@ -148,7 +148,9 @@ def find_pwsh():
     Cached; restart the server to pick up a new install.
     """
     found = shutil.which("pwsh")
-    if found:
+    # On Windows, which also matches pwsh.cmd/.bat through PATHEXT
+    # (and looks in the current folder); only a real pwsh.exe counts.
+    if found and (os.name != "nt" or found.lower().endswith(".exe")):
         return found
     if os.name != "nt":
         return None
@@ -162,8 +164,8 @@ def find_pwsh():
 def resolve_shell(name):
     """Turn default_shell "auto" into a concrete shell; other names pass through.
 
-    auto picks pwsh when installed (it has && and ||, UTF-8 output, and
-    no curl/wget aliases), else Windows PowerShell 5.1, or sh off Windows.
+    auto picks pwsh when installed (it has && and ||, and no curl/wget
+    aliases), else Windows PowerShell 5.1, or sh off Windows.
     """
     if str(name).lower() != "auto":
         return name
@@ -175,7 +177,7 @@ def resolve_shell(name):
 def command_for_spawn(cfg, command, shell):
     if not shell:
         return command
-    kind = cfg.default_shell.lower()
+    kind = resolve_shell(cfg.default_shell).lower()
     if kind == "powershell":
         executable = "powershell.exe" if os.name == "nt" else "pwsh"
         return [executable, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", _powershell_script(command)]
@@ -186,6 +188,18 @@ def command_for_spawn(cfg, command, shell):
     if kind == "sh":
         return ["/bin/sh", "-c", command]
     raise RuntimeFault("invalid_shell", f"Unsupported default_shell: {cfg.default_shell}")
+
+def spawn_environment(cfg, shell, overrides=None):
+    """safe_environment, plus NO_COLOR=1 for pwsh shell commands.
+
+    pwsh colours its error output with ANSI codes, which reach the
+    agent as noise; NO_COLOR keeps it plain text. A caller's own
+    NO_COLOR wins.
+    """
+    env = safe_environment(cfg, overrides)
+    if shell and resolve_shell(cfg.default_shell).lower() == "pwsh":
+        env.setdefault("NO_COLOR", "1")
+    return env
 
 def safe_environment(cfg, overrides=None):
     source, result = os.environ, {}
