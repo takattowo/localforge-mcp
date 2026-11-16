@@ -691,6 +691,8 @@ class Capabilities:
     def _workspace_info(self):
         info = {"workspace_root": str(self.paths.workspace), "cwd": str(self.cwd),
                 "repository_root": self._git_root(self.cwd)}
+        if not self.cfg.load_project_instructions:
+            return info
         instructions = self._project_instructions(info["repository_root"], self.cwd)
         if instructions:
             info["project_instructions"] = instructions
@@ -699,14 +701,22 @@ class Capabilities:
     def _project_instructions(self, repo_root, cwd):
         """Read agent rule files (AGENTS.md, CLAUDE.md) like CLI agents do.
 
-        Looks in the Git root, then the cwd when it differs. All files
-        share one max_project_instruction_bytes budget; a file the
-        policy denies or that cannot be read is skipped.
+        Looks in every folder from the Git root down to the cwd, so a
+        subfolder's rules apply when working in it; with no Git root,
+        from workspace_root down to the cwd (just the cwd when it is
+        outside workspace_root). Outermost first. All files share one
+        max_project_instruction_bytes budget; a file the policy denies
+        or that cannot be read is skipped.
         """
-        folders = []
-        for folder in (repo_root, str(cwd)):
-            if folder and Path(folder).resolve() not in folders:
-                folders.append(Path(folder).resolve())
+        cwd = Path(cwd).resolve()
+        top = Path(repo_root).resolve() if repo_root else Path(self.paths.workspace).resolve()
+        try:
+            parts = cwd.relative_to(top).parts
+        except ValueError:
+            top, parts = cwd, ()
+        folders = [top]
+        for part in parts:
+            folders.append(folders[-1] / part)
         budget = int(self.cfg.max_project_instruction_bytes)
         found = []
         for folder in folders:

@@ -2034,6 +2034,45 @@ def test_workspace_get_returns_project_instructions(tmp_path):
     assert "project_instructions" not in off.cap.workspace("get")
 
 
+def test_project_instructions_follow_the_folder_chain_and_switch(tmp_path, monkeypatch):
+    if shutil.which("git") is None:
+        pytest.skip("git unavailable")
+    server = make(tmp_path)
+    (tmp_path / "repo" / "a" / "b").mkdir(parents=True)
+    assert server.cap.execute(["git", "init", "-q"], cwd="repo")["success"]
+    (tmp_path / "AGENTS.md").write_text("outside the repo")
+    (tmp_path / "repo" / "AGENTS.md").write_text("root rules")
+    (tmp_path / "repo" / "a" / "CLAUDE.md").write_text("a rules")
+    (tmp_path / "repo" / "a" / "b" / "AGENTS.md").write_text("b rules")
+    deep = str(tmp_path / "repo" / "a" / "b")
+    # From the Git root down to the cwd, outermost first; nothing above the root.
+    found = server.cap.workspace("set_cwd", deep)["project_instructions"]
+    assert [entry["content"] for entry in found] == ["root rules", "a rules", "b rules"]
+    # No Git root: the cwd and its parents up to workspace_root.
+    (tmp_path / "plain" / "deep").mkdir(parents=True)
+    (tmp_path / "plain" / "CLAUDE.md").write_text("plain rules")
+    found = server.cap.workspace("set_cwd", str(tmp_path / "plain" / "deep"))["project_instructions"]
+    assert [entry["content"] for entry in found] == ["outside the repo", "plain rules"]
+    # One budget along the whole chain.
+    small = make(tmp_path, max_project_instruction_bytes=12)
+    cut = small.cap.workspace("set_cwd", deep)["project_instructions"]
+    assert [entry.get("content") for entry in cut] == ["root rules", "a ", None]
+    assert cut[1]["truncated"] and cut[2]["skipped"] == "budget"
+    # Switched off: no instruction file is read at all, even when they exist.
+    off = make(tmp_path, load_project_instructions=False)
+
+    def boom(*args, **kwargs):
+        raise AssertionError("instruction files were read")
+
+    monkeypatch.setattr(off.cap, "_project_instructions", boom)
+    assert "project_instructions" not in off.cap.workspace("set_cwd", deep)
+    assert "project_instructions" not in off.cap.workspace("get")
+    config = tmp_path / "lf.json"
+    config.write_text(json.dumps({"workspace_root": str(tmp_path), "load_project_instructions": "no"}))
+    with pytest.raises(ValueError):
+        Config.load(str(config))
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows PowerShell only")
 def test_windows_powershell_curl_and_and_hint(tmp_path):
     server = make(tmp_path)

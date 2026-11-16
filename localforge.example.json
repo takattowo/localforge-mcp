@@ -23,5 +23,7 @@
     "*TOKEN*", "*SECRET*", "*PASSWORD*", "*KEY*", "AWS_*", "AZURE_*", "GITHUB_*", "NPM_TOKEN"
   ],
   "extra_environment": {},
-  "allow_shell_commands": true
+  "allow_shell_commands": true,
+  "load_project_instructions": true,
+  "project_instruction_files": ["AGENTS.md", "CLAUDE.md"]
 }

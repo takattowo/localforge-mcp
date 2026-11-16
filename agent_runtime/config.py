@@ -54,7 +54,9 @@ class Config:
     # matching file; "{path}" becomes the edited file's path.
     edit_checks: dict[str, list[str]] = field(default_factory=dict)
     edit_check_timeout_seconds: int = 30
-    # Agent rule files workspace get returns from the Git root and cwd.
+    # Agent rule files workspace get returns, from every folder between
+    # the Git root (or workspace_root) and the cwd; false reads none.
+    load_project_instructions: bool = True
     project_instruction_files: list[str] = field(default_factory=lambda: ["AGENTS.md", "CLAUDE.md"])
     max_project_instruction_bytes: int = 8_000
 
@@ -94,6 +96,8 @@ class Config:
             raise ValueError("max_read_chars must be at least 64")
         if int(cfg.edit_diff_max_bytes) < 0:
             raise ValueError("edit_diff_max_bytes must be 0 (off) or positive")
+        if not isinstance(cfg.load_project_instructions, bool):
+            raise ValueError("load_project_instructions must be true or false")
         if not isinstance(cfg.edit_checks, dict) or not all(
                 isinstance(argv, list) and argv and all(isinstance(part, str) for part in argv)
                 for argv in cfg.edit_checks.values()):
