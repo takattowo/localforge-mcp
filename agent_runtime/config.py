@@ -61,6 +61,9 @@ class Config:
     def __post_init__(self):
         # Resolved once, so the rest of the server only sees real shells.
         self.default_shell = resolve_shell(self.default_shell)
+        if int(self.max_result_bytes) < 1024:
+            # Room for the oversized-result reply's own keys and path.
+            raise ValueError("max_result_bytes must be at least 1024")
 
     @classmethod
     def load(cls, path: str | None = None) -> "Config":
@@ -89,9 +92,6 @@ class Config:
         if int(cfg.max_read_chars) < 64:
             # Room for a line number plus the line-cut marker.
             raise ValueError("max_read_chars must be at least 64")
-        if int(cfg.max_result_bytes) < 1024:
-            # Room for the oversized-result reply's own keys and path.
-            raise ValueError("max_result_bytes must be at least 1024")
         if int(cfg.edit_diff_max_bytes) < 0:
             raise ValueError("edit_diff_max_bytes must be 0 (off) or positive")
         if not isinstance(cfg.edit_checks, dict) or not all(

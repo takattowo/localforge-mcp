@@ -104,15 +104,18 @@ def _keeps_whole(key):
     # Paths and ids are handles the agent passes back: never cut them.
     return isinstance(key, str) and (key == "cwd" or key.endswith("path") or key.endswith("_id"))
 
-def _shrink(value, limit, items=None):
+def _shrink(value, limit, items=None, dropped=None):
     """Copy of a JSON value with strings cut to limit and lists to items.
 
-    In a dict that lost part of a string or list, the cursors that
-    described the uncut value are dropped, and truncated (or the
-    string's own <key>_truncated) is set.
+    Returns (copy, cut), cut telling whether anything inside was cut.
+    In every dict whose subtree lost part of a string or list, the
+    cursors that described the uncut value are dropped (their names
+    added to the dropped set, when given), and truncated (or the
+    child's own <key>_truncated) is set.
     """
     if isinstance(value, str):
-        return _cut_text(value, limit)
+        out = _cut_text(value, limit)
+        return out, len(out) != len(_safe_text(value))
     if isinstance(value, dict):
         out, cut = {}, []
         for key, item in value.items():
@@ -120,25 +123,32 @@ def _shrink(value, limit, items=None):
             if isinstance(item, str) and _keeps_whole(key):
                 out[name] = _safe_text(item)
                 continue
-            out[name] = _shrink(item, limit, items)
-            if (isinstance(item, str) and len(out[name]) != len(_safe_text(item))) or (
-                    isinstance(item, list) and items is not None and len(item) > items):
+            out[name], child_cut = _shrink(item, limit, items, dropped)
+            if child_cut:
                 cut.append(name)
         if cut:
             for key in PREVIEW_STALE_KEYS:
-                out.pop(key, None)
+                if key in out:
+                    del out[key]
+                    if dropped is not None:
+                        dropped.add(key)
             if "truncated" in out:
                 out["truncated"] = True
             for key in cut:
                 if f"{key}_truncated" in out:
                     out[f"{key}_truncated"] = True
-        return out
+        return out, bool(cut)
     if isinstance(value, list):
-        kept = [_shrink(item, limit, items) for item in value[:items]]
+        kept, cut = [], False
+        for item in value[:items]:
+            shrunk, child_cut = _shrink(item, limit, items, dropped)
+            kept.append(shrunk)
+            cut = cut or child_cut
         if len(kept) < len(value):
             kept.append(f"...[cut: showing {len(kept)} of {len(value)} items{PREVIEW_CUT_NOTE}")
-        return kept
-    return value
+            cut = True
+        return kept, cut
+    return value, False
 
 SCHEMAS = {
     "workspace": {"type": "object", "properties": {
@@ -559,12 +569,19 @@ class Server:
             for cut, items in steps:
                 # The meta keys come first and win over same-named result
                 # keys, except a hint of the result's own, which is kept.
-                preview = dict(meta)
-                for key, item in _shrink(value, cut, items).items():
+                preview, dropped, own = dict(meta), set(), ""
+                shrunk, _ = _shrink(value, cut, items, dropped)
+                for key, item in shrunk.items():
                     if key == "hint" and isinstance(item, str):
-                        preview["hint"] = f"{meta['hint']} {item}"
+                        own = item
                     else:
                         preview.setdefault(key, item)
+                if dropped and path:
+                    names = ", ".join(key for key in PREVIEW_STALE_KEYS if key in dropped)
+                    preview["hint"] += (f" The cursors cut from this preview ({names}) are in result_path; "
+                                        "or pass a smaller limit_bytes or line range.")
+                if own:
+                    preview["hint"] += " " + own
                 out = json.dumps(preview, ensure_ascii=False, separators=(",", ":"))
                 if len(out.encode("utf-8")) <= budget:
                     return preview, out

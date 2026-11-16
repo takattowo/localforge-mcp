@@ -2005,6 +2005,34 @@ def test_preview_never_cuts_paths_or_ids(tmp_path):
     assert fitted["path"] == long_path and fitted["cwd"] == long_path and fitted["process_id"] == value["process_id"]
 
 
+def test_cut_inside_nested_values_drops_parent_cursors(tmp_path):
+    # A process read with format chunks: only the chunk texts are cut.
+    server = make(tmp_path, max_result_bytes=120000)
+    read = {"process_id": "p", "state": "exited", "truncated": False, "next_after": 60,
+            "chunks": [{"seq": n, "stream": "stdout", "text": "a" * 4096, "at": 0.0} for n in range(1, 61)]}
+    fitted, _ = server._fit_result("process", read, json.dumps(read))
+    assert len(fitted["chunks"]) == 60 and "[cut:" in fitted["chunks"][0]["text"]
+    assert "next_after" not in fitted and fitted["truncated"] is True
+    assert "next_after" in fitted["hint"] and "limit_bytes" in fitted["hint"]
+    # A list of long strings next to a cursor.
+    small = make(tmp_path, max_result_bytes=40000)
+    listed = {"lines": ["x" * 5000] * 10, "next_offset": 99, "truncated": False}
+    fitted, _ = small._fit_result("filesystem", listed, json.dumps(listed))
+    assert len(fitted["lines"]) == 10 and "[cut:" in fitted["lines"][0]
+    assert "next_offset" not in fitted and fitted["truncated"] is True
+    # Every dict that holds the cut loses its cursors, not only the innermost.
+    nested = {"next_line": 5, "result": {"next_line": 7, "content": "y" * 50000}}
+    fitted, _ = small._fit_result("batch", nested, json.dumps(nested))
+    assert "next_line" not in fitted and "next_line" not in fitted["result"]
+
+
+def test_cut_preview_hint_has_no_trailing_space(tmp_path):
+    server = make(tmp_path, max_result_bytes=8000)
+    value = {"content": "c" * 50000, "hint": ""}
+    fitted, _ = server._fit_result("filesystem", value, json.dumps(value))
+    assert fitted["result_too_large"] and fitted["hint"] == fitted["hint"].strip()
+
+
 def test_sequential_batch_stops_once_its_time_budget_is_used(tmp_path):
     server = make(tmp_path, execute_background_after_seconds=1)
     slow = {"tool": "execute", "arguments": {"command": [sys.executable, "-c", "import time; time.sleep(1.5)"],
@@ -2022,13 +2050,16 @@ def test_config_requires_room_for_the_oversized_reply(tmp_path):
     path.write_text(json.dumps({"workspace_root": str(tmp_path), "max_result_bytes": 500}))
     with pytest.raises(ValueError):
         Config.load(str(path))
+    # Checked on construction too, not only when loaded from a file.
+    with pytest.raises(ValueError):
+        Config(str(tmp_path), max_result_bytes=500)
 
 
 def test_result_with_lone_surrogate_still_fits(tmp_path):
-    server = make(tmp_path, max_result_bytes=800)
+    server = make(tmp_path, max_result_bytes=1024)
     value = {"name": "bad\udc80name", "pad": "p" * 2000}
     fitted, text = server._fit_result("filesystem", value, json.dumps(value, ensure_ascii=False, separators=(",", ":")))
-    assert fitted["result_too_large"] and len(text.encode("utf-8")) <= 800
+    assert fitted["result_too_large"] and len(text.encode("utf-8")) <= 1024
     assert "bad?name" in Path(fitted["result_path"]).read_text(encoding="utf-8")
     small = {"name": "x\udc80"}
     small_text = json.dumps(small, ensure_ascii=False)
