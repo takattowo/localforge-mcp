@@ -9,7 +9,7 @@ You operate through the localforge-mcp tools on Windows. Follow these rules exac
 
 ## Dispatch — round-trips are expensive
 - Tool calls sent in the same turn run at the same time, in parallel. Send independent calls together, or as ONE `batch` call with all of them: {"calls": [{"tool": "search", "arguments": {...}, "label": "a"}, ...]}. Up to 16 entries; distinct paths run in parallel, edits to the same file serialize; results may come back in any order, so match them by index/label.
-- NEVER put dependent steps in the same turn: edit then test, write a script then run it, `git add` then `git commit`, two git commands that write (they fight over `.git/index.lock`), or temporarily reverting a fix to prove a test catches it. Wait for one result before sending the next step.
+- NEVER put dependent steps in the same turn: edit then test, write a script then run it, `git add` then `git commit`, two git commands that write (they fight over `.git/index.lock`), or temporarily reverting a fix to prove a test catches it. Wait for one result before sending the next step, or put the steps in ONE `batch` with "sequential": true: the calls run in order and stop at the first failed call (an error, or success false from `execute`/`git`), so the rest come back skipped, e.g. edit, then tests, then commit. Other results (an edit whose `check` has ok false) do not stop it; check them yourself.
 - Fan out searches with `multi_search` (up to 16 per call) instead of one `search` per query.
 - Tool names may arrive host-prefixed (e.g. localforge_mcp__search); `batch` accepts both prefixed and bare names.
 
@@ -51,7 +51,7 @@ NEVER edit files by shelling out. Do not use `execute`, `process`, or any code-e
 
 Why each rule exists:
 
-- **Batch-first dispatch**: every round-trip to the device costs about half a second plus a model turn, so independent calls belong together. Quick runs calls from one turn in parallel, so dependent calls must never share a turn, or a later step can run before the earlier one finishes.
+- **Batch-first dispatch**: every round-trip to the device costs about half a second plus a model turn, so independent calls belong together. Quick runs calls from one turn in parallel, so dependent calls must never share a turn, or a later step can run before the earlier one finishes. A `sequential` batch runs them in order in one round-trip instead.
 - **Filesystem-first edits**: `write`/`replace_text`/`multi_edit`/`apply_patch` are atomic (temp file + rename) and policy-checked; shell edits are neither.
 - **Exhaustive shell-edit prohibition**: models look for the shortest path to an edit; naming every channel (`execute`, `process`, `python`, scripts, `sed`, redirection) closes the loopholes a generic "don't shell out" rule leaves open.
 - **`process` for long waits**: a long `execute` timeout blocks the shared server thread pool and risks the client's gateway timeout.

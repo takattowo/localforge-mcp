@@ -696,6 +696,86 @@ def test_batch_edits_distinct_files_in_parallel(tmp_path):
         assert (tmp_path / name).read_text() == f"new {name}\n"
 
 
+def test_batch_sequential_keeps_order_and_stops_on_success_false(tmp_path):
+    server = make(tmp_path)
+    (tmp_path / "a.txt").write_text("old\n")
+    out = server.call("batch", {"sequential": True, "calls": [
+        {"tool": "filesystem", "arguments": {"action": "replace_text", "path": "a.txt",
+            "old_text": "old", "new_text": "new"}, "label": "edit"},
+        {"tool": "MyHost_localforge_mcp__filesystem", "arguments": {"action": "read", "path": "a.txt",
+            "line_start": 1}, "label": "read"},
+        {"tool": "execute", "arguments": {"command": [sys.executable, "-c", "raise SystemExit(3)"]},
+         "label": "test"},
+        {"tool": "filesystem", "arguments": {"action": "write", "path": "b.txt", "content": "x"},
+         "label": "commit"},
+    ]})
+    edit, read, failed, skipped = out["results"]
+    assert "replacements" in edit["result"]
+    # The read sees the edit made by the call before it.
+    assert read["tool"] == "filesystem" and read["result"]["content"] == "1\tnew"
+    assert failed["result"]["success"] is False and failed["result"]["exit_code"] == 3
+    assert skipped == {"index": 3, "tool": "filesystem", "label": "commit", "skipped": True,
+                       "reason": "an earlier call failed (index 2)"}
+    assert not (tmp_path / "b.txt").exists()
+    assert out["completed"] == 2 and out["stopped_at"] == 2
+
+
+def test_batch_sequential_stops_on_a_raised_error(tmp_path):
+    server = make(tmp_path)
+    out = server.call("batch", {"sequential": True, "calls": [
+        {"tool": "workspace", "arguments": {"action": "get"}},
+        {"tool": "filesystem", "arguments": {"action": "replace_text", "path": "missing.txt",
+            "old_text": "a", "new_text": "b"}},
+        {"tool": "filesystem", "arguments": {"action": "write", "path": "b.txt", "content": "x"}},
+        {"tool": "batch", "arguments": {"calls": []}},
+    ]})
+    ok, failed, *skipped = out["results"]
+    assert "result" in ok
+    assert failed["error"]["code"] == "path_not_found"
+    assert [entry["index"] for entry in skipped] == [2, 3]
+    assert all(entry["skipped"] and entry["reason"] == "an earlier call failed (index 1)"
+               and "result" not in entry and "error" not in entry for entry in skipped)
+    assert not (tmp_path / "b.txt").exists()
+    assert out["completed"] == 1 and out["stopped_at"] == 1
+    # Nested batch still fails, and so stops the run.
+    nested = server.call("batch", {"sequential": True, "calls": [
+        {"tool": "batch", "arguments": {"calls": []}},
+        {"tool": "workspace", "arguments": {"action": "get"}}]})
+    assert nested["results"][0]["error"]["code"] == "invalid_arguments"
+    assert nested["results"][1]["skipped"] and nested["stopped_at"] == 0
+
+
+def test_batch_sequential_only_counts_raised_or_success_false(tmp_path):
+    server = make(tmp_path, edit_checks={"*.py": [sys.executable, "-m", "py_compile", "{path}"]})
+    out = server.call("batch", {"sequential": True, "calls": [
+        {"tool": "filesystem", "arguments": {"action": "write", "path": "bad.py", "content": "def (:\n"}},
+        {"tool": "execute", "arguments": {"command": [sys.executable, "-c", "print('ran')"]}},
+    ]})
+    edit, ran = out["results"]
+    # A failing edit check is not a failed call; the agent reads check itself.
+    assert edit["result"]["check"]["ok"] is False
+    assert "ran" in ran["result"]["stdout"]
+    assert out["completed"] == 2 and out["stopped_at"] is None
+    with pytest.raises(RuntimeFault) as many:
+        server.call("batch", {"sequential": True,
+                              "calls": [{"tool": "workspace", "arguments": {"action": "get"}}] * 17})
+    assert "16" in many.value.message
+    with pytest.raises(RuntimeFault) as flag:
+        server.call("batch", {"sequential": "yes", "calls": [{"tool": "workspace", "arguments": {"action": "get"}}]})
+    assert flag.value.code == "invalid_arguments" and "sequential" in flag.value.message
+
+
+def test_batch_parallel_default_shape_unchanged(tmp_path):
+    server = make(tmp_path)
+    calls = [{"tool": "execute", "arguments": {"command": [sys.executable, "-c", "raise SystemExit(3)"]}},
+             {"tool": "workspace", "arguments": {"action": "get"}}]
+    for out in (server.call("batch", {"calls": calls}),
+                server.call("batch", {"calls": calls, "sequential": False})):
+        assert list(out) == ["results"]
+        failed, ran = out["results"]
+        assert failed["result"]["exit_code"] == 3 and "result" in ran and "skipped" not in ran
+
+
 def test_concurrent_edits_same_file_serialize(tmp_path):
     from concurrent.futures import ThreadPoolExecutor
     server = make(tmp_path)

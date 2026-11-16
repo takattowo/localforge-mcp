@@ -166,6 +166,7 @@ SCHEMAS = {
                 "arguments": {"type": "object", "description": "Arguments for the tool; same shape as a tools/call request."},
                 "label": {"type": "string", "description": "Optional label echoed back with this call's result."}},
                 "required": ["tool"]}},
+        "sequential": {"type": "boolean", "description": "Run the calls one at a time in order and stop at the first failed call (an error, or a result with success false); later calls are reported as skipped. Default false: run in parallel."},
         }, "required": ["calls"]},
 }
 DESCRIPTIONS = {
@@ -176,7 +177,7 @@ DESCRIPTIONS = {
     "execute": "Run a command and wait for it, with structured output; argv arrays preferred. {shell_note}Long output is cut to head and tail and saved at stdout_path/stderr_path (up to max_capture_bytes; past process_buffer_bytes the oldest part is dropped and marked). A command still running at its timeout keeps running in the background instead of being killed (so does one that exited while a process it started still holds its output); the result has the output so far, error_type backgrounded, and a process_id for the process tool (read, stop). For long waits or polling, use the process tool instead of a long-timeout execute. Do not edit files with it; prefer the filesystem write, replace_text, or apply_patch actions.",
     "process": "Manage long-running processes with stable IDs, split streams, cursors, stdin, restart, and tree stop. execute commands that outlive their timeout appear here with exec-* ids. For file edits, prefer the filesystem write, replace_text, or apply_patch actions.",
     "multi_search": "Run up to 16 independent searches in one call, e.g. {\"searches\": [{\"query\": \"UserService\", \"glob\": [\"*.py\"], \"label\": \"users\"}, {\"query\": \"TODO\", \"files_only\": true}]}. Each entry takes the same arguments as the search tool and returns the same grouped-by-file results. A failing entry is reported per-entry without failing the batch.",
-    "batch": "Run up to 16 tool calls in one call, in parallel, e.g. {\"calls\": [{\"tool\": \"search\", \"arguments\": {\"query\": \"todo\"}}, {\"tool\": \"git\", \"arguments\": {\"action\": \"status\"}}]}. Each entry names a tool and its arguments; tool names may carry the host prefix (MyHost_localforge_mcp__search). Distinct paths run concurrently while edits to the same file serialize. Results come back with index and label; match on those. A failing call is reported per-call without failing the batch.",
+    "batch": "Run up to 16 tool calls in one call, in parallel, e.g. {\"calls\": [{\"tool\": \"search\", \"arguments\": {\"query\": \"todo\"}}, {\"tool\": \"git\", \"arguments\": {\"action\": \"status\"}}]}. Each entry names a tool and its arguments; tool names may carry the host prefix (MyHost_localforge_mcp__search). Distinct paths run concurrently while edits to the same file serialize. Results come back with index and label; match on those. A failing call is reported per-call without failing the batch. For dependent steps (edit, then run tests, then git commit) pass sequential: true: calls run one at a time in order, and after the first failed call (an error, or a result with success false, such as a failing or backgrounded execute or git command) the rest come back as skipped, so the commit never runs when the tests fail. The reply adds completed (calls run without failure) and stopped_at (index of the failed call, or null). Other results never stop the run: an edit whose check has ok false still counts as done, so check it yourself.",
     "todo": "Persistent task list (TodoWrite-style) with get, add, update, delete, and clear. Keep it current across turns: add before starting work, mark in_progress while working, completed when done. State survives server restarts.",
 }
 
@@ -229,7 +230,7 @@ class Server:
         "process": ("action", "process_id", "id", "command", "cmd", "cwd", "shell", "env", "after", "limit_bytes",
                     "wait_ms", "text", "append_newline", "force", "format"),
         "multi_search": ("searches",),
-        "batch": ("calls",),
+        "batch": ("calls", "sequential"),
         "todo": ("action", "id", "title", "status"),
     }
 
@@ -367,7 +368,7 @@ class Server:
             return self.todos.clear()
         raise RuntimeFault("invalid_action", f"Unknown todo action: {action}")
 
-    def batch(self, calls):
+    def batch(self, calls, sequential=False):
         """Run several tool calls in parallel within one tool call.
 
         Mirrors how CLI agents dispatch multiple tools per turn:
@@ -375,6 +376,11 @@ class Server:
         Distinct paths run concurrently; edits to the same file
         serialize on that path. A failing call is reported per-call
         without failing the batch.
+
+        With sequential, calls run one at a time in order and the run
+        stops at the first call that raised or returned success false;
+        the rest are reported as skipped, so dependent steps (edit,
+        test, commit) fit in one round-trip.
         """
         if not isinstance(calls, list) or not calls:
             raise RuntimeFault("invalid_arguments",
@@ -384,6 +390,8 @@ class Server:
         if len(calls) > MAX_BATCH_CALLS:
             raise RuntimeFault("invalid_arguments",
                                f"batch accepts at most {MAX_BATCH_CALLS} calls")
+        if not isinstance(sequential, bool):
+            raise RuntimeFault("invalid_arguments", "batch sequential must be true or false")
         specs = []
         for index, call in enumerate(calls):
             if not isinstance(call, dict) or not isinstance(call.get("tool"), str):
@@ -412,6 +420,20 @@ class Server:
                     "code": "internal_error", "message": str(e)}
                 results[index] = {"index": index, "tool": name, "label": label,
                                   "error": payload}
+
+        if sequential:
+            stopped_at = None
+            for index, name, arguments, label in specs:
+                if stopped_at is not None:
+                    results[index] = {"index": index, "tool": name, "label": label, "skipped": True,
+                                      "reason": f"an earlier call failed (index {stopped_at})"}
+                    continue
+                run(index, name, arguments, label)
+                result = results[index].get("result")
+                if "error" in results[index] or (isinstance(result, dict) and result.get("success") is False):
+                    stopped_at = index
+            completed = len(specs) if stopped_at is None else stopped_at
+            return {"results": results, "completed": completed, "stopped_at": stopped_at}
 
         workers = min(len(specs), max(1, int(self.cfg.max_concurrency)))
         with ThreadPoolExecutor(max_workers=workers) as pool:

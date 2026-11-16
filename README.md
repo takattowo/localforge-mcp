@@ -14,7 +14,7 @@ LocalForge MCP gives an MCP client structured access to a real workspace, files,
 - Real filesystem list, stat, bounded read, atomic write, guarded text replacement, move, mkdir, and delete operations. Edits return a short diff and can run a per-file check (`edit_checks`).
 - Ripgrep-backed code and filename search with Python fallback.
 - Batched `multi_search`: up to 16 parallel searches in one round-trip.
-- Batched `batch`: run any mix of tool calls in parallel in one round-trip.
+- Batched `batch`: run any mix of tool calls in parallel in one round-trip, or in order with `sequential`, stopping at the first failure.
 - `multi_edit`: several exact replacements per file in one call, validated end-to-end and written atomically.
 - Tolerant argument aliases (`old`→`old_text`, `replacement`→`new_text`, `text`→`content`, `file`→`path`, `pattern`→`query`, `cmd`→`command`, and more), so mis-remembered parameter names do not cost a failed round-trip.
 - Persistent `todo` tool: TodoWrite-style task list backed by the state file; survives restarts.
@@ -220,6 +220,16 @@ Run up to 16 tool calls of any type in one call, in parallel — the closest mat
   {"tool": "filesystem", "arguments": {"action": "read", "path": "src/app.py"}, "label": "app"},
   {"tool": "search", "arguments": {"query": "UserService", "glob": ["*.py"]}, "label": "users"},
   {"tool": "git", "arguments": {"action": "status"}, "label": "git"}
+]}
+```
+
+For dependent steps, pass `"sequential": true`: the calls run one at a time in the given order, so a later call sees an earlier call's edit, and the run stops at the first failed call. A call fails when it raises (an `error` entry) or returns a result with `"success": false` (`execute` and `git`, including a backgrounded `execute`); every later call is returned as `{"index", "tool", "label", "skipped": true, "reason": "an earlier call failed (index N)"}` without being run. The reply adds `completed` (calls run without failure) and `stopped_at` (index of the failed call, or `null`). Other results never stop the run: an edit whose `check` has `ok: false` still counts as done, so check it yourself. Without `sequential` (default false) calls run in parallel and the reply is `{"results": [...]}` as before.
+
+```json
+{"sequential": true, "calls": [
+  {"tool": "filesystem", "arguments": {"action": "replace_text", "path": "src/app.py", "old_text": "retries = 1", "new_text": "retries = 3"}},
+  {"tool": "execute", "arguments": {"command": ["python", "-m", "pytest", "-q"]}, "label": "tests"},
+  {"tool": "git", "arguments": {"action": "run", "args": ["commit", "-m", "raise retries", "--", "src/app.py"]}}
 ]}
 ```
 
