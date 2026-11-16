@@ -1,6 +1,7 @@
 from __future__ import annotations
 import codecs
 import contextlib
+import base64
 import difflib
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -61,6 +62,22 @@ def _clip(data: str, cap: int):
     while len(cut.encode("utf-8")) > cap:
         cut = cut[:-1]
     return cut, True
+
+
+def _rg_text(field):
+    """Text of a ripgrep --json field.
+
+    ripgrep sends {"text": ...} for UTF-8 data and {"bytes": <base64>}
+    otherwise (e.g. a line in a cp1252 file), which used to come back
+    empty. Decoded as UTF-8 with replacement, like the Python engine.
+    """
+    if not isinstance(field, dict):
+        return None
+    if "text" in field:
+        return field["text"]
+    if "bytes" in field:
+        return base64.b64decode(field["bytes"]).decode("utf-8", "replace")
+    return None
 
 
 def _edit_diff(before: str, after: str, cap: int):
@@ -1015,8 +1032,8 @@ class Capabilities:
             if event.get("type") != "match":
                 continue
             data = event["data"]
-            entry = {"path": data["path"].get("text"), "line": data["line_number"],
-                     "text": data["lines"].get("text", "").rstrip("\r\n")}
+            entry = {"path": _rg_text(data["path"]), "line": data["line_number"],
+                     "text": (_rg_text(data["lines"]) or "").rstrip("\r\n")}
             if context > 0:
                 entry["before"] = Capabilities._rg_context(events, i, -1, context)
                 entry["after"] = Capabilities._rg_context(events, i, 1, context)
@@ -1033,7 +1050,7 @@ class Capabilities:
         lines, j = [], i + step
         while 0 <= j < len(events) and len(lines) < limit and events[j].get("type") in ("context", "match"):
             data = events[j]["data"]
-            lines.append(f"{data['line_number']}\t" + data["lines"].get("text", "").rstrip("\r\n"))
+            lines.append(f"{data['line_number']}\t" + (_rg_text(data["lines"]) or "").rstrip("\r\n"))
             j += step
         return lines[::-1] if step < 0 else lines
 
@@ -1176,7 +1193,9 @@ class Capabilities:
                 if lowered.endswith((".pfx", ".p12", ".pem", ".key")):
                     raise RuntimeFault("secret_file",
                         f"Refusing to stage a likely secret: {spec}. Private keys must never enter git history.")
-        return self.execute(["git", "-C", str(work)] + subcommand + ([] if action == "run" else list(args or [])), cwd=str(work))
+        # core.quotepath=false: show non-ASCII paths as themselves, not
+        # octal escapes like "f\303\251.txt".
+        return self.execute(["git", "-c", "core.quotepath=false", "-C", str(work)] + subcommand + ([] if action == "run" else list(args or [])), cwd=str(work))
 
     @staticmethod
     def _creation():

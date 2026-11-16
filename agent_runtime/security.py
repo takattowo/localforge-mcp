@@ -192,11 +192,12 @@ def command_for_spawn(cfg, command, shell):
 def spawn_environment(cfg, shell, overrides=None):
     """safe_environment, plus defaults that keep child output readable.
 
-    PYTHONUTF8=1 (Python UTF-8 mode): piped Python children otherwise
-    write in the ANSI code page (cp1252), which crashes on characters
-    like 日本; output is decoded as UTF-8. UTF-8 mode, unlike
-    PYTHONIOENCODING, also makes a child's own subprocess pipes UTF-8,
-    so the setting is safe to inherit. NO_COLOR=1 for pwsh shell
+    PYTHONUTF8=1 (Python 3.7+ UTF-8 mode): piped Python children
+    otherwise write in the ANSI code page (cp1252 on US English), which
+    crashes on characters like 日本; output is decoded as UTF-8. UTF-8
+    mode, unlike PYTHONIOENCODING, also makes a child's own subprocess
+    pipes UTF-8, so the setting is safe to inherit. Python 2 and 3.6
+    ignore it. NO_COLOR=1 for pwsh shell
     commands: pwsh colours its errors with ANSI codes, which reach the
     agent as noise. Values from the config or the caller win.
     """

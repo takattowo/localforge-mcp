@@ -1687,13 +1687,17 @@ def test_server_children_print_unicode(tmp_path):
     config.write_text(json.dumps({"workspace_root": str(tmp_path), "spill_dir": str(tmp_path / "spill")}))
     err_path = tmp_path / "server.err"
     err_file = open(err_path, "wb")
-    # A fresh hidden console with the default OEM code page, like the
-    # one Quick gives the server; the live server's console is untouched.
-    server = subprocess.Popen([sys.executable, "-m", "agent_runtime.server"],
-                              cwd=str(Path(__file__).resolve().parent.parent),
-                              stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=err_file,
-                              env={**os.environ, "LOCALFORGE_CONFIG": str(config)},
-                              creationflags=0x08000000)  # CREATE_NO_WINDOW
+    try:
+        # A fresh hidden console with the default OEM code page, like the
+        # one Quick gives the server; the live server's console is untouched.
+        server = subprocess.Popen([sys.executable, "-m", "agent_runtime.server"],
+                                  cwd=str(Path(__file__).resolve().parent.parent),
+                                  stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=err_file,
+                                  env={**os.environ, "LOCALFORGE_CONFIG": str(config)},
+                                  creationflags=0x08000000)  # CREATE_NO_WINDOW
+    except BaseException:
+        err_file.close()
+        raise
     # Read replies on a thread, so a server that hangs fails the test
     # after a timeout instead of blocking it forever.
     replies = queue.Queue()
@@ -1735,8 +1739,10 @@ def test_server_children_print_unicode(tmp_path):
                  (["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", f"'{text}'"], None, text),
                  (["cmd", "/d", "/c", f"echo {text}"], None, text),
                  ([sys.executable, "-c", f"print({text!r})"], None, text),
-                 ([sys.executable, "-c", "import sys; print(sys.stdin.read().strip())"], text, text),
-                 ("$input", text, text),
+                 # Stdin: count characters, since a single-byte code page
+                 # round-trips UTF-8 bytes unchanged but sees 13, not 8.
+                 ([sys.executable, "-c", "import sys; print(len(sys.stdin.read().strip()))"], text, str(len(text))),
+                 ("(@($input) -join '').Length", text, str(len(text))),
                  ([sys.executable, "-c", grandchild], None, "\u00c1 \u65e5")]
         for n, (command, stdin, want) in enumerate(cases, 1):
             ran = execute(n, command, stdin)
@@ -1750,6 +1756,27 @@ def test_server_children_print_unicode(tmp_path):
             server.wait()
         server.stdout.close()
         err_file.close()
+
+
+def test_search_reads_lines_that_are_not_utf8(tmp_path):
+    if shutil.which("rg") is None:
+        pytest.skip("ripgrep unavailable")
+    server = make(tmp_path)
+    (tmp_path / "latin.txt").write_bytes(b"one\ncaf\xe9 needle\nthree\n")
+    found = server.cap.search("needle", context_lines=1)
+    assert found["engine"] == "ripgrep"
+    [hit] = found["results"]
+    assert hit["text"] == "caf\ufffd needle" and hit["before"] == ["1\tone"] and hit["after"] == ["3\tthree"]
+
+
+def test_git_shows_non_ascii_paths(tmp_path):
+    if shutil.which("git") is None:
+        pytest.skip("git unavailable")
+    server = make(tmp_path)
+    server.cap.execute(["git", "init"])
+    (tmp_path / "f\u00e9.txt").write_text("x")
+    status = server.cap.git("status")
+    assert "f\u00e9.txt" in status["stdout"] and "\\303" not in status["stdout"]
 
 
 def test_result_with_lone_surrogate_still_fits(tmp_path):
