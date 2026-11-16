@@ -279,6 +279,9 @@ MAX_READ_LINES = 2000
 # Last lines a line-mode read past the end of the file shows.
 PAST_END_LINES = 100
 LINE_CUT = " ...[line cut]"
+# Longest line read and search return; a minified line cannot use the whole budget.
+MAX_LINE_CHARS = 2000
+RG_TIMEOUT_SECONDS = 60
 BATCH_SEARCH_WORKERS = 8
 GIT_ROOT_TTL_SECONDS = 30
 PATH_LOCK_STRIPES = 256
@@ -552,6 +555,22 @@ def _similar(names, requested):
 
 def _did_you_mean(paths):
     return "\nDid you mean one of these?\n" + "\n".join(paths) if paths else ""
+
+
+def _cap_line(text, length=None):
+    """text cut to MAX_LINE_CHARS, marked with the line's full length."""
+    length = len(text) if length is None else length
+    if length <= MAX_LINE_CHARS:
+        return text
+    return f"{text[:MAX_LINE_CHARS]}...[line cut: {length} chars]"
+
+
+def _numbered(number, body, length, budget):
+    # One "N<TAB>line" of a line-mode read, within the read budget too.
+    text = f"{number}\t" + _cap_line(body, length)
+    if len(text) > budget:
+        text = text[:max(0, budget - len(LINE_CUT))] + LINE_CUT
+    return text
 
 class Capabilities:
     def __init__(self, cfg, paths, policy, processes, store=None):
@@ -1162,17 +1181,19 @@ class Capabilities:
                     if not line:
                         break
                     n += 1
+                    length, piece = len(line), line
                     if not line.endswith("\n"):
                         # Over-long line: skip the rest without
-                        # holding it in memory.
-                        while (rest := handle.readline(65536)) and not rest.endswith("\n"):
-                            pass
+                        # holding it in memory, counting its length.
+                        while rest := handle.readline(65536):
+                            length, piece = length + len(rest), rest
+                            if rest.endswith("\n"):
+                                break
+                    length -= len(piece) - len(piece.rstrip("\r\n"))
                     if n < start:
-                        skipped.append((n, line))
+                        skipped.append((n, line, length))
                         continue
-                    text = f"{n}\t" + line.rstrip("\r\n")
-                    if len(text) > budget:
-                        text = text[:max(0, budget - len(LINE_CUT))] + LINE_CUT
+                    text = _numbered(n, line.rstrip("\r\n"), length, budget)
                     if out and (len(out) >= MAX_READ_LINES or used + len(text) + 1 > budget):
                         more = True
                         break
@@ -1186,10 +1207,8 @@ class Capabilities:
             _fs_error("read", target, e)
         if not more and start > max(n, 1):
             # Show where the file ends, newest lines kept within budget.
-            for number, line in reversed(skipped):
-                text = f"{number}\t" + line.rstrip("\r\n")
-                if len(text) > budget:
-                    text = text[:max(0, budget - len(LINE_CUT))] + LINE_CUT
+            for number, line, length in reversed(skipped):
+                text = _numbered(number, line.rstrip("\r\n"), length, budget)
                 if out and used + len(text) + 1 > budget:
                     break
                 out.insert(0, text)
@@ -1382,6 +1401,15 @@ class Capabilities:
         text = (result.stderr or "").strip()
         return text[:cap] if text else f"ripgrep exited with code {result.returncode}"
 
+    def _run_rg(self, command, cwd=None):
+        try:
+            return subprocess.run(command, cwd=cwd, capture_output=True, text=True, encoding="utf-8",
+                                  errors="replace", timeout=RG_TIMEOUT_SECONDS, stdin=subprocess.DEVNULL,
+                                  env=safe_environment(self.cfg))
+        except subprocess.TimeoutExpired:
+            raise RuntimeFault("timeout", f"Search timed out after {RG_TIMEOUT_SECONDS} s. Narrow it: a smaller "
+                               "path, a glob such as [\"*.py\"], or excludes for big folders.") from None
+
     def _search_rg(self, rg, root, query, includes, excludes, case_sensitive, maximum, files_only, fixed_string, context, include_hidden):
         command = [rg]
         if include_hidden:
@@ -1394,9 +1422,7 @@ class Capabilities:
             command += ["--files", str(root)]
             # cwd=root: ripgrep matches globs with a folder against the
             # path relative to its working directory, not the search root.
-            result = subprocess.run(command, cwd=str(root), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
-                                    stdin=subprocess.DEVNULL,
-                                    env=safe_environment(self.cfg))
+            result = self._run_rg(command, cwd=str(root))
             paths = result.stdout.splitlines()
             out = {"engine": "ripgrep", "results": [{"path": p} for p in paths[:maximum]],
                     "exit_code": result.returncode, "truncated": len(paths) > maximum,
@@ -1416,9 +1442,7 @@ class Capabilities:
             command += ["-C", str(context)]
         # -e: a query starting with - (--verbose, -1) is a pattern, not an option.
         command += ["-e", query, str(root)]
-        result = subprocess.run(command, cwd=str(root), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
-                                stdin=subprocess.DEVNULL,
-                                env=safe_environment(self.cfg))
+        result = self._run_rg(command, cwd=str(root))
         events = []
         for line in result.stdout.splitlines():
             try:
@@ -1442,7 +1466,7 @@ class Capabilities:
                 continue
             data = event["data"]
             entry = {"path": _rg_text(data["path"]), "line": data["line_number"],
-                     "text": (_rg_text(data["lines"]) or "").rstrip("\r\n")}
+                     "text": _cap_line((_rg_text(data["lines"]) or "").rstrip("\r\n"))}
             if context > 0:
                 entry["before"] = Capabilities._rg_context(events, i, -1, context)
                 entry["after"] = Capabilities._rg_context(events, i, 1, context)
@@ -1459,7 +1483,7 @@ class Capabilities:
         lines, j = [], i + step
         while 0 <= j < len(events) and len(lines) < limit and events[j].get("type") in ("context", "match"):
             data = events[j]["data"]
-            lines.append(f"{data['line_number']}\t" + (_rg_text(data["lines"]) or "").rstrip("\r\n"))
+            lines.append(f"{data['line_number']}\t" + _cap_line((_rg_text(data["lines"]) or "").rstrip("\r\n")))
             j += step
         return lines[::-1] if step < 0 else lines
 
@@ -1477,9 +1501,7 @@ class Capabilities:
             command += ["-C", str(context)]
         # -e: a query starting with - (--verbose, -1) is a pattern, not an option.
         command += ["-e", query, str(target)]
-        result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
-                                stdin=subprocess.DEVNULL,
-                                env=safe_environment(self.cfg))
+        result = self._run_rg(command)
         events = []
         for line in result.stdout.splitlines():
             try:
@@ -1568,10 +1590,10 @@ class Capabilities:
                         else:
                             matched = query.lower() in line.lower()
                         if matched:
-                            entry = {"path": str(item), "line": number, "text": line}
+                            entry = {"path": str(item), "line": number, "text": _cap_line(line)}
                             if context > 0:
-                                entry["before"] = [f"{n}\t{lines[n - 1]}" for n in range(max(1, number - context), number)]
-                                entry["after"] = [f"{n}\t{lines[n - 1]}" for n in range(number + 1, min(len(lines), number + context) + 1)]
+                                entry["before"] = [f"{n}\t{_cap_line(lines[n - 1])}" for n in range(max(1, number - context), number)]
+                                entry["after"] = [f"{n}\t{_cap_line(lines[n - 1])}" for n in range(number + 1, min(len(lines), number + context) + 1)]
                             results.append(entry)
                             if len(results) > maximum:
                                 break

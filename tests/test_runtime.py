@@ -121,6 +121,36 @@ def test_process_wait_for_exit_pattern_or_timeout(tmp_path):
     assert exc.value.code == "invalid_arguments"
     server.processes.stop(serve, True)
 
+@pytest.mark.parametrize("engine", ["ripgrep", "python"])
+def test_long_lines_are_cut_in_reads_and_search(tmp_path, monkeypatch, engine):
+    if engine == "python":
+        monkeypatch.setattr(shutil, "which", lambda name: None)
+    elif shutil.which("rg") is None:
+        pytest.skip("rg unavailable")
+    server = make(tmp_path)
+    cut = "x" * 2000 + "...[line cut: 10006 chars]"
+    (tmp_path / "min.js").write_text("short needle\n" + "x" * 5000 + "needle" + "y" * 5000 + "\nend\n")
+    lines = server.cap.filesystem("read", "min.js", line_start=1)["content"].split("\n")
+    assert lines == ["1\tshort needle", "2\t" + cut, "3\tend"]
+    for path in ("min.js", "."):
+        matches = server.cap.search("needle", path=path, context_lines=1)["results"][0]["matches"]
+        assert matches[1]["text"] == cut and matches[0]["after"] == ["2\t" + cut]
+
+def test_search_timeout_says_what_to_do(tmp_path, monkeypatch):
+    if shutil.which("rg") is None:
+        pytest.skip("rg unavailable")
+    server = make(tmp_path)
+    (tmp_path / "a.txt").write_text("x\n")
+
+    def slow(command, **kwargs):
+        raise subprocess.TimeoutExpired(command, kwargs.get("timeout"))
+
+    monkeypatch.setattr(subprocess, "run", slow)
+    for kwargs in ({"query": "x"}, {"files_only": True}, {"query": "x", "path": "a.txt"}):
+        with pytest.raises(RuntimeFault) as exc:
+            server.cap.search(**kwargs)
+        assert exc.value.code == "timeout" and "timed out" in exc.value.message and "glob" in exc.value.message
+
 def test_search_fallback_and_git(tmp_path, monkeypatch):
     server = make(tmp_path)
     (tmp_path / "src").mkdir()
