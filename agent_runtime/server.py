@@ -611,12 +611,37 @@ class Server:
         self.pool.shutdown(wait=True)
 
 
+def _utf8_console():
+    """Switch the server's console to UTF-8 (code page 65001).
+
+    Children share the server's console (hidden when a host such as
+    Quick starts it), and PowerShell and cmd encode piped output in its
+    code page: OEM 437 by default, which turns é into garbage and 日本
+    into ??. Output is decoded as UTF-8, so the console has to match.
+    The old code pages come back at a clean exit, for a server run in
+    the user's own terminal.
+    """
+    if os.name != "nt":
+        return
+    import ctypes
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    out_cp, in_cp = kernel32.GetConsoleOutputCP(), kernel32.GetConsoleCP()
+    if not out_cp:
+        print("localforge: no console, so child output keeps the system code page", file=sys.stderr)
+        return
+    if not (kernel32.SetConsoleOutputCP(65001) and kernel32.SetConsoleCP(65001)):
+        print(f"localforge: could not switch the console to UTF-8 (error {ctypes.get_last_error()})",
+              file=sys.stderr)
+    atexit.register(lambda: (kernel32.SetConsoleOutputCP(out_cp), kernel32.SetConsoleCP(in_cp)))
+
+
 def main():
     try:
         server = Server(Config.load())
     except Exception as e:
         print(f"configuration error: {e}", file=sys.stderr)
         raise SystemExit(2)
+    _utf8_console()
     server.run_stdio()
 
 

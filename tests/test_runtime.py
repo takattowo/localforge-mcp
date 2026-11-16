@@ -1668,6 +1668,49 @@ def test_spawn_environment_adds_no_color_only_for_pwsh_shells(tmp_path, monkeypa
     assert "NO_COLOR" not in sec.spawn_environment(Config(str(tmp_path), default_shell="cmd"), True)
 
 
+def test_spawn_environment_sets_python_utf8_stdio(tmp_path):
+    import agent_runtime.security as sec
+    cfg = Config(str(tmp_path), default_shell="cmd", inherit_environment=["PATH"])
+    assert sec.spawn_environment(cfg, False)["PYTHONIOENCODING"] == "utf-8"
+    assert sec.spawn_environment(cfg, True, {"PYTHONIOENCODING": "cp1252"})["PYTHONIOENCODING"] == "cp1252"
+    cfg.extra_environment = {"PYTHONIOENCODING": "latin-1"}
+    assert sec.spawn_environment(cfg, False)["PYTHONIOENCODING"] == "latin-1"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows console code pages")
+def test_server_children_print_unicode(tmp_path):
+    text = "x \u00e9 \u65e5\u672c x"
+    config = tmp_path / "lf.json"
+    config.write_text(json.dumps({"workspace_root": str(tmp_path), "spill_dir": str(tmp_path / "spill")}))
+    # A fresh hidden console with the default OEM code page, like the
+    # one Quick gives the server; the live server's console is untouched.
+    server = subprocess.Popen([sys.executable, "-m", "agent_runtime.server"],
+                              cwd=str(Path(__file__).resolve().parent.parent),
+                              stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                              env={**os.environ, "LOCALFORGE_CONFIG": str(config)},
+                              creationflags=0x08000000)  # CREATE_NO_WINDOW
+
+    def execute(n, command):
+        request = {"jsonrpc": "2.0", "id": n, "method": "tools/call",
+                   "params": {"name": "execute", "arguments": {"command": command}}}
+        server.stdin.write((json.dumps(request) + "\n").encode())
+        server.stdin.flush()
+        return json.loads(json.loads(server.stdout.readline())["result"]["content"][0]["text"])
+
+    try:
+        commands = [f"'{text}'",  # the default shell: pwsh, or Windows PowerShell 5.1
+                    ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", f"'{text}'"],
+                    ["cmd", "/d", "/c", f"echo {text}"],
+                    [sys.executable, "-c", f"print({text!r})"]]
+        for n, command in enumerate(commands, 1):
+            ran = execute(n, command)
+            assert ran["success"] and ran["stdout"].strip() == text, (command, ran)
+    finally:
+        server.stdin.close()
+        server.wait(timeout=30)
+        server.stdout.close()
+
+
 def test_result_with_lone_surrogate_still_fits(tmp_path):
     server = make(tmp_path, max_result_bytes=800)
     value = {"name": "bad\udc80name", "pad": "p" * 2000}

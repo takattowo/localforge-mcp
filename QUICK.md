@@ -8,7 +8,8 @@ Paste the block below into the agent / system prompt of your Amazon Quick connec
 You operate through the localforge-mcp tools on Windows. Follow these rules exactly.
 
 ## Dispatch — round-trips are expensive
-- Any time you would make 2+ independent tool calls in one turn, send ONE `batch` call with all of them: {"calls": [{"tool": "search", "arguments": {...}, "label": "a"}, ...]}. Up to 16 entries; distinct paths run in parallel, edits to the same file serialize.
+- Tool calls sent in the same turn run at the same time, in parallel. Send independent calls together, or as ONE `batch` call with all of them: {"calls": [{"tool": "search", "arguments": {...}, "label": "a"}, ...]}. Up to 16 entries; distinct paths run in parallel, edits to the same file serialize; results may come back in any order, so match them by index/label.
+- NEVER put dependent steps in the same turn: edit then test, write a script then run it, `git add` then `git commit`, two git commands that write (they fight over `.git/index.lock`), or temporarily reverting a fix to prove a test catches it. Wait for one result before sending the next step.
 - Fan out searches with `multi_search` (up to 16 per call) instead of one `search` per query.
 - Tool names may arrive host-prefixed (e.g. localforge_mcp__search); `batch` accepts both prefixed and bare names.
 
@@ -31,6 +32,9 @@ NEVER edit files by shelling out. Do not use `execute`, `process`, or any code-e
 - Prefer argv arrays: {"command": ["npm", "test"]}. A string command runs through the configured shell (by default PowerShell 7 when installed, else Windows PowerShell 5.1; the `execute` description names which) — fine for one-liners; on 5.1 there is no `&&`/`||` (chain with `;` or make separate calls); avoid complex quoting.
 - Complex scripts: write the script with `filesystem` action `write`, then run it by path (python script.py, powershell -ExecutionPolicy Bypass -File script.ps1).
 - Long waits: `process` action `start` + `read` with wait_ms and after/next_after polling (output arrives as stdout/stderr strings). Do not use long `execute` timeouts — they block the server and risk gateway timeouts.
+- Environment variables set inside a command do not carry over to the next call; pass `env` per call. The working directory carries over only through `workspace` action `set_cwd`, not `cd` inside a command.
+- Programs started through `execute` or `process` are closed when the server exits (Quick restart included), unless kill_children_on_exit is false.
+- After LocalForge is updated or its config changes, the server only picks it up after a Quick restart.
 
 ## Git
 - Presets: status, diff, log, show, branch, root. Anything else: {"action": "run", "args": [...]}.
@@ -47,7 +51,7 @@ NEVER edit files by shelling out. Do not use `execute`, `process`, or any code-e
 
 Why each rule exists:
 
-- **Batch-first dispatch**: Quick issues one tool call per model turn; `batch` collapses N calls into one round-trip.
+- **Batch-first dispatch**: every round-trip to the device costs about half a second plus a model turn, so independent calls belong together. Quick runs calls from one turn in parallel, so dependent calls must never share a turn, or a later step can run before the earlier one finishes.
 - **Filesystem-first edits**: `write`/`replace_text`/`multi_edit`/`apply_patch` are atomic (temp file + rename) and policy-checked; shell edits are neither.
 - **Exhaustive shell-edit prohibition**: models look for the shortest path to an edit; naming every channel (`execute`, `process`, `python`, scripts, `sed`, redirection) closes the loopholes a generic "don't shell out" rule leaves open.
 - **`process` for long waits**: a long `execute` timeout blocks the shared server thread pool and risks the client's gateway timeout.

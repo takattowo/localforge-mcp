@@ -190,13 +190,16 @@ def command_for_spawn(cfg, command, shell):
     raise RuntimeFault("invalid_shell", f"Unsupported default_shell: {cfg.default_shell}")
 
 def spawn_environment(cfg, shell, overrides=None):
-    """safe_environment, plus NO_COLOR=1 for pwsh shell commands.
+    """safe_environment, plus defaults that keep child output readable.
 
-    pwsh colours its error output with ANSI codes, which reach the
-    agent as noise; NO_COLOR keeps it plain text. A caller's own
-    NO_COLOR wins.
+    PYTHONIOENCODING=utf-8: piped Python children otherwise write in
+    the ANSI code page (cp1252), which crashes on characters like
+    日本; output is decoded as UTF-8. NO_COLOR=1 for pwsh shell
+    commands: pwsh colours its errors with ANSI codes, which reach the
+    agent as noise. Values from the config or the caller win.
     """
     env = safe_environment(cfg, overrides)
+    env.setdefault("PYTHONIOENCODING", "utf-8")
     if shell and resolve_shell(cfg.default_shell).lower() == "pwsh":
         env.setdefault("NO_COLOR", "1")
     return env
