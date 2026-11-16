@@ -283,6 +283,18 @@ def test_git_diff_can_include_untracked_files(tmp_path):
     (other / "only.txt").write_text("first\n")
     assert "+first" in fresh.call("git", {"action": "diff", "include_untracked": True})["stdout"]
 
+def test_search_retries_lookaround_with_pcre2(tmp_path):
+    rg = shutil.which("rg")
+    if rg is None or subprocess.run([rg, "--pcre2-version"], capture_output=True).returncode != 0:
+        pytest.skip("rg with PCRE2 unavailable")
+    server = make(tmp_path)
+    (tmp_path / "a.txt").write_text("foobar\nfoobaz\n")
+    for path in (".", "a.txt"):
+        out = server.cap.search("foo(?=bar)", path=path, fixed_string=False)
+        assert out["match_count"] == 1 and "--pcre2" in out["note"] and "error" not in out
+    # A regex that is wrong either way still reports ripgrep's error.
+    assert "error" in server.cap.search("foo(", fixed_string=False)
+
 def test_search_fallback_and_git(tmp_path, monkeypatch):
     server = make(tmp_path)
     (tmp_path / "src").mkdir()

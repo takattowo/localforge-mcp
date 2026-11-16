@@ -1539,6 +1539,19 @@ class Capabilities:
             raise RuntimeFault("timeout", f"Search timed out after {RG_TIMEOUT_SECONDS} s. Narrow it: a smaller "
                                "path, a glob such as [\"*.py\"], or excludes for big folders.") from None
 
+    def _run_rg_regex(self, command, out_note, cwd=None):
+        """Run a content search; a regex ripgrep's default engine rejects
+        but PCRE2 handles (look-around, backreferences: ripgrep then
+        suggests --pcre2) is run again with --pcre2, and out_note gets
+        a note saying so. Returns the result to report."""
+        result = self._run_rg(command, cwd=cwd)
+        if result.returncode == 2 and "--pcre2" in (result.stderr or "") and "-F" not in command:
+            retry = self._run_rg([command[0], "--pcre2", *command[1:]], cwd=cwd)
+            if retry.returncode in (0, 1):
+                out_note.append("The regex needs look-around or backreferences, so it ran with ripgrep's --pcre2.")
+                return retry
+        return result
+
     def _search_rg(self, rg, root, query, includes, excludes, case_sensitive, maximum, files_only, fixed_string, context, include_hidden):
         command = [rg]
         if include_hidden:
@@ -1571,7 +1584,8 @@ class Capabilities:
             command += ["-C", str(context)]
         # -e: a query starting with - (--verbose, -1) is a pattern, not an option.
         command += ["-e", query, str(root)]
-        result = self._run_rg(command, cwd=str(root))
+        notes = []
+        result = self._run_rg_regex(command, notes, cwd=str(root))
         events = []
         for line in result.stdout.splitlines():
             try:
@@ -1582,6 +1596,8 @@ class Capabilities:
         matches = self._rg_matches(events, maximum + 1, context)
         out = {"engine": "ripgrep", "results": matches[:maximum], "exit_code": result.returncode,
                 "truncated": len(matches) > maximum, "applied_excludes": excludes}
+        if notes:
+            out["note"] = notes[0]
         err = self._rg_error(result)
         if err is not None:
             out["error"] = err
@@ -1630,7 +1646,8 @@ class Capabilities:
             command += ["-C", str(context)]
         # -e: a query starting with - (--verbose, -1) is a pattern, not an option.
         command += ["-e", query, str(target)]
-        result = self._run_rg(command)
+        notes = []
+        result = self._run_rg_regex(command, notes)
         events = []
         for line in result.stdout.splitlines():
             try:
@@ -1640,6 +1657,8 @@ class Capabilities:
         matches = self._rg_matches(events, maximum + 1, context)
         out = {"engine": "ripgrep", "results": matches[:maximum], "exit_code": result.returncode,
                 "truncated": len(matches) > maximum, "applied_excludes": applied}
+        if notes:
+            out["note"] = notes[0]
         err = self._rg_error(result)
         if err is not None:
             out["error"] = err

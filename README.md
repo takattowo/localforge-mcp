@@ -206,7 +206,7 @@ Content matches come back grouped by file, with the path once per file:
  "match_count": 2, "truncated": false, "exit_code": 0, "applied_excludes": ["**/.git/"]}
 ```
 
-`before`/`after` appear only with `context_lines`. `max_results` counts matches, not files; `match_count` is the number of matches returned and `truncated` says more were cut. `files_only` returns `{"path"}` entries. Paths under the runtime cwd are relative to it. A line longer than 2000 characters (a minified file, say) comes back cut to its first 2000, marked `...[line cut: N chars]` with N its full length, as match `text` and in `before`/`after`; line-mode `read` cuts lines the same way. A ripgrep run that takes longer than 60 s fails with code `timeout` and a message that says to narrow the `path`, add a `glob`, or exclude big folders.
+`before`/`after` appear only with `context_lines`. `max_results` counts matches, not files; `match_count` is the number of matches returned and `truncated` says more were cut. `files_only` returns `{"path"}` entries. Paths under the runtime cwd are relative to it. A line longer than 2000 characters (a minified file, say) comes back cut to its first 2000, marked `...[line cut: N chars]` with N its full length, as match `text` and in `before`/`after`; line-mode `read` cuts lines the same way. A ripgrep run that takes longer than 60 s fails with code `timeout` and a message that says to narrow the `path`, add a `glob`, or exclude big folders. A regex that ripgrep's default engine rejects but PCRE2 handles (look-around such as `foo(?=bar)`, backreferences) is run again with `--pcre2` when ripgrep has it, and the result adds a `note`; otherwise ripgrep's error comes back as before.
 
 ### `multi_search`
 
