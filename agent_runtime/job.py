@@ -1,6 +1,8 @@
 from __future__ import annotations
 import ctypes
 import os
+import sys
+import threading
 from ctypes import wintypes
 
 # winnt.h: job object limit flags and info classes
@@ -102,6 +104,8 @@ class WindowsJob:
 
 _job: WindowsJob | None = None
 _job_failed = False
+# Parallel spawns must not each create a job.
+_job_lock = threading.Lock()
 
 
 def adopt(pid: int) -> None:
@@ -111,10 +115,17 @@ def adopt(pid: int) -> None:
     if os.name != "nt" or _job_failed:
         return
     if _job is None:
-        try:
-            _job = WindowsJob()
-        except Exception:
-            _job_failed = True
+        with _job_lock:
+            if _job is None and not _job_failed:
+                try:
+                    _job = WindowsJob()
+                except Exception as e:
+                    _job_failed = True
+                    # Said once, on stderr: a silent failure hid a
+                    # broken job from 1.8.0 to 1.9.2.
+                    print(f"localforge: kill-on-close job unavailable, children may outlive "
+                          f"the server: {e}", file=sys.stderr)
+        if _job is None:
             return
     try:
         _job.assign(pid)

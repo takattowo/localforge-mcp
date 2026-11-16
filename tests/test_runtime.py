@@ -1007,9 +1007,10 @@ def test_adopted_child_dies_when_server_is_killed():
     # A stand-in server: adopts a long sleeper, prints its pid, then waits.
     helper = ("import subprocess, sys, time\n"
               "from agent_runtime import job\n"
-              "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
-              "job.adopt(child.pid)\n"
-              "print(child.pid, job._job_failed, flush=True)\n"
+              "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'],\n"
+              "                         stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+              "kill_on_close = job.WindowsJob()\n"
+              "print(child.pid, kill_on_close.assign(child.pid), flush=True)\n"
               "time.sleep(60)\n")
     server = subprocess.Popen([sys.executable, "-c", helper], stdout=subprocess.PIPE, text=True,
                               cwd=str(Path(__file__).resolve().parent.parent))
@@ -1018,21 +1019,27 @@ def test_adopted_child_dies_when_server_is_killed():
     kernel32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
     kernel32.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
     kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    kernel32.TerminateProcess.argtypes = [ctypes.c_void_p, ctypes.c_uint]
     handle = None
     try:
-        pid, failed = server.stdout.readline().split()
-        assert failed == "False"
-        handle = kernel32.OpenProcess(0x00100000, False, int(pid))  # SYNCHRONIZE
+        line = server.stdout.readline().split()
+        assert len(line) == 2, "stand-in server died before adopting its child"
+        pid, assigned = line
+        # SYNCHRONIZE | PROCESS_TERMINATE: wait on it, and clean up if the test fails.
+        handle = kernel32.OpenProcess(0x00100001, False, int(pid))
         assert handle
+        assert assigned == "True", "child was not assigned to the job"
         server.kill()  # hard kill, like taskkill /F or a crash: no atexit
         server.wait()
         assert kernel32.WaitForSingleObject(handle, 10_000) == 0, "adopted child outlived the server"
     finally:
         if handle:
+            kernel32.TerminateProcess(handle, 1)
             kernel32.CloseHandle(handle)
         if server.poll() is None:
             server.kill()
             server.wait()
+        server.stdout.close()
 
 
 def test_kill_children_on_exit_gates_adoption(tmp_path):
