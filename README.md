@@ -267,9 +267,9 @@ With `default_shell: "auto"` (the default), string commands run in PowerShell 7 
 
 Each stream returns at most `max_inline_output_bytes`, head and tail. When output is cut, the whole of it (up to `max_capture_bytes`) is saved and its path returned as `stdout_path`/`stderr_path`; read it with `filesystem read` or `search`.
 
-Output is decoded as UTF-8, and children are set up to write it: on Windows the server switches its console (which children share) to code page 65001 at startup and back at a clean exit, and every child gets `PYTHONIOENCODING=utf-8` unless the config or the call sets it. So `é` and `日本` come back intact from PowerShell, cmd and Python. A program that writes in a fixed legacy code page regardless can still come back garbled.
+Output is decoded as UTF-8, and children are set up to write it: on Windows the server switches its console (which children share) to code page 65001 at startup and back at a clean exit, and every child gets `PYTHONUTF8=1` (Python UTF-8 mode) unless the config or the call sets it. So `é` and `日本` come back intact from PowerShell, cmd and Python, including through a Python program's own `subprocess` pipes. UTF-8 mode also makes `open()` without an `encoding` read and write UTF-8; pass `env: {"PYTHONUTF8": "0"}` (or set it in `extra_environment`) for a program that needs the legacy code page. A program that writes in a fixed legacy code page regardless can still come back garbled. Batch files with non-ASCII text should be saved as UTF-8, since cmd now reads them as UTF-8. If a server run in your own terminal is hard-killed, the terminal stays at code page 65001; run `chcp` with the old page (437 on US English) to switch it back.
 
-Like Claude Code's Bash tool, environment variables set inside one command do not carry over to the next; pass `env` per call. The working directory carries over through `workspace` `set_cwd`, not through `cd` inside a command.
+Environment variables set inside one command do not carry over to the next, as in Claude Code; pass `env` per call. Unlike Claude Code, `cd` inside a command does not carry over either; use `workspace` `set_cwd`.
 
 For SSH, prefer key auth with fail-fast flags so prompts never hang the call:
 

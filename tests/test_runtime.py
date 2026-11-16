@@ -1668,47 +1668,88 @@ def test_spawn_environment_adds_no_color_only_for_pwsh_shells(tmp_path, monkeypa
     assert "NO_COLOR" not in sec.spawn_environment(Config(str(tmp_path), default_shell="cmd"), True)
 
 
-def test_spawn_environment_sets_python_utf8_stdio(tmp_path):
+def test_spawn_environment_sets_python_utf8_mode(tmp_path):
     import agent_runtime.security as sec
     cfg = Config(str(tmp_path), default_shell="cmd", inherit_environment=["PATH"])
-    assert sec.spawn_environment(cfg, False)["PYTHONIOENCODING"] == "utf-8"
-    assert sec.spawn_environment(cfg, True, {"PYTHONIOENCODING": "cp1252"})["PYTHONIOENCODING"] == "cp1252"
-    cfg.extra_environment = {"PYTHONIOENCODING": "latin-1"}
-    assert sec.spawn_environment(cfg, False)["PYTHONIOENCODING"] == "latin-1"
+    env = sec.spawn_environment(cfg, False)
+    assert env["PYTHONUTF8"] == "1" and "PYTHONIOENCODING" not in env
+    assert sec.spawn_environment(cfg, True, {"PYTHONUTF8": "0"})["PYTHONUTF8"] == "0"
+    cfg.extra_environment = {"PYTHONUTF8": "0"}
+    assert sec.spawn_environment(cfg, False)["PYTHONUTF8"] == "0"
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows console code pages")
 def test_server_children_print_unicode(tmp_path):
+    import queue
+    import threading
     text = "x \u00e9 \u65e5\u672c x"
     config = tmp_path / "lf.json"
     config.write_text(json.dumps({"workspace_root": str(tmp_path), "spill_dir": str(tmp_path / "spill")}))
+    err_path = tmp_path / "server.err"
+    err_file = open(err_path, "wb")
     # A fresh hidden console with the default OEM code page, like the
     # one Quick gives the server; the live server's console is untouched.
     server = subprocess.Popen([sys.executable, "-m", "agent_runtime.server"],
                               cwd=str(Path(__file__).resolve().parent.parent),
-                              stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL,
+                              stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=err_file,
                               env={**os.environ, "LOCALFORGE_CONFIG": str(config)},
                               creationflags=0x08000000)  # CREATE_NO_WINDOW
+    # Read replies on a thread, so a server that hangs fails the test
+    # after a timeout instead of blocking it forever.
+    replies = queue.Queue()
 
-    def execute(n, command):
+    def pump():
+        try:
+            for line in iter(server.stdout.readline, b""):
+                replies.put(line)
+        except (OSError, ValueError):
+            pass
+        replies.put(b"")
+
+    threading.Thread(target=pump, daemon=True).start()
+
+    def server_stderr():
+        return err_path.read_bytes().decode("utf-8", "replace")
+
+    def execute(n, command, stdin=None):
+        arguments = {"command": command}
+        if stdin is not None:
+            arguments["input"] = stdin
         request = {"jsonrpc": "2.0", "id": n, "method": "tools/call",
-                   "params": {"name": "execute", "arguments": {"command": command}}}
+                   "params": {"name": "execute", "arguments": arguments}}
         server.stdin.write((json.dumps(request) + "\n").encode())
         server.stdin.flush()
-        return json.loads(json.loads(server.stdout.readline())["result"]["content"][0]["text"])
+        try:
+            line = replies.get(timeout=60)
+        except queue.Empty:
+            raise AssertionError(f"no reply in 60 s; server stderr: {server_stderr()}")
+        assert line, f"server exited; stderr: {server_stderr()}"
+        return json.loads(json.loads(line)["result"]["content"][0]["text"])
 
+    # A Python child whose own subprocess pipe carries non-ASCII text:
+    # this breaks if the inherited setting makes the two ends disagree.
+    grandchild = ("import subprocess, sys; print(subprocess.run([sys.executable, '-c', "
+                  "'print(chr(193), chr(26085))'], capture_output=True, text=True).stdout.strip())")
     try:
-        commands = [f"'{text}'",  # the default shell: pwsh, or Windows PowerShell 5.1
-                    ["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", f"'{text}'"],
-                    ["cmd", "/d", "/c", f"echo {text}"],
-                    [sys.executable, "-c", f"print({text!r})"]]
-        for n, command in enumerate(commands, 1):
-            ran = execute(n, command)
-            assert ran["success"] and ran["stdout"].strip() == text, (command, ran)
+        cases = [(f"'{text}'", None, text),  # the default shell: pwsh, or Windows PowerShell 5.1
+                 (["powershell.exe", "-NoProfile", "-NonInteractive", "-Command", f"'{text}'"], None, text),
+                 (["cmd", "/d", "/c", f"echo {text}"], None, text),
+                 ([sys.executable, "-c", f"print({text!r})"], None, text),
+                 ([sys.executable, "-c", "import sys; print(sys.stdin.read().strip())"], text, text),
+                 ("$input", text, text),
+                 ([sys.executable, "-c", grandchild], None, "\u00c1 \u65e5")]
+        for n, (command, stdin, want) in enumerate(cases, 1):
+            ran = execute(n, command, stdin)
+            assert ran["success"] and ran["stdout"].strip() == want, (command, ran, server_stderr())
     finally:
         server.stdin.close()
-        server.wait(timeout=30)
+        try:
+            server.wait(timeout=30)
+        except subprocess.TimeoutExpired:
+            server.kill()
+            server.wait()
         server.stdout.close()
+        err_file.close()
 
 
 def test_result_with_lone_surrogate_still_fits(tmp_path):

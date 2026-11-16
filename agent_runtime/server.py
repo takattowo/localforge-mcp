@@ -616,8 +616,9 @@ def _utf8_console():
 
     Children share the server's console (hidden when a host such as
     Quick starts it), and PowerShell and cmd encode piped output in its
-    code page: OEM 437 by default, which turns é into garbage and 日本
-    into ??. Output is decoded as UTF-8, so the console has to match.
+    code page: the OEM code page by default (437 on US English), which
+    turns é into garbage and 日本 into ??. Output is decoded as UTF-8,
+    so the console has to match.
     The old code pages come back at a clean exit, for a server run in
     the user's own terminal.
     """
@@ -636,12 +637,14 @@ def _utf8_console():
 
 
 def main():
+    # First, so its atexit restore runs last: atexit is last-in,
+    # first-out, and process cleanup must still see UTF-8.
+    _utf8_console()
     try:
         server = Server(Config.load())
     except Exception as e:
         print(f"configuration error: {e}", file=sys.stderr)
         raise SystemExit(2)
-    _utf8_console()
     server.run_stdio()
 
 
