@@ -1369,3 +1369,60 @@ def test_commands_resolve_cwd_against_runtime_cwd(tmp_path):
     ran = server.cap.execute(code, cwd="inner")
     assert ran["stdout"].strip().endswith(os.path.join("sub", "inner"))
     assert server.cap.git("root", cwd="inner")["cwd"].endswith(os.path.join("sub", "inner"))
+
+
+def test_execute_saves_cut_output_to_readable_log(tmp_path):
+    # Outside the read roots on purpose: the spill folder is
+    # added to them so the agent can read the log back.
+    spill = tmp_path.parent / (tmp_path.name + "-spill")
+    server = make(tmp_path, max_inline_output_bytes=1000, spill_dir=str(spill))
+    big = server.cap.execute([sys.executable, "-c", "print('a' * 3000 + 'END')"])
+    assert big["stdout_truncated"] and len(big["stdout"].encode()) <= 1000
+    assert big["stdout"].rstrip().endswith("END")
+    saved = Path(big["stdout_path"])
+    assert saved.parent == spill.resolve()
+    assert saved.read_text(encoding="utf-8").strip() == "a" * 3000 + "END"
+    assert "END" in server.cap.filesystem("read", str(saved))["content"]
+    small = server.cap.execute([sys.executable, "-c", "print('ok')"])
+    assert not small["stdout_truncated"] and "stdout_path" not in small
+
+
+def test_spill_folder_is_pruned(tmp_path, monkeypatch):
+    import agent_runtime.capabilities as caps
+    monkeypatch.setattr(caps, "SPILL_KEEP", 3)
+    server = make(tmp_path, spill_dir=str(tmp_path / "spill"))
+    for n in range(5):
+        server.cap.spill("t", str(n))
+    assert len(list((tmp_path / "spill").iterdir())) == 3
+
+
+def test_oversized_result_is_saved_with_preview(tmp_path):
+    server = make(tmp_path, max_result_bytes=5000, spill_dir=str(tmp_path / "spill"))
+    (tmp_path / "big.txt").write_text("x" * 20000)
+
+    def call(arguments):
+        response = server.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                                  "params": {"name": "filesystem", "arguments": arguments}})
+        return response["result"]["content"][0]["text"]
+
+    text = call({"action": "read", "path": "big.txt"})
+    assert len(text.encode()) <= 5000
+    value = json.loads(text)
+    assert value["result_too_large"] and value["bytes"] > 20000 and value["preview"]
+    saved = json.loads(Path(value["result_path"]).read_text(encoding="utf-8"))
+    assert saved["content"] == "x" * 20000
+    assert "result_too_large" not in json.loads(call({"action": "stat", "path": "big.txt"}))
+
+
+def test_process_read_pages_default_to_inline_cap(tmp_path):
+    server = make(tmp_path, max_inline_output_bytes=1000)
+    code = [sys.executable, "-c", "import sys\nfor _ in range(200): print('y' * 99, flush=True)"]
+    pid = server.processes.start(code)["process_id"]
+    try:
+        deadline = time.monotonic() + 10
+        while server.processes.status(pid)["state"] == "running" and time.monotonic() < deadline:
+            time.sleep(0.05)
+        page = server.processes.read(pid)
+        assert page["truncated"] and len(page["stdout"]) < 20000
+    finally:
+        server.processes.stop(pid, True)

@@ -131,10 +131,14 @@ class ProcessManager:
             threading.Thread(target=self._pump, args=(item, pipe, stream), daemon=True).start()
         return self.status(pid)
 
-    def read(self, process_id, after=0, limit_bytes=200_000, wait_ms=0, fmt="text"):
+    def read(self, process_id, after=0, limit_bytes=None, wait_ms=0, fmt="text"):
         if fmt not in {"text", "chunks"}:
             raise RuntimeFault("invalid_arguments", "format must be 'text' or 'chunks'")
         item = self._get(process_id)
+        if limit_bytes is None:
+            # Small pages by default: the agent keeps reading from
+            # next_after, and each page stays cheap to relay.
+            limit_bytes = self.cfg.max_inline_output_bytes
         limit_bytes = max(1, min(int(limit_bytes), self.cfg.max_capture_bytes))
         deadline = time.monotonic() + min(max(int(wait_ms), 0), 60_000) / 1000
         # Wait on a condition notified by the pump threads

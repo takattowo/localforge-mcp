@@ -239,6 +239,8 @@ LINE_CUT = " ...[line cut]"
 BATCH_SEARCH_WORKERS = 8
 GIT_ROOT_TTL_SECONDS = 30
 PATH_LOCK_STRIPES = 256
+# Saved outputs kept in the spill folder; older ones are pruned.
+SPILL_KEEP = 100
 
 class Capabilities:
     def __init__(self, cfg, paths, policy, processes, store=None):
@@ -255,6 +257,14 @@ class Capabilities:
         self._git_lock = threading.Lock()
         self._git_root_cache = (None, None, 0.0)
         self.store = store
+        # Oversized outputs are saved here so the reply can stay
+        # small. The folder is added to the read roots so the agent
+        # can read a saved output back with filesystem read or search.
+        spill = Path(cfg.spill_dir or Path(tempfile.gettempdir()) / "localforge-results")
+        spill.mkdir(parents=True, exist_ok=True)
+        self.spill_dir = spill.resolve()
+        if self.spill_dir not in paths.read_roots:
+            paths.read_roots.append(self.spill_dir)
         if self.store is not None:
             saved = self.store.load().get("cwd")
             if isinstance(saved, str) and saved:
@@ -1040,6 +1050,42 @@ class Capabilities:
             except ProcessLookupError:
                 pass
 
+    def spill(self, prefix, text, suffix=".log"):
+        """Save text to the spill folder and return the file path.
+
+        Only the newest SPILL_KEEP files are kept, so the folder
+        stays bounded over long sessions.
+        """
+        fd, name = tempfile.mkstemp(prefix=f"{prefix}-", suffix=suffix, dir=self.spill_dir)
+        with os.fdopen(fd, "wb") as handle:
+            handle.write(text.encode("utf-8"))
+        try:
+            saved = sorted(self.spill_dir.iterdir(), key=lambda p: p.stat().st_mtime, reverse=True)
+            for old in saved[SPILL_KEEP:]:
+                old.unlink()
+        except OSError:
+            # A concurrent prune got there first; the next one retries.
+            pass
+        return name
+
+    def _inline_output(self, stream, text):
+        """Clip command output for the reply, saving it whole when cut.
+
+        The reply keeps head and tail (max_inline_output_bytes); the
+        saved log keeps up to max_capture_bytes. Returns (text,
+        truncated, saved_path_or_None).
+        """
+        full, full_cut = _clip_ends(text, int(self.cfg.max_capture_bytes))
+        shown, shown_cut = _clip_ends(full, min(int(self.cfg.max_inline_output_bytes),
+                                                int(self.cfg.max_capture_bytes)))
+        path = None
+        if shown_cut:
+            try:
+                path = self.spill(f"execute-{stream}", full)
+            except OSError:
+                pass
+        return shown, full_cut or shown_cut, path
+
     def execute(self, command, cwd=None, timeout=None, shell=False, env=None, input=None):
         work = self.paths.resolve(cwd or ".", cwd=self.cwd, access="read", must_exist=True)
         command = coerce_command(command)
@@ -1076,13 +1122,16 @@ class Capabilities:
         if not out and not err and (proc.returncode != 0 or error_type is not None):
             err = ("[no output captured on stdout/stderr; the child may have written directly "
                    "to the console or died during startup (e.g. missing environment)]")
-        cap = self.cfg.max_capture_bytes
-        out, out_cut = _clip_ends(out, cap)
-        err, err_cut = _clip_ends(err, cap)
+        out, out_cut, out_path = self._inline_output("stdout", out)
+        err, err_cut, err_path = self._inline_output("stderr", err)
         result = {"success": proc.returncode == 0 and error_type is None, "command": command, "cwd": str(work),
                 "exit_code": proc.returncode, "stdout": out, "stderr": err,
                 "stdout_truncated": out_cut, "stderr_truncated": err_cut,
                 "duration_ms": int((time.monotonic() - started) * 1000), "error_type": error_type}
+        if out_path:
+            result["stdout_path"] = out_path
+        if err_path:
+            result["stderr_path"] = err_path
         if timeout is not None and effective_timeout > float(self.cfg.default_timeout_seconds):
             result["warning"] = (
                 "timeout exceeds the configured default "

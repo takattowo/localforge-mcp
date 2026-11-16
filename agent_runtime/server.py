@@ -14,7 +14,7 @@ from .config import Config
 from .errors import RuntimeFault
 from .security import PathPolicy, Policy
 from .processes import ProcessManager
-from .capabilities import Capabilities
+from .capabilities import Capabilities, _clip
 from .state import StateStore
 from .todos import TodoStore
 
@@ -409,6 +409,29 @@ class Server:
                 future.result()
         return {"results": results}
 
+    def _fit_result(self, name, value, text):
+        """Keep a tool result under max_result_bytes.
+
+        Hosts relay results through size-limited channels (Quick's
+        device relay rejects roughly 300 KB). An oversized result is
+        saved whole, indented so line-mode read can page through it,
+        and replaced by a short preview plus the saved path.
+        Returns (value, text).
+        """
+        size = len(text.encode("utf-8"))
+        if size <= int(self.cfg.max_result_bytes):
+            return value, text
+        try:
+            path = self.cap.spill(f"{_bare_tool_name(name)}-result",
+                                  json.dumps(value, ensure_ascii=False, indent=1), ".json")
+        except OSError:
+            path = None
+        preview, _ = _clip(text, min(2000, int(self.cfg.max_result_bytes) // 2))
+        value = {"result_too_large": True, "bytes": size, "result_path": path, "preview": preview,
+                 "hint": "Read result_path with filesystem read line_start/line_end or search it, "
+                         "or narrow the call (max_results, line ranges, fewer batch entries)."}
+        return value, json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
     def handle(self, request):
         if not isinstance(request, dict) or request.get("jsonrpc") != "2.0" or not isinstance(request.get("method"), str):
             raise ValueError("Invalid Request")
@@ -430,8 +453,9 @@ class Server:
             # byte costs tokens. structuredContent repeats the whole
             # result; Quick showed both copies on failed calls, so it
             # is opt-in.
-            result = {"content": [{"type": "text", "text": json.dumps(
-                value, ensure_ascii=False, separators=(",", ":"))}]}
+            text = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+            value, text = self._fit_result(params["name"], value, text)
+            result = {"content": [{"type": "text", "text": text}]}
             if self.cfg.structured_content:
                 result["structuredContent"] = value
         elif method == "ping":

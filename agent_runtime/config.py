@@ -40,6 +40,9 @@ class Config:
     log_to_client: bool = False
     structured_content: bool = False
     kill_children_on_exit: bool = True
+    max_inline_output_bytes: int = 30_000
+    max_result_bytes: int = 200_000
+    spill_dir: str | None = None
 
     @classmethod
     def load(cls, path: str | None = None) -> "Config":
@@ -62,7 +65,7 @@ class Config:
             raise ValueError(f"invalid mode: {cfg.mode}")
         if cfg.network not in NETWORK_MODES:
             raise ValueError("network must be 'disabled' or 'unrestricted'")
-        for name in ("default_timeout_seconds", "max_capture_bytes", "max_file_read_bytes", "max_read_chars", "process_buffer_bytes", "process_ttl_seconds", "max_processes", "max_concurrency"):
+        for name in ("default_timeout_seconds", "max_capture_bytes", "max_file_read_bytes", "max_read_chars", "process_buffer_bytes", "process_ttl_seconds", "max_processes", "max_concurrency", "max_inline_output_bytes", "max_result_bytes"):
             if int(getattr(cfg, name)) <= 0:
                 raise ValueError(f"{name} must be positive")
         if int(cfg.max_read_chars) < 64:
