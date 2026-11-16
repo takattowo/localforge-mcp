@@ -10,8 +10,8 @@ LocalForge MCP gives an MCP client structured access to a real workspace, files,
 
 ## Features
 
-- Workspace root, current directory, and Git-root discovery.
-- Real filesystem list, stat, bounded read, atomic write, guarded text replacement, move, mkdir, and delete operations.
+- Workspace root, current directory, and Git-root discovery; `workspace get` also returns the project's `AGENTS.md`/`CLAUDE.md`.
+- Real filesystem list, stat, bounded read, atomic write, guarded text replacement, move, mkdir, and delete operations. Edits return a short diff and can run a per-file check (`edit_checks`).
 - Ripgrep-backed code and filename search with Python fallback.
 - Batched `multi_search`: up to 16 parallel searches in one round-trip.
 - Batched `batch`: run any mix of tool calls in parallel in one round-trip.
@@ -21,7 +21,7 @@ LocalForge MCP gives an MCP client structured access to a real workspace, files,
 - MCP 2025-06-18 protocol with the `logging` capability; `structuredContent` tool results are opt-in (`structured_content: true`).
 - Long-session guards: Git-root caching, whole-file-edit size limits, and a fixed-size striped path-lock table.
 - Structured Git operations plus generic Git argument arrays.
-- Foreground execution with separate stdout/stderr, timeout, truncation, duration, and exit metadata.
+- Foreground execution with separate stdout/stderr, timeout, truncation, duration, and exit metadata. Long output is cut to head and tail and saved whole to a log file; oversized results of any tool are saved to a file instead of failing the host relay.
 - Long-running process IDs, incremental split-stream logs, stdin, status, restart, stop, and process-tree cleanup.
 - Canonical path checks with separate read/write roots and denied paths.
 - Explicit environment inheritance, secret-name filtering, and basic output redaction.
@@ -159,8 +159,8 @@ A blank terminal means the server is waiting for newline-delimited JSON-RPC inpu
 
 ### `workspace`
 
-- `get`: return workspace root, current directory, and detected Git root.
-- `set_cwd`: change current directory inside read policy.
+- `get`: return workspace root, current directory, detected Git root, and `project_instructions` (contents of `AGENTS.md` and `CLAUDE.md` in the Git root and cwd, within `max_project_instruction_bytes`).
+- `set_cwd`: change current directory inside read policy; returns the same fields.
 
 ### `filesystem`
 
@@ -168,6 +168,17 @@ A blank terminal means the server is waiting for newline-delimited JSON-RPC inpu
 - `write`, `replace_text`, `apply_patch`, `mkdir`, `move`, `delete`, `copy`
 
 `read` supports byte offset and bounded output. `replace_text` defaults to exactly one expected occurrence, preventing accidental broad replacements. `multi_edit` applies several exact replacements to one file in order — the whole set is validated before anything is written, so a failing edit leaves the file untouched; prefer it for multi-part changes to a single file. `apply_patch` takes a unified diff for multi-hunk or multi-file edits: exact context, validated end-to-end before anything is written, all-or-nothing. Prefer it over writing plus executing a script to edit code. `copy` duplicates a file (or a directory with `recursive`) under policy checks — prefer it over shell copy commands, which mis-handle bracketed filenames like `[KB1] - doc.pdf` without `-LiteralPath`.
+
+`write` (on an existing file), `replace_text`, and `multi_edit` return a `diff` of the change (unified, 2 context lines, capped at `edit_diff_max_bytes`). With `edit_checks` configured, every edit of a matching file also runs a check and returns `check`:
+
+```json
+"edit_checks": {
+  "*.py": ["python", "-c", "import ast,sys; ast.parse(open(sys.argv[1],'rb').read(), sys.argv[1])", "{path}"],
+  "*.js": ["node", "--check", "{path}"]
+}
+```
+
+The first matching glob wins; `{path}` becomes the edited file. A failing check does not undo the edit.
 
 Argument names are tolerant: the server accepts common model guesses as aliases — `old`/`find` for `old_text`, `new`/`replacement` for `new_text`, `text` for `content`, `file`/`target` for `path`, `start`/`end` for `line_start`/`line_end`, `dest` for `destination`, `pattern` for `query` (search), `cmd` for `command` (execute/process), `id` for `process_id`, and `dir` for `path` (workspace). A canonical name always wins when both are sent.
 
@@ -252,6 +263,10 @@ String commands automatically use the configured shell:
 
 Pass `shell` explicitly only to force array commands through the shell. Argument arrays bypass shell parsing and stay preferred.
 
+Windows PowerShell 5.1 has no `&&` or `||`; chain with `;` or make separate calls (a failed `&&` command gets a `hint`). With `default_shell: "powershell"`, the `curl` and `wget` aliases are removed first, so `curl` is the real `curl.exe`.
+
+Each stream returns at most `max_inline_output_bytes`, head and tail. When output is cut, the whole of it (up to `max_capture_bytes`) is saved and its path returned as `stdout_path`/`stderr_path`; read it with `filesystem read` or `search`.
+
 For SSH, prefer key auth with fail-fast flags so prompts never hang the call:
 
 ```json
@@ -304,7 +319,7 @@ Supported `default_shell` values:
 - `cmd`
 - `sh`
 
-`execute.timeout` is seconds. `process.wait_ms` is milliseconds (max 60000). `limit_bytes`, `max_bytes`, and `max_file_read_bytes` are bytes. `filesystem offset` is a byte offset in legacy read mode; use `line_start`/`line_end` for line mode. `max_concurrency` bounds how many tool calls run in parallel (default 8). `log_to_client` (default false) emits an MCP logging notification per tool call (tool, duration, outcome) visible in the client; `LOCALFORGE_LOG=1` writes the same line to stderr. `replace_text` and `multi_edit` refuse files larger than `max_file_read_bytes` with `file_too_large`. `kill_children_on_exit` (default true) puts every spawned child into a Windows Job Object that the kernel terminates when the server exits, however it exits; set it to false to let children outlive the server. Line-mode `read` returns numbered text (`N<TAB>line`), capped at 2000 lines or `max_read_chars` (default 60000, minimum 64); continue from `next_line`; `total_lines` appears only when the read reaches the end of the file. `structured_content` (default false) adds `structuredContent` to tool results.
+`execute.timeout` is seconds. `process.wait_ms` is milliseconds (max 60000). `limit_bytes`, `max_bytes`, and `max_file_read_bytes` are bytes. `filesystem offset` is a byte offset in legacy read mode; use `line_start`/`line_end` for line mode. `max_concurrency` bounds how many tool calls run in parallel (default 8). `log_to_client` (default false) emits an MCP logging notification per tool call (tool, duration, outcome) visible in the client; `LOCALFORGE_LOG=1` writes the same line to stderr. `replace_text` and `multi_edit` refuse files larger than `max_file_read_bytes` with `file_too_large`. `kill_children_on_exit` (default true) puts every spawned child into a Windows Job Object that the kernel terminates when the server exits, however it exits; set it to false to let children outlive the server. Line-mode `read` returns numbered text (`N<TAB>line`), capped at 2000 lines or `max_read_chars` (default 60000, minimum 64); continue from `next_line`; `total_lines` appears only when the read reaches the end of the file. `structured_content` (default false) adds `structuredContent` to tool results. `max_inline_output_bytes` (default 30000) caps each `execute` stream in the reply and the default `process read` page. `max_result_bytes` (default 200000) caps any tool result; a bigger one is saved to a file and replaced by a preview with `result_path`. Saved output goes to `spill_dir` (default `%TEMP%\localforge-results`, added to the read roots; the newest 100 files are kept). `edit_diff_max_bytes` (default 4000, 0 = off) caps the diff edits return. `edit_checks` (default `{}`) and `edit_check_timeout_seconds` (default 30) configure checks after edits. `project_instruction_files` (default `["AGENTS.md", "CLAUDE.md"]`) and `max_project_instruction_bytes` (default 8000) control what `workspace get` returns.
 
 ## Security model
 

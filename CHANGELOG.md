@@ -1,5 +1,16 @@
 # Changelog
 
+## 1.10.0
+
+- Large output no longer breaks the host relay (Quick rejects results over roughly 300 KB). `execute` returns at most `max_inline_output_bytes` (default 30000) of head and tail per stream and saves the whole output (up to `max_capture_bytes`) to a log, given as `stdout_path`/`stderr_path`. Any tool result over `max_result_bytes` (default 200000) is saved as indented JSON and replaced by `{result_too_large, bytes, result_path, preview, hint}`. Saved files go to `spill_dir` (default `%TEMP%\localforge-results`), which is added to the read roots so `filesystem read` and `search` work on them; the newest 100 are kept.
+- `process read` pages default to `max_inline_output_bytes` instead of 200 KB; keep reading from `next_after`.
+- `write` (existing file), `replace_text`, and `multi_edit` return a unified `diff` of the change (LF view, 2 context lines, no file header), capped at `edit_diff_max_bytes` (default 4000, `diff_truncated` when cut, 0 turns it off). Saves a re-read to confirm an edit.
+- New `edit_checks`: map a file-name glob to an argv run after each `write`, `replace_text`, `multi_edit`, or `apply_patch` of a matching file, with `{path}` replaced by the file's path, e.g. `{"*.py": ["python", "-m", "py_compile", "{path}"]}`. The result carries `check: {"ok": true}` or the failing command, exit code, and up to 4000 bytes of output. The edit is kept either way. `edit_check_timeout_seconds` defaults to 30. Off by default.
+- `workspace get` and `set_cwd` return `project_instructions`: the contents of `AGENTS.md` and `CLAUDE.md` in the Git root and the cwd, like CLI agents load them, within `max_project_instruction_bytes` (default 8000) in total. Set `project_instruction_files` to change the names, or to `[]` to turn it off.
+- Key rules moved into tool descriptions, since some hosts (Quick) drop the server `instructions`: call `workspace get` first, fan out searches, match batch results by index/label, edit only with `filesystem`, commit through `git run`, and no `&&` in PowerShell 5.1.
+- With `default_shell: "powershell"`, string commands drop the `curl` and `wget` aliases first, so `curl` runs `curl.exe` instead of `Invoke-WebRequest`. Scripts that relied on the alias must call `Invoke-WebRequest` by name.
+- A string command that fails on `&&` or `||` (not valid in Windows PowerShell 5.1) gets a `hint` saying to chain with `;` or make separate calls.
+
 ## 1.9.2
 
 - The default excludes (`.git`, `.venv`, `__pycache__`, `node_modules`, `.hg`, `target`, `dist`, `build`, `*.egg-info`) now apply at any depth under ripgrep, e.g. `packages/web/node_modules`. ripgrep reads a glob with a slash as anchored to the search root, so they only covered the top level. They are now reported as `**/node_modules/` etc. in `applied_excludes`; the trailing slash makes ripgrep skip those folders instead of walking them, and keeps files with those names.
