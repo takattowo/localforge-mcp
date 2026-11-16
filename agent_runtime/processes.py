@@ -41,6 +41,8 @@ class Managed:
     pumps: list = field(default_factory=list)
     # Windows: a job holding the process tree (see job.track).
     job: object = None
+    # Streams that lost output to the process_buffer_bytes cap.
+    dropped: set = field(default_factory=set)
 
     def __post_init__(self):
         self.chunk_cond = threading.Condition(self.lock)
@@ -98,6 +100,7 @@ class ProcessManager:
                     while item.bytes > self.cfg.process_buffer_bytes and item.chunks:
                         old = item.chunks.popleft()
                         item.bytes -= old.raw_len
+                        item.dropped.add(old.stream)
                     item.chunk_cond.notify_all()
         finally:
             tail = decoder.decode(b"", final=True)

@@ -291,6 +291,12 @@ EDIT_CHECK_OUTPUT_BYTES = 4000
 HINT_LINES = 12
 HINT_LINE_CHARS = 200
 HINT_MATCH_LINES = 10
+# A line found more often than this in the file (a lone brace, "end")
+# says nothing about where old_text is, and costs a vote per copy.
+HINT_COMMON_LINE = 100
+# How the hint names each fallback tier of _find_spans.
+FALLBACK_LABELS = {"typography": "ignoring typography",
+                   "trailing_whitespace": "ignoring trailing whitespace"}
 
 
 # Typographic variants, each mapped to one ASCII character so offsets
@@ -356,25 +362,53 @@ def _line_occurrences(view, old):
 
 
 def _find_spans(view, old, new, expected):
-    """Matches of old in the LF view, and the tier that found them.
+    """Matches of old in the LF view, the tier that found them, and the
+    fallback tiers tried.
 
     Exact matches win. Only when there are none, and the edit has no
     lone CR (one asks for exact bytes, as when old and new differ only
     in line endings), retry ignoring typographic variants, then per
     line ignoring trailing whitespace too. A fallback tier counts only
-    with exactly expected matches, none overlapping. Returns (spans,
-    tier); tier None is a mismatch, spans then being the exact matches.
+    with exactly expected matches, none overlapping; otherwise the next
+    one is tried. Returns (spans, tier, tried); tier None is a mismatch,
+    spans then being the exact matches. tried lists (tier, spans) for
+    each fallback tier that did not count.
     """
     exact = _occurrences(view, old)
     if exact or "\r" in old or "\r" in new or not old.strip():
-        return exact, "exact" if len(exact) == expected else None
+        return exact, "exact" if len(exact) == expected else None, []
+    tried = []
     for tier, find in (("typography", lambda: _occurrences(_typography(view), _typography(old), step=1)),
                        ("trailing_whitespace", lambda: _line_occurrences(view, old))):
         spans = find()
+        if spans and _apart(spans) and len(spans) == expected:
+            return spans, tier, tried
+        tried.append((tier, spans))
+    return [], None, tried
+
+
+def _apart(spans):
+    return all(a[1] <= b[0] for a, b in zip(spans, spans[1:]))
+
+
+def _match_lines(view, starts):
+    """' start on lines 1, 3.' for match offsets in view, capped."""
+    lines = list(dict.fromkeys(view.count("\n", 0, at) + 1 for at in starts))
+    more = ", ..." if len(lines) > HINT_MATCH_LINES else ""
+    return f" start on lines {', '.join(map(str, lines[:HINT_MATCH_LINES]))}{more}."
+
+
+def _fallback_miss(view, exact, tried):
+    """(found, hint) for an edit whose fallback tiers matched, but not
+    the expected number of times: each tier's count, and the lines its
+    matches start on."""
+    counts, hint = [f"{exact} exact"], ""
+    for tier, spans in tried:
+        label = FALLBACK_LABELS[tier]
+        counts.append(f"{len(spans)} {label}" + ("" if _apart(spans) else " (overlapping)"))
         if spans:
-            apart = all(a[1] <= b[0] for a, b in zip(spans, spans[1:]))
-            return (spans, tier) if apart and len(spans) == expected else ([], None)
-    return [], None
+            hint += f" Matches {label}" + _match_lines(view, (start for start, _ in spans[:HINT_MATCH_LINES * 2]))
+    return ", ".join(counts), hint
 
 
 def _replace_spans(text, spans, new):
@@ -435,7 +469,7 @@ def _miss_hint(view, old, new, found, expected):
     search = old.split("\n")
     votes, wanted = {}, 0
     for offset, line in enumerate(search):
-        if not votes_for(k := key(line)):
+        if not votes_for(k := key(line)) or len(positions.get(k, ())) > HINT_COMMON_LINE:
             continue
         wanted += 1
         for number in positions.get(k, ()):
@@ -482,12 +516,13 @@ def _similar(names, requested):
     Ranked like CLI agents do: the same name ignoring case, then the
     same stem with another extension, then one name containing the
     other (3+ characters), then a typo in the stem (edit distance 1 for
-    stems under 5 characters, 2 above, none under 3).
+    stems under 5 characters, 2 above, none under 3). A generator: a
+    rank is sorted (by edit distance) only when the caller gets to it.
     """
     name = requested.lower()
     wanted = _stem(name)
     typos = 0 if len(wanted) < 3 else 1 if len(wanted) < 5 else 2
-    ranked = []
+    ranked = {1: [], 2: [], 3: [], 4: []}
     for entry in names:
         if entry == requested:
             continue
@@ -504,8 +539,11 @@ def _similar(names, requested):
             rank = 4
         else:
             continue
-        ranked.append((rank, _edit_distance(candidate, name), entry))
-    return [entry for _, _, entry in sorted(ranked)]
+        ranked[rank].append(entry)
+    for entries in ranked.values():
+        if len(entries) > 1:
+            entries.sort(key=lambda entry: (_edit_distance(entry.lower(), name), entry))
+        yield from entries
 
 
 def _did_you_mean(paths):
@@ -711,8 +749,14 @@ class Capabilities:
                     names = [entry.name for _, entry in zip(range(SUGGEST_SCAN_LIMIT), entries)]
             except OSError:
                 return []
-            found = [n for n in _similar(names, name) if readable(folder / n)]
-            return [show(n) for n in found[:SUGGEST_MAX]]
+            # Policy checks only until SUGGEST_MAX names pass.
+            found = []
+            for n in _similar(names, name):
+                if readable(folder / n):
+                    found.append(show(n))
+                    if len(found) == SUGGEST_MAX:
+                        break
+            return found
 
         try:
             target = self.paths._canonical(path or ".", self.cwd)
@@ -1133,10 +1177,14 @@ class Capabilities:
         view, exact = _lf(original), original
         counts, tiers = [], []
         for index, (old, new, expected) in enumerate(edits):
-            spans, tier = _find_spans(view, old, new, expected)
+            spans, tier, tried = _find_spans(view, old, new, expected)
             if tier is None:
                 found = len(spans)
-                raise mismatch(index, expected, found, _miss_hint(view, old, new, found, expected))
+                if any(matches for _, matches in tried):
+                    found, hint = _fallback_miss(view, found, tried)
+                else:
+                    hint = _miss_hint(view, old, new, found, expected)
+                raise mismatch(index, expected, found, hint)
             if exact is not None:
                 written = new.replace("\n", "\r\n") if eol == "\r\n" else new
                 exact = _replace_spans(exact, _source_spans(exact, spans), written)
@@ -1369,6 +1417,7 @@ class Capabilities:
             command.append("-i")
         if context > 0:
             command += ["-C", str(context)]
+        # -e: a query starting with - (--verbose, -1) is a pattern, not an option.
         command += ["-e", query, str(target)]
         result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
                                 stdin=subprocess.DEVNULL,
@@ -1625,7 +1674,12 @@ class Capabilities:
                 if not kill_on_timeout:
                     hint = (f"max_processes ({self.cfg.max_processes}) reached, so the command was "
                             "stopped at its timeout instead of moving to the background.")
-                self.processes.stop(item.id, True)
+                try:
+                    self.processes.stop(item.id, True)
+                except subprocess.TimeoutExpired:
+                    # Still not gone after the forced stop's waits; its
+                    # entry is dropped below all the same.
+                    pass
                 error_type = "timeout"
                 drain()
         elif proc.returncode != 0:
@@ -1633,14 +1687,17 @@ class Capabilities:
         if error_type != "backgrounded":
             self.processes.discard(item)
         with item.lock:
-            chunks, last = list(item.chunks), item.next_seq - 1
+            chunks, last, dropped = list(item.chunks), item.next_seq - 1, set(item.dropped)
         # Chunks are redacted one read at a time; redacting the whole
         # again also catches a secret split across two reads.
         out, err = (redact("".join(c.text for c in chunks if c.stream == stream)) for stream in ("stdout", "stderr"))
-        # Over process_buffer_bytes the oldest output is gone.
-        lost = (chunks[0].seq if chunks else item.next_seq) > 1
-        if lost:
-            out = "...[earlier output dropped: over process_buffer_bytes]...\n" + out
+        # Over process_buffer_bytes the oldest output is gone, from
+        # either stream or both.
+        marker = "...[earlier output dropped: over process_buffer_bytes]...\n"
+        if "stdout" in dropped:
+            out = marker + out
+        if "stderr" in dropped:
+            err = marker + err
         # PowerShell 5.1 rejects && and || with this (unlocalized) error id.
         and_or_failed = (shell and isinstance(command, str) and ("&&" in command or "||" in command)
                          and "InvalidEndOfLine" in err)
@@ -1649,7 +1706,8 @@ class Capabilities:
                    "to the console or died during startup (e.g. missing environment)]")
         out, out_cut, out_path = self._inline_output("stdout", out)
         err, err_cut, err_path = self._inline_output("stderr", err)
-        out_cut = out_cut or lost
+        out_cut = out_cut or "stdout" in dropped
+        err_cut = err_cut or "stderr" in dropped
         result = {"success": proc.returncode == 0 and error_type is None, "command": command, "cwd": str(work),
                 "exit_code": proc.returncode, "stdout": out, "stderr": err,
                 "stdout_truncated": out_cut, "stderr_truncated": err_cut,

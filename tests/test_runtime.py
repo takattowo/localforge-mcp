@@ -1783,6 +1783,11 @@ def test_search_query_starting_with_dash(tmp_path):
     assert [m["text"] for r in one_file["results"] for m in r["matches"]] == ["-1 is negative"], one_file
     regex = server.cap.search("-1 is", fixed_string=False)
     assert [m["text"] for r in regex["results"] for m in r["matches"]] == ["-1 is negative"], regex
+    dash = server.cap.search("-")
+    assert [m["text"] for r in dash["results"] for m in r["matches"]] == ["run --verbose", "-1 is negative"], dash
+    near = server.cap.search("-1", context_lines=1)
+    [hit] = near["results"][0]["matches"]
+    assert hit["text"] == "-1 is negative" and hit["before"] == ["1\trun --verbose"], near
 
 
 def test_git_shows_non_ascii_paths(tmp_path):
@@ -1959,8 +1964,8 @@ def _exec_entries(server):
 
 def test_execute_moves_to_background_on_timeout(tmp_path):
     server = make(tmp_path)
-    code = "import time\nprint('started', flush=True)\ntime.sleep(1.5)\nprint('later', flush=True)\ntime.sleep(30)"
-    out = server.cap.execute([sys.executable, "-c", code], timeout=0.8)
+    code = "import time\nprint('started', flush=True)\ntime.sleep(5)\nprint('later', flush=True)\ntime.sleep(30)"
+    out = server.cap.execute([sys.executable, "-c", code], timeout=3)
     pid = out.get("process_id")
     try:
         assert out["success"] is False and out["error_type"] == "backgrounded" and out["exit_code"] is None
@@ -2018,6 +2023,25 @@ def test_execute_marks_output_past_the_process_buffer(tmp_path):
     out = server.cap.execute([sys.executable, "-c", "import sys\nfor n in range(100): print(str(n) * 100, flush=True)"])
     assert out["success"] and out["stdout_truncated"]
     assert out["stdout"].startswith("...[earlier output dropped") and out["stdout"].rstrip().endswith("99" * 100)
+
+
+def test_execute_marks_dropped_output_per_stream(tmp_path):
+    server = make(tmp_path, process_buffer_bytes=5000)
+    code = "import sys\nfor n in range(100): print(str(n) * 100, file=sys.stderr, flush=True)\nprint('done', flush=True)"
+    out = server.cap.execute([sys.executable, "-c", code])
+    assert out["stderr_truncated"] and out["stderr"].startswith("...[earlier output dropped"), out
+    assert not out["stdout_truncated"] and out["stdout"].strip() == "done", out
+
+
+def test_execute_drops_its_entry_when_the_forced_stop_times_out(tmp_path, monkeypatch):
+    server = make(tmp_path)
+
+    def stuck(process_id, force=False):
+        raise subprocess.TimeoutExpired("stop", 10)
+
+    monkeypatch.setattr(server.processes, "stop", stuck)
+    out = server.cap.execute([sys.executable, "-c", "import time; time.sleep(5)"], timeout=0.5, kill_on_timeout=True)
+    assert out["error_type"] == "timeout" and _exec_entries(server) == [], out
 
 
 def test_execute_without_input_gives_an_empty_stdin(tmp_path):
@@ -2155,7 +2179,10 @@ def test_edit_fallback_refuses_ambiguous_or_line_ending_edits(tmp_path):
     (tmp_path / "a.py").write_text(ambiguous, encoding="utf-8")
     with pytest.raises(RuntimeFault) as exc:
         server.cap.filesystem("replace_text", "a.py", old_text='x = "a"', new_text='x = "b"')
-    assert exc.value.code == "content_mismatch" and "found 0" in exc.value.message
+    # The fallback counts and where they start, not just "found 0".
+    message = exc.value.message
+    assert exc.value.code == "content_mismatch" and "found 0 exact, 2 ignoring typography, 2 ignoring" in message
+    assert "Matches ignoring typography start on lines 1, 3." in message, message
     (tmp_path / "b.py").write_text("foo  \nfoo \n")
     with pytest.raises(RuntimeFault):
         server.cap.filesystem("multi_edit", "b.py", edits=[{"old_text": "foo\n", "new_text": "bar\n"}])
@@ -2178,3 +2205,21 @@ def test_edit_miss_hint_ignores_typography(tmp_path):
     with pytest.raises(RuntimeFault) as exc:
         server.cap.filesystem("replace_text", "h.py", old_text='say("hi")\nnope', new_text="x")
     assert "1\tsay(\u201chi\u201d)" in exc.value.message
+
+
+def test_edit_fallback_tries_the_next_tier_after_a_wrong_count(tmp_path):
+    server = make(tmp_path)
+    # Ignoring typography finds both lines; whole lines ignoring trailing
+    # whitespace find one, so that tier applies.
+    (tmp_path / "n.py").write_text("x = \u201ca\u201d  \nx = \u201ca\u201d!\n", encoding="utf-8")
+    out = server.cap.filesystem("replace_text", "n.py", old_text='x = "a"', new_text='x = "b"')
+    assert out["match"] == "trailing_whitespace"
+    assert (tmp_path / "n.py").read_text(encoding="utf-8") == 'x = "b"\nx = \u201ca\u201d!\n'
+
+
+def test_edit_miss_hint_skips_very_common_lines(tmp_path):
+    server = make(tmp_path)
+    (tmp_path / "c.txt").write_text("end\n" * 150 + "def target():\n    return 1\nend\n")
+    with pytest.raises(RuntimeFault) as exc:
+        server.cap.filesystem("replace_text", "c.txt", old_text="def target():\n    return 2\nend", new_text="x")
+    assert "151\tdef target():" in exc.value.message
