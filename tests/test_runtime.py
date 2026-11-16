@@ -1523,6 +1523,11 @@ def test_windows_powershell_curl_and_and_hint(tmp_path):
     assert curl["success"] and curl["stdout"].split() == ["Application"]
     chained = server.cap.execute("echo a && echo b")
     assert not chained["success"] and "&&" in chained["hint"]
+    # Commands without curl/wget run as written: no prelude in the error.
+    assert "Remove-Item" not in chained["stderr"] and "char:8" in chained["stderr"]
+    # A curl command that opens with using still runs (prelude skipped).
+    using_curl = server.cap.execute("using namespace System.Text\n[StringBuilder]::new('curl').ToString()")
+    assert using_curl["success"] and using_curl["stdout"].strip() == "curl"
     assert "hint" not in server.cap.execute("echo a; echo b")
     # Statements that must open a script still work behind the prelude.
     using = server.cap.execute("using namespace System.Text\n[StringBuilder]::new('ok').ToString()")

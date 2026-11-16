@@ -263,7 +263,7 @@ String commands automatically use the configured shell:
 
 Pass `shell` explicitly only to force array commands through the shell. Argument arrays bypass shell parsing and stay preferred.
 
-Windows PowerShell 5.1 has no `&&` or `||`; chain with `;` or make separate calls (a failed `&&` command gets a `hint`). With `default_shell: "powershell"`, the `curl` and `wget` aliases are removed first, so `curl` is the real `curl.exe`.
+Windows PowerShell 5.1 has no `&&` or `||`; chain with `;` or make separate calls (a failed `&&` command gets a `hint`). With `default_shell: "powershell"`, a command that mentions `curl` or `wget` has those aliases removed first, so `curl` is the real `curl.exe`; other commands run as written.
 
 Each stream returns at most `max_inline_output_bytes`, head and tail. When output is cut, the whole of it (up to `max_capture_bytes`) is saved and its path returned as `stdout_path`/`stderr_path`; read it with `filesystem read` or `search`.
 

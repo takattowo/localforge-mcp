@@ -125,8 +125,13 @@ POWERSHELL_PRELUDE = "Remove-Item Alias:curl, Alias:wget -Force -ErrorAction Sil
 # prelude. #requires lines stay visible to the start check.
 _PS_LEADING = re.compile(r"\A(?:\s|#(?!requires)[^\n]*|<#.*?#>)*", re.S | re.I)
 _PS_SCRIPT_START = re.compile(r"using\s|#requires|param\s*\(|\[cmdletbinding", re.I)
+# Only commands that name curl or wget need the prelude; every other
+# command runs as written, so its errors show its own text and columns.
+_PS_NEEDS_PRELUDE = re.compile(r"\b(?:curl|wget)\b", re.I)
 
 def _powershell_script(command):
+    if not _PS_NEEDS_PRELUDE.search(command):
+        return command
     body = command[_PS_LEADING.match(command).end():]
     if _PS_SCRIPT_START.match(body):
         return command
