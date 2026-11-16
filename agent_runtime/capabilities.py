@@ -811,6 +811,10 @@ class Capabilities:
             target = self.paths.resolve(path, cwd=self.cwd, access=access, must_exist=False)
         self.policy.authorize_path(action)
         if action == "read":
+            if target.is_dir():
+                # Like CLI agents: reading a folder lists it, as list does.
+                return {**self._list_dir(target, limit, offset, glob, include_hidden),
+                        "note": f"{target} is a directory, so its entries are listed, as by action list."}
             if not target.is_file():
                 raise RuntimeFault("not_file", f"Not a file: {target}")
             if line_start is not None or line_end is not None:
@@ -829,23 +833,7 @@ class Capabilities:
         if action == "list":
             if not target.is_dir():
                 raise RuntimeFault("not_directory", f"Not a directory: {target}")
-            lim = max(1, min(int(limit), 1000))
-            off = max(0, int(offset))
-            patterns = list(glob or [])
-            visible = []
-            for item in sorted(target.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower())):
-                if not include_hidden and item.name.startswith("."):
-                    continue
-                if patterns and not any(fnmatch.fnmatch(item.name, p) for p in patterns):
-                    continue
-                try:
-                    stat = item.stat()
-                    visible.append({"name": item.name, "path": str(item), "type": "dir" if item.is_dir() else "file",
-                                    "size": stat.st_size if item.is_file() else None, "modified": stat.st_mtime})
-                except OSError as e:
-                    visible.append({"name": item.name, "path": str(item), "type": "unavailable", "error": str(e)})
-            return {"path": str(target), "entries": visible[off:off + lim],
-                    "total": len(visible), "offset": off, "limit": lim}
+            return self._list_dir(target, limit, offset, glob, include_hidden)
         if action == "stat":
             try:
                 stat = target.stat()
@@ -1048,6 +1036,26 @@ class Capabilities:
                     _fs_error("move", target, e)
             return {"source": str(target), "destination": str(dest)}
         raise RuntimeFault("invalid_action", f"Unknown filesystem action: {action}")
+
+    @staticmethod
+    def _list_dir(target, limit, offset, glob, include_hidden):
+        lim = max(1, min(int(limit), 1000))
+        off = max(0, int(offset))
+        patterns = list(glob or [])
+        visible = []
+        for item in sorted(target.iterdir(), key=lambda x: (not x.is_dir(), x.name.lower())):
+            if not include_hidden and item.name.startswith("."):
+                continue
+            if patterns and not any(fnmatch.fnmatch(item.name, p) for p in patterns):
+                continue
+            try:
+                stat = item.stat()
+                visible.append({"name": item.name, "path": str(item), "type": "dir" if item.is_dir() else "file",
+                                "size": stat.st_size if item.is_file() else None, "modified": stat.st_mtime})
+            except OSError as e:
+                visible.append({"name": item.name, "path": str(item), "type": "unavailable", "error": str(e)})
+        return {"path": str(target), "entries": visible[off:off + lim],
+                "total": len(visible), "offset": off, "limit": lim}
 
     def _add_diff(self, result, before, after):
         if int(self.cfg.edit_diff_max_bytes) <= 0:

@@ -190,6 +190,22 @@ def test_list_pagination_and_read_lines(tmp_path):
         server.cap.filesystem("read", "a.txt", line_start=9)
 
 
+def test_read_on_a_directory_lists_it(tmp_path):
+    server = make(tmp_path)
+    (tmp_path / "sub").mkdir()
+    for name in ("b.txt", "a.py", ".hidden"):
+        (tmp_path / "sub" / name).write_text("x")
+    # The same entries and paging as list, plus a note.
+    out = server.cap.filesystem("read", "sub", limit=1, offset=1)
+    listed = server.cap.filesystem("list", "sub", limit=1, offset=1)
+    assert "directory" in out.pop("note") and out == listed
+    assert server.cap.filesystem("read", "sub", glob=["*.py"], include_hidden=True)["total"] == 1
+    # Same policy as list: a denied folder stays denied.
+    denied = make(tmp_path, denied_paths=[str(tmp_path / "sub")])
+    with pytest.raises(RuntimeFault):
+        denied.cap.filesystem("read", "sub")
+
+
 def test_read_lines_caps_output_and_streams(tmp_path):
     server = make(tmp_path, max_read_chars=200, max_file_read_bytes=10)
     (tmp_path / "long.txt").write_text("".join(f"row {n}\n" for n in range(1, 101)))
