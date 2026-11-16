@@ -1510,13 +1510,15 @@ class Capabilities:
                 pass
         return out
 
-    def multi_search(self, searches):
+    def multi_search(self, searches, invalid=None):
         """Run several independent searches in parallel within one tool call.
 
         Clients that issue one tool call per model round-trip use this to
         fan out multiple queries without paying a round-trip per search.
         Each entry takes the same arguments as the search tool plus an
-        optional label; failures are isolated per entry.
+        optional label; failures are isolated per entry. invalid maps an
+        entry index to its argument error (found by the server), which
+        that entry reports instead of running.
         """
         if not isinstance(searches, list) or not searches:
             raise RuntimeFault("invalid_arguments",
@@ -1536,6 +1538,10 @@ class Capabilities:
 
         def run(index, spec):
             label = spec.pop("label", None)
+            if index in (invalid or {}):
+                results[index] = {"index": index, "label": label,
+                                  "error": {"code": "invalid_arguments", "message": invalid[index]}}
+                return
             try:
                 results[index] = {"index": index, "label": label, **self.search(**spec)}
             except Exception as e:

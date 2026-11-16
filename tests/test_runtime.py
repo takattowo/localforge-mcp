@@ -670,9 +670,23 @@ def test_bad_argument_types_are_reported_together(tmp_path):
     assert exc.value.code == "invalid_arguments"
     assert "recursive: expected true or false, got 'maybe'" in message
     assert "limit: expected an integer, got 'lots'" in message and "edits: expected an array" in message
+    # One bad multi_search entry fails only itself (this used to fail the whole call).
+    (tmp_path / "x.txt").write_text("x\n")
+    multi = server.call("multi_search", {"searches": [{"query": "x", "max_results": "lots", "label": "bad"},
+                                                      {"query": "x", "max_results": "5"}]})
+    bad, good = multi["results"]
+    assert bad["label"] == "bad" and bad["error"]["code"] == "invalid_arguments"
+    assert "searches[0].max_results: expected an integer" in bad["error"]["message"]
+    assert "error" not in good and good["match_count"] == 1
+    # A non-boolean for a boolean is refused too: recursive 1 used to run rmtree.
+    (tmp_path / "d").mkdir()
+    (tmp_path / "d" / "keep.txt").write_text("x")
     with pytest.raises(RuntimeFault) as exc:
-        server.call("multi_search", {"searches": [{"query": "x", "max_results": "many"}]})
-    assert "searches[0].max_results: expected an integer" in exc.value.message
+        server.call("filesystem", {"action": "delete", "path": "d", "recursive": 1, "limit": "9" * 5000})
+    assert "recursive: expected true or false, got 1" in exc.value.message
+    # Past Python's 4300-digit int limit: an argument error, not internal_error.
+    assert exc.value.code == "invalid_arguments" and "limit: expected an integer" in exc.value.message
+    assert (tmp_path / "d" / "keep.txt").exists()
 
 def test_apply_patch_modify_and_create(tmp_path):
     server = make(tmp_path)

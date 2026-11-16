@@ -171,8 +171,9 @@ def _coerce(schema, value, where, errors):
     as a one-item list of strings (also one that is JSON but not a
     list of strings, like the glob "[1]"), and a JSON string holding the
     expected array or object. Any other string for a boolean, number,
-    array or object adds "<where>: expected ..., got ..." to errors.
-    Values of other types pass through unchanged.
+    array or object adds "<where>: expected ..., got ..." to errors, as
+    does a non-boolean (other than null) for a boolean. Other values
+    pass through unchanged.
     """
     kind = schema.get("type")
     if isinstance(value, str):
@@ -184,7 +185,13 @@ def _coerce(schema, value, where, errors):
             return value
         if kind in ("integer", "number"):
             if _INTEGER.fullmatch(text):
-                return int(text)
+                try:
+                    return int(text)
+                except ValueError:
+                    # Past Python's int-from-string digit limit (4300).
+                    errors.append(f"{where}: expected {'an integer' if kind == 'integer' else 'a number'}, "
+                                  f"got a {len(text)}-digit number")
+                    return value
             if kind == "number" and _NUMBER.fullmatch(text):
                 return float(text)
             errors.append(f"{where}: expected {'an integer' if kind == 'integer' else 'a number'}, got {_shown(value)}")
@@ -207,6 +214,10 @@ def _coerce(schema, value, where, errors):
                 wanted = "an array (a JSON list)" if kind == "array" else "an object"
                 errors.append(f"{where}: expected {wanted}, got {_shown(value)}")
                 return value
+    if kind == "boolean" and value is not None and not isinstance(value, bool):
+        # 1 or [] would pass a truthiness test, e.g. delete's recursive.
+        errors.append(f"{where}: expected true or false, got {_shown(value)}")
+        return value
     if kind == "array" and isinstance(value, list) and "items" in schema:
         return [_coerce(schema["items"], item, f"{where}[{index}]", errors) for index, item in enumerate(value)]
     if kind == "object" and isinstance(value, dict) and "properties" in schema:
@@ -463,18 +474,32 @@ class Server:
         if missing:
             raise RuntimeFault("invalid_arguments", f"Missing required argument(s): {', '.join(missing)}")
         errors = []
-        args = _coerce_fields(SCHEMAS[name]["properties"], args, "", errors)
+        properties = SCHEMAS[name]["properties"]
+        if name == "multi_search":
+            # Entries are fixed one by one below, so a bad one fails only itself.
+            properties = {**properties, "searches": {key: item for key, item in properties["searches"].items()
+                                                     if key != "items"}}
+        args = _coerce_fields(properties, args, "", errors)
         if errors:
             raise RuntimeFault("invalid_arguments", "Invalid argument value(s): " + "; ".join(errors) + ".")
         if name == "workspace": return self.cap.workspace(**args)
         if name == "filesystem": return self.cap.filesystem(**args)
         if name == "search": return self.cap.search(**args)
         if name == "multi_search":
-            searches = args.get("searches")
+            searches, invalid = args.get("searches"), {}
             if isinstance(searches, list):
-                args["searches"] = [self._apply_aliases("search", dict(s))
-                                    if isinstance(s, dict) else s for s in searches]
-            return self.cap.multi_search(**args)
+                entry = SCHEMAS["multi_search"]["properties"]["searches"]["items"]["properties"]
+                fixed = []
+                for index, spec in enumerate(searches):
+                    if isinstance(spec, dict):
+                        problems = []
+                        spec = _coerce_fields(entry, self._apply_aliases("search", dict(spec)),
+                                              f"searches[{index}].", problems)
+                        if problems:
+                            invalid[index] = "Invalid argument value(s): " + "; ".join(problems) + "."
+                    fixed.append(spec)
+                args["searches"] = fixed
+            return self.cap.multi_search(**args, invalid=invalid)
         if name == "batch": return self.batch(**args)
         if name == "git": return self.cap.git(**args)
         if name == "execute": return self.cap.execute(**args)
