@@ -18,6 +18,8 @@ STDIN_WRITE_TIMEOUT_SECONDS = 30
 # Output lines process wait returns by default, and at most.
 WAIT_TAIL_LINES = 40
 MAX_WAIT_TAIL_LINES = 1000
+# wait match marks kept per process (see Managed.marks).
+MAX_WAIT_MARKS = 32
 
 @dataclass
 class Chunk:
@@ -47,6 +49,9 @@ class Managed:
     job: object = None
     # Streams that lost output to the process_buffer_bytes cap.
     dropped: set = field(default_factory=set)
+    # wait matches: chunk seq -> offset in its text just past the
+    # matched line, so a wait from that cursor goes on from there.
+    marks: dict = field(default_factory=dict)
 
     def __post_init__(self):
         self.chunk_cond = threading.Condition(self.lock)
@@ -234,12 +239,16 @@ class ProcessManager:
         builds and test runs.
 
         pattern is a regex searched in each output line (either stream)
-        from the chunks after the after cursor; while the process runs,
-        only finished lines are matched, so a line still being written
-        cannot match half-way. Returns the status plus reason (matched,
-        exited, or timeout), the matched line (None without one), tail
-        (the last tail_lines lines of the kept output, both streams in
-        arrival order, within max_inline_output_bytes), and next_after.
+        that ends after the after cursor; a line the cursor cuts is
+        matched whole. While the process runs, only finished lines are
+        matched, so a line still being written cannot match half-way.
+        Returns the status plus reason (matched, exited, or timeout),
+        the matched line (None without one), tail (the last tail_lines
+        lines of the kept output, both streams in arrival order, within
+        max_inline_output_bytes), and next_after: after a match, the
+        chunk holding the matched line, and a wait from it goes on with
+        the line after the match (a read from it skips the rest of that
+        chunk, which tail shows); otherwise the newest chunk.
         """
         try:
             regex = re.compile(pattern) if pattern is not None else None
@@ -247,13 +256,21 @@ class ProcessManager:
             raise RuntimeFault("invalid_arguments", f"Invalid pattern: {e}") from e
         tail_lines = max(1, min(int(tail_lines), MAX_WAIT_TAIL_LINES))
         item = self._get(process_id)
+        after = int(after)
         deadline = time.monotonic() + min(max(int(wait_ms), 0), 60_000) / 1000
-        scanned, partial, matched, reason = int(after), {}, None, "timeout"
+        matched, reason, hit = None, "timeout", None
 
         def first_match(lines):
-            return next((line.rstrip("\r") for line in lines if regex.search(line.rstrip("\r"))), None)
+            return next((index for index, line in enumerate(lines) if regex.search(line.rstrip("\r"))), None)
 
         with item.lock:
+            # A cursor from a match goes on in its chunk, past the matched line.
+            skip = {after: item.marks[after]} if after in item.marks else {}
+            scanned = after - 1 if skip else after
+            partial = self._line_heads(item, scanned) if regex is not None and scanned > 0 else {}
+            for seq in skip:
+                # The text before the mark ends with the matched line.
+                partial.pop(next((c.stream for c in item.chunks if c.seq == seq), None), None)
             while True:
                 exited = item.proc.poll() is not None and not held(item)
                 if regex is not None:
@@ -261,15 +278,30 @@ class ProcessManager:
                         if chunk.seq <= scanned:
                             continue
                         scanned = chunk.seq
-                        *done, partial[chunk.stream] = (partial.get(chunk.stream, "") + chunk.text).split("\n")
-                        matched = first_match(done)
-                        if matched is not None:
+                        start = skip.get(chunk.seq, 0)
+                        head = partial.get(chunk.stream, "")
+                        *done, partial[chunk.stream] = (head + chunk.text[start:]).split("\n")
+                        index = first_match(done)
+                        if index is not None:
+                            matched = done[index].rstrip("\r")
+                            # Just past the matched line's "\n", in chunk.text.
+                            end = sum(len(line) + 1 for line in done[:index + 1]) - len(head) + start
+                            hit = (chunk.seq, end)
                             break
                     if matched is None and exited:
                         # Nothing more is coming: unfinished last lines count too.
-                        matched = first_match(line for line in partial.values() if line)
+                        for stream, line in partial.items():
+                            if line and regex.search(line.rstrip("\r")):
+                                matched = line.rstrip("\r")
+                                # Marked at its stream's last chunk, so it is not matched again.
+                                final = next((c for c in reversed(item.chunks)
+                                              if c.stream == stream and c.seq <= scanned), None)
+                                hit = (final.seq, len(final.text)) if final is not None else None
+                                break
                     if matched is not None:
                         reason = "matched"
+                        if hit is not None:
+                            self._mark(item, *hit)
                         break
                 if exited:
                     reason = "exited"
@@ -285,12 +317,39 @@ class ProcessManager:
         tail = "\n".join(text.split("\n")[-tail_lines:]) if text else ""
         raw = tail.encode("utf-8", "replace")
         cap = int(self.cfg.max_inline_output_bytes)
-        result = {**self.status(process_id), "reason": reason, "matched": matched, "next_after": last}
+        result = {**self.status(process_id), "reason": reason, "matched": matched,
+                  "next_after": hit[0] if hit is not None else last if reason != "matched" else scanned}
         if len(raw) > cap:
             tail = raw[len(raw) - cap:].decode("utf-8", "ignore")
             result["tail_truncated"] = True
         result["tail"] = tail
         return result
+
+    @staticmethod
+    def _line_heads(item, upto):
+        """Per stream, the start of the line still open at chunk upto: the
+        text after its last newline in the kept chunks up to upto."""
+        heads, closed = {}, set()
+        for chunk in reversed(item.chunks):
+            if chunk.seq > upto or chunk.stream in closed:
+                continue
+            cut = chunk.text.rfind("\n")
+            heads.setdefault(chunk.stream, []).append(chunk.text[cut + 1:])
+            if cut >= 0:
+                closed.add(chunk.stream)
+                if len(closed) == 2:
+                    break
+        return {stream: "".join(reversed(parts)) for stream, parts in heads.items()}
+
+    @staticmethod
+    def _mark(item, seq, offset):
+        # Only marks for kept chunks, and only the newest few.
+        oldest = item.chunks[0].seq if item.chunks else item.next_seq
+        for key in [k for k in item.marks if k < oldest]:
+            del item.marks[key]
+        item.marks[seq] = offset
+        while len(item.marks) > MAX_WAIT_MARKS:
+            del item.marks[min(item.marks)]
 
     def write(self, process_id, text, append_newline=True):
         item = self._get(process_id)

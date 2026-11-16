@@ -121,6 +121,43 @@ def test_process_wait_for_exit_pattern_or_timeout(tmp_path):
     assert exc.value.code == "invalid_arguments"
     server.processes.stop(serve, True)
 
+def test_process_wait_resumes_after_the_matched_line(tmp_path):
+    server = make(tmp_path)
+    # Both lines in one write, so most likely in one chunk.
+    pid = server.call("process", {"action": "start", "command": [sys.executable, "-c", (
+        "import sys, time; sys.stdout.write('Compiled\\nTests passed\\n'); sys.stdout.flush(); time.sleep(30)")]})["process_id"]
+    try:
+        first = server.call("process", {"action": "wait", "process_id": pid, "pattern": "Compiled", "wait_ms": 20000})
+        assert first["reason"] == "matched" and first["matched"] == "Compiled", first
+        second = server.call("process", {"action": "wait", "process_id": pid, "pattern": "Tests passed",
+                                         "after": first["next_after"], "wait_ms": 3000})
+        assert second["reason"] == "matched" and second["matched"] == "Tests passed", second
+        # A matched line is not matched again from its cursor.
+        again = server.call("process", {"action": "wait", "process_id": pid, "pattern": "Compiled|Tests",
+                                        "after": second["next_after"], "wait_ms": 500})
+        assert again["reason"] == "timeout", again
+    finally:
+        server.processes.stop(pid, True)
+
+def test_process_wait_matches_a_line_the_cursor_cuts_as_a_whole(tmp_path):
+    server = make(tmp_path)
+    pid = server.call("process", {"action": "start", "command": [sys.executable, "-c", (
+        "import sys, time; sys.stdout.write('abc'); sys.stdout.flush(); time.sleep(1); "
+        "sys.stdout.write('ERROR-def\\n'); sys.stdout.flush(); time.sleep(30)")]})["process_id"]
+    try:
+        read = server.processes.read(pid, wait_ms=10000)
+        assert read["stdout"] == "abc", read
+        # The cursor sits inside the line "abcERROR-def": it is matched
+        # whole, so the fragment after the cursor is not a line start.
+        cut = server.call("process", {"action": "wait", "process_id": pid, "pattern": "^ERROR",
+                                      "after": read["next_after"], "wait_ms": 3000})
+        assert cut["reason"] == "timeout", cut
+        whole = server.call("process", {"action": "wait", "process_id": pid, "pattern": "^abcERROR-def$",
+                                        "after": read["next_after"], "wait_ms": 3000})
+        assert whole["reason"] == "matched" and whole["matched"] == "abcERROR-def", whole
+    finally:
+        server.processes.stop(pid, True)
+
 @pytest.mark.parametrize("engine", ["ripgrep", "python"])
 def test_long_lines_are_cut_in_reads_and_search(tmp_path, monkeypatch, engine):
     if engine == "python":
