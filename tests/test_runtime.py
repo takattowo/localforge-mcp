@@ -172,6 +172,8 @@ def test_long_lines_are_cut_in_reads_and_search(tmp_path, monkeypatch, engine):
     for path in ("min.js", "."):
         matches = server.cap.search("needle", path=path, context_lines=1)["results"][0]["matches"]
         assert matches[1]["text"] == cut and matches[0]["after"] == ["2\t" + cut]
+    # A tail read keeps only the cut head of each long line.
+    assert server.cap.filesystem("read", "min.js", line_start=-2)["content"].split("\n") == ["2\t" + cut, "3\tend"]
 
 def test_search_timeout_says_what_to_do(tmp_path, monkeypatch):
     if shutil.which("rg") is None:
@@ -205,6 +207,14 @@ def test_read_lines_negative_start_reads_from_the_end(tmp_path):
     small = make(tmp_path, max_read_chars=64).cap.filesystem("read", "f.txt", line_start=-50)
     assert small["truncated"] and small["content"].endswith("200\trow 200") and len(small["content"]) <= 64
     assert small["line_start"] > 151 and "note" in small
+    # An empty file has no lines to number, and a file that is only a BOM is empty.
+    (tmp_path / "empty.txt").write_bytes(b"")
+    (tmp_path / "bom.txt").write_bytes(b"\xef\xbb\xbf")
+    for name in ("empty.txt", "bom.txt"):
+        tail = server.cap.filesystem("read", name, line_start=-5)
+        assert (tail["content"], tail["line_start"], tail["line_end"], tail["total_lines"]) == ("", 0, 0, 0), tail
+        head = server.cap.filesystem("read", name, line_start=1)
+        assert head["content"] == "" and head["total_lines"] == 0, head
 
 def test_utf8_bom_is_hidden_and_kept(tmp_path):
     server = make(tmp_path)
@@ -287,6 +297,7 @@ def test_missing_relative_path_is_retried_from_the_git_root(tmp_path):
     with pytest.raises(RuntimeFault) as exc:
         server.cap.filesystem("replace_text", "src/app.py", old_text="needle", new_text="pin")
     assert exc.value.code == "path_not_found" and "Git root" in exc.value.message and "app.py" in exc.value.message
+    assert "writes, deletes and moves are not retried" in exc.value.message
     assert (tmp_path / "src" / "app.py").read_text() == "needle\n"
     # The same path policy applies from the Git root.
     denied = make(tmp_path, denied_paths=[str(tmp_path / "src")])
@@ -391,6 +402,20 @@ def test_search_retries_lookaround_with_pcre2(tmp_path):
         assert out["match_count"] == 1 and "--pcre2" in out["note"] and "error" not in out
     # A regex that is wrong either way still reports ripgrep's error.
     assert "error" in server.cap.search("foo(", fixed_string=False)
+
+def test_pcre2_retry_is_kept_despite_per_file_errors(tmp_path, monkeypatch):
+    server = make(tmp_path)
+    first = subprocess.CompletedProcess([], 2, "", "regex parse error:\n    foo(?=bar)\nerror: look-around, including look-ahead and look-behind, is not supported\n\nConsider enabling PCRE2 with the --pcre2 flag, which can handle backreferences\nand look-around.\n")
+    replies = {}
+    monkeypatch.setattr(server.cap, "_run_rg", lambda command, cwd=None: replies["pcre2"] if "--pcre2" in command else first)
+    # Exit 2 for a locked file, but the regex ran: keep the retry.
+    replies["pcre2"] = subprocess.CompletedProcess([], 2, "{}\n", "rg: ./locked.txt: Access is denied. (os error 5)\n")
+    notes = []
+    assert server.cap._run_rg_regex(["rg", "-e", "foo(?=bar)", "."], notes) is replies["pcre2"] and "--pcre2" in notes[0]
+    # A ripgrep built without PCRE2: the first error stays, with a note.
+    replies["pcre2"] = subprocess.CompletedProcess([], 2, "", "PCRE2 is not available in this build of ripgrep.\n")
+    notes = []
+    assert server.cap._run_rg_regex(["rg", "-e", "foo(?=bar)", "."], notes) is first and "PCRE2 unavailable" in notes[0]
 
 def test_search_fallback_and_git(tmp_path, monkeypatch):
     server = make(tmp_path)
@@ -687,6 +712,16 @@ def test_bad_argument_types_are_reported_together(tmp_path):
     # Past Python's 4300-digit int limit: an argument error, not internal_error.
     assert exc.value.code == "invalid_arguments" and "limit: expected an integer" in exc.value.message
     assert (tmp_path / "d" / "keep.txt").exists()
+
+def test_patch_placement_stays_fast_on_repetitive_files(tmp_path):
+    server = make(tmp_path)
+    (tmp_path / "r.txt").write_text("x\n" * 200_000)
+    # 299 lines that match everywhere, then one that matches nowhere.
+    hunk = " x\n" * 299 + "-z\n+y\n"
+    started = time.monotonic()
+    with pytest.raises(RuntimeFault) as exc:
+        server.cap.filesystem("apply_patch", ".", patch="--- a/r.txt\n+++ b/r.txt\n@@ -1,300 +1,300 @@\n" + hunk)
+    assert exc.value.code == "content_mismatch" and time.monotonic() - started < 3
 
 def test_apply_patch_modify_and_create(tmp_path):
     server = make(tmp_path)

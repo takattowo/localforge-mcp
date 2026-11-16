@@ -806,7 +806,8 @@ class Capabilities:
             if found is not None and retry:
                 return found, f"{path} is not in the cwd ({cwd}); used {found}, relative to the Git root."
             if found is not None:
-                e.message += f"\nRelative to the Git root it is {found}; pass that path (edits are not retried there)."
+                e.message += (f"\nRelative to the Git root it is {found}; writes, deletes and moves are not "
+                              "retried there, so check it is the file you mean before passing that path.")
             else:
                 e.message += self._missing_hint(path)
             e.args = (e.message,)
@@ -1326,6 +1327,10 @@ class Capabilities:
                     n += 1
                     if n == 1:
                         line, _ = _split_bom(line)
+                        if not line:
+                            # Only a byte order mark: no lines at all.
+                            n = 0
+                            break
                     length, piece = len(line), line
                     if not line.endswith("\n"):
                         # Over-long line: skip the rest without
@@ -1336,7 +1341,9 @@ class Capabilities:
                                 break
                     length -= len(piece) - len(piece.rstrip("\r\n"))
                     if n < start:
-                        skipped.append((n, line, length))
+                        # Only what a numbered line shows: a tail read keeps
+                        # up to MAX_READ_LINES of these.
+                        skipped.append((n, line.rstrip("\r\n")[:MAX_LINE_CHARS], length))
                         continue
                     text = _numbered(n, line.rstrip("\r\n"), length, budget)
                     if out and (len(out) >= MAX_READ_LINES or used + len(text) + 1 > budget):
@@ -1360,13 +1367,13 @@ class Capabilities:
                 used += len(text) + 1
             if tail:
                 wanted = min(tail, n)
-                result = {"path": str(target), "content": "\n".join(out), "line_start": n - len(out) + 1,
+                result = {"path": str(target), "content": "\n".join(out), "line_start": n - len(out) + 1 if n else 0,
                           "line_end": n, "truncated": len(out) < wanted, "total_lines": n}
                 if result["truncated"]:
                     result["note"] = f"Only the last {len(out)} of the {wanted} lines asked for fit in max_read_chars."
                 return result
             return {"path": str(target), "content": "\n".join(out),
-                    "line_start": n - len(out) + 1, "line_end": n, "truncated": False, "total_lines": n,
+                    "line_start": n - len(out) + 1 if n else 0, "line_end": n, "truncated": False, "total_lines": n,
                     "note": f"line_start {start} is past the end; the file has {n} lines."
                             + (f" Showing its last {len(out)}." if out else "")}
         result = {"path": str(target), "content": "\n".join(out), "line_start": start,
@@ -1580,7 +1587,12 @@ class Capabilities:
         result = self._run_rg(command, cwd=cwd)
         if result.returncode == 2 and "--pcre2" in (result.stderr or "") and "-F" not in command:
             retry = self._run_rg([command[0], "--pcre2", *command[1:]], cwd=cwd)
-            if retry.returncode in (0, 1):
+            err = retry.stderr or ""
+            if "pcre2 is not available" in err.lower():
+                out_note.append("The regex needs look-around or backreferences, but this ripgrep build has no "
+                                "PCRE2 (PCRE2 unavailable); rewrite it without them.")
+            # Exit 2 without a regex error: the search ran, some files could not be read.
+            elif retry.returncode in (0, 1) or not any(mark in err for mark in ("regex parse error", "PCRE2:")):
                 out_note.append("The regex needs look-around or backreferences, so it ran with ripgrep's --pcre2.")
                 return retry
         return result

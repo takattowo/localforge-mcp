@@ -1,4 +1,5 @@
 from __future__ import annotations
+import bisect
 from dataclasses import dataclass, field
 import re
 from .errors import RuntimeFault
@@ -166,13 +167,46 @@ def _body(line):
     return body[:-1] if body.endswith("\r") else body
 
 
-def _place(lines, hunk, cursor, rel):
+def _view(lines):
+    """The lines' bodies as one string, each ended by "\\n", and where
+    each line starts in it."""
+    starts, offset = [], 0
+    bodies = [_body(line) for line in lines]
+    for body in bodies:
+        starts.append(offset)
+        offset += len(body) + 1
+    return "".join(body + "\n" for body in bodies), starts
+
+
+def _matches(view, old, cursor, last):
+    """Indexes in cursor..last where the lines old start, in order.
+
+    str.find compares, so a long run of equal lines costs about the
+    text it scans instead of lines times hunk size.
+    """
+    text, starts = view
+    found = []
+    if cursor > last:
+        return found
+    needle = "".join(line + "\n" for line in old)
+    at = text.find(needle, starts[cursor])
+    while at >= 0:
+        index = bisect.bisect_left(starts, at)
+        if index > last:
+            break
+        if starts[index] == at:
+            found.append(index)
+        at = text.find(needle, at + 1)
+    return found
+
+
+def _place(lines, hunk, cursor, rel, view=None):
     """Index where a hunk's old lines start, found by content.
 
-    Tries the line the header states first, then searches outward for
-    the nearest index, at or after cursor (the end of the previous
-    hunk), where the old lines match exactly. Two equally near matches
-    are refused, naming both lines.
+    Takes the line the header states when they match there, else the
+    nearest index, at or after cursor (the end of the previous hunk),
+    where the old lines match exactly. Two equally near matches are
+    refused, naming both lines. view is _view(lines), when known.
     """
     old = [text for op, text in zip(hunk.ops, hunk.texts) if op != "+"]
     # A zero-length old range (-N,0) inserts after line N, so it
@@ -184,18 +218,15 @@ def _place(lines, hunk, cursor, rel):
                                f"Patch hunk out of order in {rel}: {hunk.header}")
         return stated
     last = len(lines) - len(old)
-
-    def fits(at):
-        return cursor <= at <= last and all(_body(lines[at + k]) == want for k, want in enumerate(old))
-
-    for distance in range(max(abs(stated - cursor), abs(last - stated)) + 1):
-        found = [at for at in dict.fromkeys((stated - distance, stated + distance)) if fits(at)]
+    found = _matches(view or _view(lines), old, cursor, last)
+    if found:
+        nearest = min(abs(at - stated) for at in found)
+        found = [at for at in found if abs(at - stated) == nearest]
         if len(found) > 1:
             raise RuntimeFault("content_mismatch",
                                f"Patch hunk is ambiguous in {rel}: {hunk.header} matches equally well "
                                f"at lines {found[0] + 1} and {found[1] + 1}; add context lines to pick one")
-        if found:
-            return found[0]
+        return found[0]
     if stated < cursor:
         raise RuntimeFault("content_mismatch",
                            f"Patch hunk out of order in {rel}: {hunk.header} (its lines are not found "
@@ -244,8 +275,9 @@ def build_new(original, filepatch, rel, eol=None, bom=False):
         out.append(line)
 
     cursor = 0
+    view = _view(lines)
     for hunk in filepatch.hunks:
-        start = _place(lines, hunk, cursor, rel)
+        start = _place(lines, hunk, cursor, rel, view)
         for line in lines[cursor:start]:
             emit(line)
         cursor = start
