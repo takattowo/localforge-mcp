@@ -5,7 +5,7 @@
   "allowed_write_roots": ["C:\\Projects\\MyApp"],
   "denied_paths": ["C:\\Projects\\MyApp\\.git\\hooks"],
   "network": "unrestricted",
-  "default_shell": "powershell",
+  "default_shell": "auto",
   "default_timeout_seconds": 600,
   "max_capture_bytes": 1000000,
   "max_file_read_bytes": 1000000,

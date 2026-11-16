@@ -1,9 +1,11 @@
 from __future__ import annotations
 from pathlib import Path
 import fnmatch
+import functools
 import json
 import os
 import re
+import shutil
 from .errors import RuntimeFault
 
 def _looks_like_argv(text):
@@ -137,6 +139,39 @@ def _powershell_script(command):
         return command
     return POWERSHELL_PRELUDE + command
 
+@functools.lru_cache(maxsize=None)
+def find_pwsh():
+    """Path to PowerShell 7+ (pwsh.exe), or None when it is not installed.
+
+    Checks PATH, then the MSI and Store/winget install locations: a
+    host started before pwsh was installed still has its old PATH.
+    Cached; restart the server to pick up a new install.
+    """
+    found = shutil.which("pwsh")
+    if found:
+        return found
+    if os.name != "nt":
+        return None
+    candidates = [Path(base) / "PowerShell" / "7" / "pwsh.exe"
+                  for base in (os.environ.get("ProgramFiles"), os.environ.get("ProgramW6432")) if base]
+    if os.environ.get("LOCALAPPDATA"):
+        candidates.append(Path(os.environ["LOCALAPPDATA"]) / "Microsoft" / "WindowsApps" / "pwsh.exe")
+    return next((str(c) for c in candidates if c.exists()), None)
+
+
+def resolve_shell(name):
+    """Turn default_shell "auto" into a concrete shell; other names pass through.
+
+    auto picks pwsh when installed (it has && and ||, UTF-8 output, and
+    no curl/wget aliases), else Windows PowerShell 5.1, or sh off Windows.
+    """
+    if str(name).lower() != "auto":
+        return name
+    if find_pwsh():
+        return "pwsh"
+    return "powershell" if os.name == "nt" else "sh"
+
+
 def command_for_spawn(cfg, command, shell):
     if not shell:
         return command
@@ -145,7 +180,7 @@ def command_for_spawn(cfg, command, shell):
         executable = "powershell.exe" if os.name == "nt" else "pwsh"
         return [executable, "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", _powershell_script(command)]
     if kind == "pwsh":
-        return ["pwsh", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command]
+        return [find_pwsh() or "pwsh", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", command]
     if kind == "cmd":
         return [os.environ.get("COMSPEC", "cmd.exe"), "/D", "/S", "/C", command]
     if kind == "sh":

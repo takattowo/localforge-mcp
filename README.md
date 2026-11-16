@@ -263,7 +263,7 @@ String commands automatically use the configured shell:
 
 Pass `shell` explicitly only to force array commands through the shell. Argument arrays bypass shell parsing and stay preferred.
 
-Windows PowerShell 5.1 has no `&&` or `||`; chain with `;` or make separate calls (a failed `&&` command gets a `hint`). With `default_shell: "powershell"`, a command that mentions `curl` or `wget` has those aliases removed first, so `curl` is the real `curl.exe`; other commands run as written.
+With `default_shell: "auto"` (the default), string commands run in PowerShell 7 (`pwsh`) when it is installed, which has `&&` and `||`; install it with `winget install --id Microsoft.PowerShell --source winget`. Windows PowerShell 5.1 has no `&&` or `||`; chain with `;` or make separate calls (a failed `&&` command gets a `hint`). With `default_shell: "powershell"`, a command that mentions `curl` or `wget` has those aliases removed first, so `curl` is the real `curl.exe`; other commands run as written.
 
 Each stream returns at most `max_inline_output_bytes`, head and tail. When output is cut, the whole of it (up to `max_capture_bytes`) is saved and its path returned as `stdout_path`/`stderr_path`; read it with `filesystem read` or `search`.
 
@@ -314,6 +314,7 @@ This is command classification, not packet filtering. Use Windows Firewall, a co
 
 Supported `default_shell` values:
 
+- `auto` (default): `pwsh` when PowerShell 7 is installed (found on `PATH` or in its MSI or Store/winget install folder), otherwise `powershell` (Windows PowerShell 5.1), or `sh` off Windows. Resolved once at startup; restart the server after installing PowerShell 7.
 - `powershell`
 - `pwsh`
 - `cmd`

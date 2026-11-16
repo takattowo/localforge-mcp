@@ -3,6 +3,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 import json
 import os
+from .security import resolve_shell
 
 MODES = {"READ_ONLY", "WORKSPACE", "DEVELOPMENT", "FULL_ACCESS"}
 NETWORK_MODES = {"disabled", "unrestricted"}
@@ -15,7 +16,9 @@ class Config:
     allowed_write_roots: list[str] = field(default_factory=list)
     denied_paths: list[str] = field(default_factory=list)
     network: str = "unrestricted"
-    default_shell: str = "powershell"
+    # "auto" becomes pwsh when PowerShell 7 is installed, else
+    # powershell (Windows PowerShell 5.1), or sh off Windows.
+    default_shell: str = "auto"
     default_timeout_seconds: int = 600
     max_capture_bytes: int = 1_000_000
     max_file_read_bytes: int = 1_000_000
@@ -51,6 +54,10 @@ class Config:
     # Agent rule files workspace get returns from the Git root and cwd.
     project_instruction_files: list[str] = field(default_factory=lambda: ["AGENTS.md", "CLAUDE.md"])
     max_project_instruction_bytes: int = 8_000
+
+    def __post_init__(self):
+        # Resolved once, so the rest of the server only sees real shells.
+        self.default_shell = resolve_shell(self.default_shell)
 
     @classmethod
     def load(cls, path: str | None = None) -> "Config":

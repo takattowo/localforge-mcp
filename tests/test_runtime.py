@@ -1543,6 +1543,62 @@ def test_windows_powershell_curl_and_and_hint(tmp_path):
     assert "At line:1" in server.cap.execute("throw 'x'")["stderr"]
 
 
+def test_auto_shell_picks_pwsh_when_installed(tmp_path, monkeypatch):
+    import agent_runtime.security as sec
+    monkeypatch.setattr(sec, "find_pwsh", lambda: "C:/fake/pwsh.exe")
+    cfg = Config(str(tmp_path), spill_dir=str(tmp_path / "spill"))
+    assert cfg.default_shell == "pwsh"
+    assert sec.command_for_spawn(cfg, "echo a", True)[0] == "C:/fake/pwsh.exe"
+    execute = {t["name"]: t["description"] for t in Server(cfg).tools()}["execute"]
+    assert "PowerShell 7" in execute and "5.1" not in execute
+    # Explicit shells are kept; auto is case-insensitive and also works from a file.
+    assert Config(str(tmp_path), default_shell="cmd").default_shell == "cmd"
+    path = tmp_path / "lf.json"
+    path.write_text(json.dumps({"workspace_root": str(tmp_path), "default_shell": "Auto"}))
+    assert Config.load(str(path)).default_shell == "pwsh"
+    monkeypatch.setattr(sec, "find_pwsh", lambda: None)
+    assert Config(str(tmp_path)).default_shell == ("powershell" if os.name == "nt" else "sh")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows install locations")
+def test_find_pwsh_checks_install_folders(tmp_path, monkeypatch):
+    import agent_runtime.security as sec
+    monkeypatch.setattr(sec.shutil, "which", lambda name: None)
+    monkeypatch.setenv("ProgramFiles", str(tmp_path / "pf"))
+    monkeypatch.delenv("ProgramW6432", raising=False)
+    monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local"))
+    msi = tmp_path / "pf" / "PowerShell" / "7" / "pwsh.exe"
+    store = tmp_path / "local" / "Microsoft" / "WindowsApps" / "pwsh.exe"
+    try:
+        sec.find_pwsh.cache_clear()
+        assert sec.find_pwsh() is None
+        for exe in (store, msi):
+            exe.parent.mkdir(parents=True)
+            exe.write_text("")
+        sec.find_pwsh.cache_clear()
+        assert sec.find_pwsh() == str(msi)
+        msi.unlink()
+        sec.find_pwsh.cache_clear()
+        assert sec.find_pwsh() == str(store)
+    finally:
+        sec.find_pwsh.cache_clear()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows only")
+def test_pwsh_string_commands_support_and_and(tmp_path):
+    import agent_runtime.security as sec
+    if not sec.find_pwsh():
+        pytest.skip("PowerShell 7 not installed")
+    server = make(tmp_path)
+    server.cfg.default_shell = "pwsh"
+    # make() inherits only PATH; pwsh needs the default set to start.
+    server.cfg.inherit_environment = Config(str(tmp_path)).inherit_environment
+    ran = server.cap.execute("echo a && echo b")
+    assert ran["success"] and ran["stdout"].split() == ["a", "b"] and "hint" not in ran
+    curl = server.cap.execute("(Get-Command curl).CommandType")
+    assert curl["stdout"].strip() == "Application"
+
+
 def test_result_with_lone_surrogate_still_fits(tmp_path):
     server = make(tmp_path, max_result_bytes=800)
     value = {"name": "bad\udc80name", "pad": "p" * 2000}

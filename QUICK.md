@@ -28,7 +28,7 @@ NEVER edit files by shelling out. Do not use `execute`, `process`, or any code-e
 - `search` for content (query, glob, context_lines) or filenames (files_only=true).
 
 ## Commands
-- Prefer argv arrays: {"command": ["npm", "test"]}. A string command runs through Windows PowerShell 5.1 — fine for one-liners, but there is no `&&`/`||` (chain with `;` or make separate calls) and avoid complex quoting.
+- Prefer argv arrays: {"command": ["npm", "test"]}. A string command runs through the configured shell (by default PowerShell 7 when installed, else Windows PowerShell 5.1; the `execute` description names which) — fine for one-liners; on 5.1 there is no `&&`/`||` (chain with `;` or make separate calls); avoid complex quoting.
 - Complex scripts: write the script with `filesystem` action `write`, then run it by path (python script.py, powershell -ExecutionPolicy Bypass -File script.ps1).
 - Long waits: `process` action `start` + `read` with wait_ms and after/next_after polling (output arrives as stdout/stderr strings). Do not use long `execute` timeouts — they block the server and risk gateway timeouts.
 
