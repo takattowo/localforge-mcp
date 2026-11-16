@@ -1913,3 +1913,39 @@ def test_edit_miss_hints_multi_edit_and_repeated_matches(tmp_path):
     with pytest.raises(RuntimeFault) as capped:
         server.cap.filesystem("multi_edit", "s.txt", edits=[{"old_text": "x", "new_text": "X"}])
     assert "lines 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, ..." in capped.value.message
+
+
+def test_missing_path_suggests_similar_names(tmp_path):
+    server = make(tmp_path, denied_paths=[str(tmp_path / "src" / "secret.py")])
+    (tmp_path / "src").mkdir()
+    for name in ("config.py", "Config.json", "settings.py", "app.py", "secret.py", "zz.txt"):
+        (tmp_path / "src" / name).write_text("x")
+    with pytest.raises(RuntimeFault) as typo:
+        server.cap.filesystem("read", "src/confg.py")
+    assert typo.value.code == "path_not_found"
+    shown = typo.value.message.split("Did you mean one of these?\n")[1].split("\n")
+    assert shown == [os.path.join("src", "config.py"), os.path.join("src", "Config.json")]
+    # Same stem with another extension; every action that needs the path.
+    calls = {"read": {}, "stat": {}, "list": {}, "delete": {}, "move": {"destination": "m.py"},
+             "copy": {"destination": "c.py"}, "replace_text": {"old_text": "a", "new_text": "b"},
+             "multi_edit": {"edits": [{"old_text": "a", "new_text": "b"}]}}
+    for action, extra in calls.items():
+        with pytest.raises(RuntimeFault) as exc:
+            server.cap.filesystem(action, "src/app.js", **extra)
+        assert exc.value.code == "path_not_found" and os.path.join("src", "app.py") in exc.value.message, action
+    # Denied paths are never suggested.
+    with pytest.raises(RuntimeFault) as denied:
+        server.cap.filesystem("read", "src/secrt.py")
+    assert "secret.py" not in denied.value.message and "Did you mean" not in denied.value.message
+    # A missing folder: name it, its nearest existing parent, and similar names there.
+    with pytest.raises(RuntimeFault) as folder:
+        server.cap.filesystem("read", "srcx/deep/a.py")
+    message = folder.value.message
+    root = tmp_path.resolve()
+    assert str(root / "srcx") in message and f"nearest folder that does is {root}" in message
+    assert str(root / "src") + "\n" in message + "\n"
+    # Nothing outside the read roots is listed or named.
+    with pytest.raises(RuntimeFault) as outside:
+        server.cap.filesystem("read", str(tmp_path.parent / "nope-lf" / "x.txt"))
+    assert outside.value.code == "path_not_found" and "nearest" not in outside.value.message
+    assert "Did you mean" not in outside.value.message

@@ -354,6 +354,61 @@ def _miss_hint(view, old, new, found, expected):
         shown.append(f"{number + 1}\t{line}")
     return "\nClosest lines in the file (N<TAB>line):\n" + "\n".join(shown)
 
+
+# Entries of one folder read for path suggestions; folders can be huge.
+SUGGEST_SCAN_LIMIT = 10_000
+SUGGEST_MAX = 3
+
+
+def _stem(name):
+    return os.path.splitext(name)[0] or name
+
+
+def _edit_distance(a, b):
+    previous = list(range(len(b) + 1))
+    for i, ca in enumerate(a, 1):
+        current = [i]
+        for j, cb in enumerate(b, 1):
+            current.append(min(previous[j] + 1, current[j - 1] + 1, previous[j - 1] + (ca != cb)))
+        previous = current
+    return previous[-1]
+
+
+def _similar(names, requested):
+    """Names in a folder that look like a missing one, best first.
+
+    Ranked like CLI agents do: the same name ignoring case, then the
+    same stem with another extension, then one name containing the
+    other (3+ characters), then a typo in the stem (edit distance 1 for
+    stems under 5 characters, 2 above, none under 3).
+    """
+    name = requested.lower()
+    wanted = _stem(name)
+    typos = 0 if len(wanted) < 3 else 1 if len(wanted) < 5 else 2
+    ranked = []
+    for entry in names:
+        if entry == requested:
+            continue
+        candidate = entry.lower()
+        found = _stem(candidate)
+        if candidate == name:
+            rank = 1
+        elif found == wanted:
+            rank = 2
+        elif min(len(found), len(wanted)) >= 3 and (name in candidate or candidate in name
+                                                    or wanted in found or found in wanted):
+            rank = 3
+        elif typos and abs(len(found) - len(wanted)) <= typos and _edit_distance(found, wanted) <= typos:
+            rank = 4
+        else:
+            continue
+        ranked.append((rank, _edit_distance(candidate, name), entry))
+    return [entry for _, _, entry in sorted(ranked)]
+
+
+def _did_you_mean(paths):
+    return "\nDid you mean one of these?\n" + "\n".join(paths) if paths else ""
+
 class Capabilities:
     def __init__(self, cfg, paths, policy, processes, store=None):
         self.cfg, self.paths, self.policy, self.processes = cfg, paths, policy, processes
@@ -523,6 +578,57 @@ class Capabilities:
                                f"max_file_read_bytes ({self.cfg.max_file_read_bytes}). "
                                "Raise the limit in the config for large files.")
 
+    def _resolve_existing(self, path, access):
+        """Resolve a path that must exist; a miss suggests similar names."""
+        try:
+            return self.paths.resolve(path, cwd=self.cwd, access=access, must_exist=True)
+        except RuntimeFault as e:
+            if e.code == "path_not_found":
+                e.message += self._missing_hint(path)
+                e.args = (e.message,)
+            raise
+
+    def _missing_hint(self, path):
+        """"Did you mean" text for a missing path, or "".
+
+        When the parent folder exists, up to SUGGEST_MAX similar entries
+        in it; otherwise the first missing folder, the nearest existing
+        parent, and similar names there. Only folders and entries the
+        read policy allows are listed or named.
+        """
+        def readable(candidate):
+            try:
+                self.paths.resolve(candidate, access="read", must_exist=True)
+                return True
+            except RuntimeFault:
+                return False
+
+        def similar(folder, name, show):
+            try:
+                with os.scandir(folder) as entries:
+                    names = [entry.name for _, entry in zip(range(SUGGEST_SCAN_LIMIT), entries)]
+            except OSError:
+                return []
+            found = [n for n in _similar(names, name) if readable(folder / n)]
+            return [show(n) for n in found[:SUGGEST_MAX]]
+
+        try:
+            target = self.paths._canonical(path or ".", self.cwd)
+        except RuntimeFault:
+            return ""
+        child, parent = target, target.parent
+        while not parent.exists():
+            if parent.parent == parent:
+                return ""
+            child, parent = parent, parent.parent
+        if not parent.is_dir() or not readable(parent):
+            return ""
+        if child == target:
+            base = os.path.dirname(str(path))
+            return _did_you_mean(similar(parent, target.name, lambda n: os.path.join(base, n)))
+        return (f"\nThe folder {child} does not exist; the nearest folder that does is {parent}."
+                + _did_you_mean(similar(parent, child.name, lambda n: str(parent / n))))
+
     def filesystem(self, action, path=".", content=None, destination=None, recursive=False,
                    encoding="utf-8", offset=0, max_bytes=None, expected_occurrences=None,
                    old_text=None, new_text=None, edits=None, line_start=None, line_end=None,
@@ -530,7 +636,7 @@ class Capabilities:
         if action == "copy":
             if not destination:
                 raise RuntimeFault("invalid_arguments", "copy requires destination")
-            src = self.paths.resolve(path, cwd=self.cwd, access="read", must_exist=True)
+            src = self._resolve_existing(path, "read")
             dest = self.paths.resolve(destination, cwd=self.cwd, access="write", must_exist=False)
             self.policy.authorize_path("copy")
             with self._locked_paths([src, dest]):
@@ -553,7 +659,10 @@ class Capabilities:
             raise RuntimeFault("not_file", f"Not a file or directory: {src}")
         access = "read" if action in {"read", "list", "stat"} else "write"
         must_exist = action not in {"write", "mkdir"}
-        target = self.paths.resolve(path, cwd=self.cwd, access=access, must_exist=must_exist)
+        if must_exist:
+            target = self._resolve_existing(path, access)
+        else:
+            target = self.paths.resolve(path, cwd=self.cwd, access=access, must_exist=False)
         self.policy.authorize_path(action)
         if action == "read":
             if not target.is_file():
