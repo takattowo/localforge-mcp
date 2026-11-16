@@ -1474,3 +1474,25 @@ def test_config_rejects_bad_edit_checks(tmp_path):
     path.write_text(json.dumps({"workspace_root": str(tmp_path), "edit_checks": {"*.py": "python"}}))
     with pytest.raises(ValueError):
         Config.load(str(path))
+
+
+def test_workspace_get_returns_project_instructions(tmp_path):
+    if shutil.which("git") is None:
+        pytest.skip("git unavailable")
+    server = make(tmp_path)
+    assert "project_instructions" not in server.cap.workspace("get")
+    server.cap.execute(["git", "init"])
+    (tmp_path / "AGENTS.md").write_text("root rules")
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "CLAUDE.md").write_text("sub rules")
+    found = server.cap.workspace("set_cwd", "sub")["project_instructions"]
+    assert [(Path(f["path"]).name, f["content"]) for f in found] == [("AGENTS.md", "root rules"), ("CLAUDE.md", "sub rules")]
+    # One shared byte budget across files.
+    small = make(tmp_path, max_project_instruction_bytes=4)
+    small.cap.workspace("set_cwd", "sub")
+    cut = small.cap.workspace("get")["project_instructions"]
+    assert cut == [{"path": str((tmp_path / "AGENTS.md").resolve()), "content": "root", "truncated": True}]
+    denied = make(tmp_path, denied_paths=[str(tmp_path / "AGENTS.md")])
+    assert "project_instructions" not in denied.cap.workspace("get")
+    off = make(tmp_path, project_instruction_files=[])
+    assert "project_instructions" not in off.cap.workspace("get")

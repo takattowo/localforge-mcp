@@ -335,8 +335,45 @@ class Capabilities:
         raise RuntimeFault("invalid_action", "workspace action must be get or set_cwd")
 
     def _workspace_info(self):
-        return {"workspace_root": str(self.paths.workspace), "cwd": str(self.cwd),
+        info = {"workspace_root": str(self.paths.workspace), "cwd": str(self.cwd),
                 "repository_root": self._git_root(self.cwd)}
+        instructions = self._project_instructions(info["repository_root"], self.cwd)
+        if instructions:
+            info["project_instructions"] = instructions
+        return info
+
+    def _project_instructions(self, repo_root, cwd):
+        """Read agent rule files (AGENTS.md, CLAUDE.md) like CLI agents do.
+
+        Looks in the Git root, then the cwd when it differs. All files
+        share one max_project_instruction_bytes budget; a file the
+        policy denies or that cannot be read is skipped.
+        """
+        folders = []
+        for folder in (repo_root, str(cwd)):
+            if folder and Path(folder).resolve() not in folders:
+                folders.append(Path(folder).resolve())
+        budget = int(self.cfg.max_project_instruction_bytes)
+        found = []
+        for folder in folders:
+            for name in self.cfg.project_instruction_files:
+                if budget <= 0:
+                    return found
+                try:
+                    target = self.paths.resolve(folder / name, access="read", must_exist=True)
+                    if not target.is_file():
+                        continue
+                    with target.open("rb") as handle:
+                        raw = handle.read(budget + 1)
+                except (RuntimeFault, OSError):
+                    continue
+                content, cut = _clip(raw.decode("utf-8", "replace"), budget)
+                budget -= len(content.encode("utf-8"))
+                entry = {"path": str(target), "content": content}
+                if cut:
+                    entry["truncated"] = True
+                found.append(entry)
+        return found
 
     def _git_root(self, cwd):
         # rev-parse costs a process spawn; cache the answer per

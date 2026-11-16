@@ -48,6 +48,9 @@ class Config:
     # matching file; "{path}" becomes the edited file's path.
     edit_checks: dict[str, list[str]] = field(default_factory=dict)
     edit_check_timeout_seconds: int = 30
+    # Agent rule files workspace get returns from the Git root and cwd.
+    project_instruction_files: list[str] = field(default_factory=lambda: ["AGENTS.md", "CLAUDE.md"])
+    max_project_instruction_bytes: int = 8_000
 
     @classmethod
     def load(cls, path: str | None = None) -> "Config":
@@ -70,7 +73,7 @@ class Config:
             raise ValueError(f"invalid mode: {cfg.mode}")
         if cfg.network not in NETWORK_MODES:
             raise ValueError("network must be 'disabled' or 'unrestricted'")
-        for name in ("default_timeout_seconds", "max_capture_bytes", "max_file_read_bytes", "max_read_chars", "process_buffer_bytes", "process_ttl_seconds", "max_processes", "max_concurrency", "max_inline_output_bytes", "max_result_bytes", "edit_check_timeout_seconds"):
+        for name in ("default_timeout_seconds", "max_capture_bytes", "max_file_read_bytes", "max_read_chars", "process_buffer_bytes", "process_ttl_seconds", "max_processes", "max_concurrency", "max_inline_output_bytes", "max_result_bytes", "edit_check_timeout_seconds", "max_project_instruction_bytes"):
             if int(getattr(cfg, name)) <= 0:
                 raise ValueError(f"{name} must be positive")
         if int(cfg.max_read_chars) < 64:
