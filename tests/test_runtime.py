@@ -768,6 +768,26 @@ def test_move_and_copy_refuse_to_overwrite(tmp_path):
     server.call("filesystem", {"action": "move", "path": "b.txt", "destination": "./b.txt"})
     assert (tmp_path / "b.txt").read_text() == "a"
 
+def test_move_and_copy_refuse_a_folder_into_itself(tmp_path):
+    server = make(tmp_path)
+    (tmp_path / "dd" / "sub").mkdir(parents=True)
+    (tmp_path / "dd" / "f.txt").write_text("x")
+    cases = [("move", "dd/sub/moved"), ("copy", "dd/sub/copy"), ("copy", "dd/sub")]
+    if os.name == "nt":
+        cases.append(("copy", "DD/sub/upper"))
+    for action, dest in cases:
+        with pytest.raises(RuntimeFault) as exc:
+            server.call("filesystem", {"action": action, "path": "dd", "destination": dest, "recursive": True})
+        assert exc.value.code == "invalid_arguments" and "inside the source folder" in exc.value.message, (action, exc.value)
+    # Nothing was created.
+    assert sorted(p.relative_to(tmp_path).as_posix() for p in (tmp_path / "dd").rglob("*")) == ["dd/f.txt", "dd/sub"]
+    # A file copied onto itself, under any spelling, is refused clearly.
+    for dest, overwrite in (("dd/f.txt", False), ("./dd/f.txt", True)) + ((("DD/F.TXT", True),) if os.name == "nt" else ()):
+        with pytest.raises(RuntimeFault) as exc:
+            server.call("filesystem", {"action": "copy", "path": "dd/f.txt", "destination": dest, "overwrite": overwrite})
+        assert exc.value.code == "invalid_arguments" and "source itself" in exc.value.message, (dest, exc.value)
+    assert (tmp_path / "dd" / "f.txt").read_text() == "x"
+
 
 def test_redact_keeps_code_redacts_secrets():
     from agent_runtime.security import redact

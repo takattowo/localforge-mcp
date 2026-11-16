@@ -1164,15 +1164,25 @@ class Capabilities:
 
         An existing directory is never replaced or merged. A move onto
         the source itself (another spelling of its path) is not an
-        overwrite.
+        overwrite; a copy onto it is refused, as is a folder moved or
+        copied into itself (copytree would recurse into its own copy).
         """
+        name = action.capitalize()
+        same = False
+        with contextlib.suppress(OSError):
+            same = dest.exists() and os.path.samefile(src, dest)
+        if same and action == "copy":
+            raise RuntimeFault("invalid_arguments", f"Copy destination {dest} is the source itself.")
+        if src.is_dir() and not same:
+            inner, outer = (os.path.normcase(os.path.realpath(p)) for p in (dest, src))
+            if inner.startswith(outer.rstrip(os.sep) + os.sep):
+                raise RuntimeFault("invalid_arguments",
+                                   f"{name} destination {dest} is inside the source folder {src}; "
+                                   "a folder cannot go into itself.")
         if not dest.exists():
             return
-        if action == "move":
-            with contextlib.suppress(OSError):
-                if os.path.samefile(src, dest):
-                    return
-        name = action.capitalize()
+        if same:
+            return
         if dest.is_dir():
             raise RuntimeFault("invalid_arguments",
                                f"{name} destination is an existing directory: {dest}. A directory is never "
