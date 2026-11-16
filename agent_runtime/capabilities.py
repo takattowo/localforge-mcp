@@ -297,6 +297,8 @@ MAX_LINE_CHARS = 2000
 RG_TIMEOUT_SECONDS = 60
 # Most of one new file a git diff with include_untracked shows.
 UNTRACKED_DIFF_BYTES = 8000
+# Most untracked files a git diff with include_untracked lists as skipped.
+UNTRACKED_SKIPPED_SHOWN = 50
 BATCH_SEARCH_WORKERS = 8
 GIT_ROOT_TTL_SECONDS = 30
 PATH_LOCK_STRIPES = 256
@@ -1795,6 +1797,11 @@ class Capabilities:
         trust stale stat data and miss a change made in the same second
         as the last index write.) Each new file's part is cut to
         UNTRACKED_DIFF_BYTES, so one huge file cannot flood the reply.
+        Only the untracked files under the pathspecs after "--" in args
+        are listed (all of them without "--"); nested repositories and
+        files over max_file_read_bytes are left out and listed in
+        untracked_skipped. untracked_files counts the files diffed; when
+        adding them fails, the plain diff comes back with a note.
         """
         git = ["git", "-c", "core.quotepath=false", "-C", str(work)]
         # The same command policy as the plain diff, which runs through execute.
@@ -1809,11 +1816,28 @@ class Capabilities:
             except subprocess.TimeoutExpired:
                 raise RuntimeFault("timeout", f"git {argv[0]} timed out after 60 s") from None
 
-        listed = run(["ls-files", "-z", "--others", "--exclude-standard", "--", ":/"])
+        listed = run(["ls-files", "-z", "--others", "--exclude-standard", "--",
+                      *((args[args.index("--") + 1:] if "--" in args else []) or [":/"])])
         if listed.returncode:
             # Not a repository, say: the plain diff says why.
             return self.git("diff", args, str(work))
-        new = [name for name in listed.stdout.decode("utf-8", "replace").split("\0") if name]
+        new, skipped = [], []
+        for name in listed.stdout.decode("utf-8", "replace").split("\0"):
+            if not name:
+                continue
+            if name.endswith("/"):
+                # An untracked nested repository: intent-to-add fails on it.
+                skipped.append({"path": name, "reason": "nested_repository"})
+                continue
+            try:
+                size = os.lstat(work / name).st_size
+            except OSError:
+                size = 0
+            # git reads each new file whole, and its diff is redacted whole.
+            if size > int(self.cfg.max_file_read_bytes):
+                skipped.append({"path": name, "reason": "too_large", "bytes": size})
+            else:
+                new.append(name)
         # The new files are diffed against the working tree: with a staged
         # view or a revision the throwaway index would show every tracked
         # file as deleted.
@@ -1827,6 +1851,7 @@ class Capabilities:
         command = git + ["diff", *args]
         result = run(["diff", *args])
         out, err = result.stdout, result.stderr
+        note, included = None, 0
         fd, index = tempfile.mkstemp(prefix=f"{SPILL_PREFIX}index-")
         os.close(fd)
         names = index + ".paths"
@@ -1840,8 +1865,11 @@ class Capabilities:
                 adding = ["add", "--intent-to-add", f"--pathspec-from-file={names}", "--pathspec-file-nul"]
                 added = run(adding, {**extra, "GIT_LITERAL_PATHSPECS": "1"})
                 if added.returncode:
-                    result, command, out, err = added, git + adding, added.stdout, added.stderr
+                    # Keep the plain diff; say why the new files are missing.
+                    reason = redact(added.stderr.decode("utf-8", "replace")).strip()[:500]
+                    note = f"git add --intent-to-add failed, so only tracked changes are shown: {reason}"
                 else:
+                    included = len(new)
                     result = run(["diff", *args], extra)
                     out, err = out + result.stdout, err + result.stderr
         finally:
@@ -1855,7 +1883,11 @@ class Capabilities:
                  "exit_code": result.returncode, "stdout": out, "stderr": err,
                  "stdout_truncated": out_cut, "stderr_truncated": err_cut,
                  "duration_ms": int((time.monotonic() - started) * 1000),
-                 "error_type": None if result.returncode == 0 else "process_exit", "untracked_files": len(new)}
+                 "error_type": None if result.returncode == 0 else "process_exit", "untracked_files": included}
+        if skipped:
+            reply["untracked_skipped"] = skipped[:UNTRACKED_SKIPPED_SHOWN]
+        if note:
+            reply["note"] = note
         if out_path:
             reply["stdout_path"] = out_path
         if err_path:

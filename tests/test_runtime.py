@@ -329,6 +329,46 @@ def test_git_diff_can_include_untracked_files(tmp_path):
     (other / "only.txt").write_text("first\n")
     assert "+first" in fresh.call("git", {"action": "diff", "include_untracked": True})["stdout"]
 
+def test_git_diff_untracked_skips_what_it_cannot_add(tmp_path, monkeypatch):
+    if shutil.which("git") is None:
+        pytest.skip("git unavailable")
+    server = make(tmp_path, max_file_read_bytes=1000)
+    for argv in (["init", "-q"], ["config", "user.email", "t@example.com"], ["config", "user.name", "t"],
+                 ["config", "commit.gpgsign", "false"]):
+        assert server.cap.git("run", argv)["success"]
+    (tmp_path / "tracked.txt").write_text("one\n")
+    assert server.cap.git("run", ["add", "--", "tracked.txt"])["success"]
+    assert server.cap.git("run", ["commit", "-q", "-m", "base"])["success"]
+    (tmp_path / "tracked.txt").write_text("two\n")
+    (tmp_path / "small.txt").write_text("fresh\n")
+    (tmp_path / "huge.txt").write_bytes(b"x" * 1000 + b"\n")
+    # An untracked nested repository with no commit: git cannot add it.
+    (tmp_path / "nested").mkdir()
+    assert server.cap.execute(["git", "init", "-q"], cwd=str(tmp_path / "nested"))["success"]
+    (tmp_path / "nested" / "inner.txt").write_text("inner\n")
+    out = server.call("git", {"action": "diff", "include_untracked": True})
+    text = out["stdout"]
+    assert out["success"] and "+two" in text and "+fresh" in text and "huge.txt" not in text, out
+    assert out["untracked_files"] == 1
+    assert {"path": "huge.txt", "reason": "too_large", "bytes": 1001} in out["untracked_skipped"]
+    assert {"path": "nested/", "reason": "nested_repository"} in out["untracked_skipped"]
+    # Only the pathspec's files are counted.
+    only = server.call("git", {"action": "diff", "include_untracked": True, "args": ["--", "tracked.txt"]})
+    assert only["untracked_files"] == 0 and "untracked_skipped" not in only and "+two" in only["stdout"]
+    # A failed add keeps the plain diff and says why.
+    import agent_runtime.capabilities as caps
+    real = caps.subprocess.run
+
+    def failing(argv, **kwargs):
+        if "--intent-to-add" in argv:
+            return subprocess.CompletedProcess(argv, 128, b"", b"fatal: boom\n")
+        return real(argv, **kwargs)
+
+    monkeypatch.setattr(caps.subprocess, "run", failing)
+    failed = server.call("git", {"action": "diff", "include_untracked": True})
+    assert failed["success"] and "+two" in failed["stdout"] and "+fresh" not in failed["stdout"], failed
+    assert failed["untracked_files"] == 0 and "boom" in failed["note"]
+
 def test_search_retries_lookaround_with_pcre2(tmp_path):
     rg = shutil.which("rg")
     if rg is None or subprocess.run([rg, "--pcre2-version"], capture_output=True).returncode != 0:
