@@ -64,7 +64,9 @@ class WindowsJob:
     def __init__(self):
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         kernel32.CreateJobObjectW.restype = wintypes.HANDLE
-        kernel32.CreateJobObjectW.argtypes = [wintypes.LPSECURITY_ATTRIBUTES, wintypes.LPCWSTR]
+        # LPSECURITY_ATTRIBUTES is not in ctypes.wintypes; passing None
+        # (default security) only needs a pointer-sized argument.
+        kernel32.CreateJobObjectW.argtypes = [ctypes.c_void_p, wintypes.LPCWSTR]
         kernel32.SetInformationJobObject.argtypes = [wintypes.HANDLE, wintypes.DWORD, ctypes.c_void_p, wintypes.DWORD]
         kernel32.SetInformationJobObject.restype = wintypes.BOOL
         kernel32.AssignProcessToJobObject.argtypes = [wintypes.HANDLE, wintypes.HANDLE]

@@ -993,9 +993,46 @@ def test_job_adopt_is_best_effort():
     proc = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(2)"])
     try:
         job.adopt(proc.pid)
+        # The job must really be created, not silently given up on.
+        assert job._job is not None and not job._job_failed
     finally:
         proc.kill()
         proc.wait()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows Job Objects")
+def test_adopted_child_dies_when_server_is_killed():
+    import ctypes
+    import subprocess
+    # A stand-in server: adopts a long sleeper, prints its pid, then waits.
+    helper = ("import subprocess, sys, time\n"
+              "from agent_runtime import job\n"
+              "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'])\n"
+              "job.adopt(child.pid)\n"
+              "print(child.pid, job._job_failed, flush=True)\n"
+              "time.sleep(60)\n")
+    server = subprocess.Popen([sys.executable, "-c", helper], stdout=subprocess.PIPE, text=True,
+                              cwd=str(Path(__file__).resolve().parent.parent))
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.OpenProcess.restype = ctypes.c_void_p
+    kernel32.OpenProcess.argtypes = [ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32]
+    kernel32.WaitForSingleObject.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+    kernel32.CloseHandle.argtypes = [ctypes.c_void_p]
+    handle = None
+    try:
+        pid, failed = server.stdout.readline().split()
+        assert failed == "False"
+        handle = kernel32.OpenProcess(0x00100000, False, int(pid))  # SYNCHRONIZE
+        assert handle
+        server.kill()  # hard kill, like taskkill /F or a crash: no atexit
+        server.wait()
+        assert kernel32.WaitForSingleObject(handle, 10_000) == 0, "adopted child outlived the server"
+    finally:
+        if handle:
+            kernel32.CloseHandle(handle)
+        if server.poll() is None:
+            server.kill()
+            server.wait()
 
 
 def test_kill_children_on_exit_gates_adoption(tmp_path):
