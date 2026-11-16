@@ -20,6 +20,10 @@ from .todos import TodoStore
 
 PROTOCOL = "2025-06-18"
 MAX_BATCH_CALLS = 16
+# Tool names models know from other agents, for batch entries (the host
+# checks top-level names itself); the result says which tool ran.
+TOOL_ALIASES = {"bash": "execute", "shell": "execute", "sh": "execute", "powershell": "execute",
+                "pwsh": "execute", "cmd": "execute", "grep": "search", "rg": "search", "ripgrep": "search"}
 STDOUT_WRITE_TIMEOUT_SECONDS = 30
 MAX_PENDING_REQUESTS = 128
 # Sent in the initialize result; MCP clients may show it to the model.
@@ -306,7 +310,7 @@ SCHEMAS = {
         "calls": {"type": "array", "minItems": 1, "maxItems": 16,
             "description": "Tool calls to run in parallel (or in order, with sequential), e.g. [{\"tool\": \"search\", \"arguments\": {\"query\": \"todo\"}}, {\"tool\": \"git\", \"arguments\": {\"action\": \"status\"}}].",
             "items": {"type": "object", "properties": {
-                "tool": {"type": "string", "description": "Tool to run: workspace, filesystem, search, multi_search, git, execute, or process."},
+                "tool": {"type": "string", "description": "Tool to run: workspace, filesystem, search, multi_search, git, execute, or process. bash/shell/powershell/cmd run as execute and grep/rg as search, with a note."},
                 "arguments": {"type": "object", "description": "Arguments for the tool; same shape as a tools/call request."},
                 "label": {"type": "string", "description": "Optional label echoed back with this call's result."}},
                 "required": ["tool"]}},
@@ -541,7 +545,7 @@ class Server:
                                f"batch accepts at most {MAX_BATCH_CALLS} calls")
         if not isinstance(sequential, bool):
             raise RuntimeFault("invalid_arguments", "batch sequential must be true or false")
-        specs = []
+        specs, notes = [], {}
         for index, call in enumerate(calls):
             if not isinstance(call, dict) or not isinstance(call.get("tool"), str):
                 raise RuntimeFault("invalid_arguments",
@@ -551,9 +555,18 @@ class Server:
             if not isinstance(arguments, dict):
                 raise RuntimeFault("invalid_arguments",
                                    f"calls[{index}] arguments must be an object")
-            specs.append((index, _bare_tool_name(call["tool"]), dict(arguments),
-                          call.get("label")))
+            name = _bare_tool_name(call["tool"])
+            if name not in SCHEMAS and name.lower() in TOOL_ALIASES:
+                alias = TOOL_ALIASES[name.lower()]
+                notes[index] = f'There is no "{name}" tool, so this ran as "{alias}". Call "{alias}" directly.'
+                name = alias
+            specs.append((index, name, dict(arguments), call.get("label")))
         results: list[dict] = [None] * len(specs)
+
+        def finish(reply):
+            for index, note in notes.items():
+                results[index]["note"] = note
+            return reply
 
         def run(index, name, arguments, label):
             if name == "batch":
@@ -590,14 +603,14 @@ class Server:
                 if "error" in results[index] or (isinstance(result, dict) and result.get("success") is False):
                     stopped_at, reason = index, f"an earlier call failed (index {index})"
             completed = len(specs) if stopped_at is None else stopped_at
-            return {"results": results, "completed": completed, "stopped_at": stopped_at}
+            return finish({"results": results, "completed": completed, "stopped_at": stopped_at})
 
         workers = min(len(specs), max(1, int(self.cfg.max_concurrency)))
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = [pool.submit(run, *spec) for spec in specs]
             for future in futures:
                 future.result()
-        return {"results": results}
+        return finish({"results": results})
 
     def _fit_result(self, name, value, text):
         """Keep a tool result under max_result_bytes.

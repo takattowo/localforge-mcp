@@ -945,6 +945,18 @@ def test_batch_accepts_host_prefixed_tool_names(tmp_path):
     assert entry["result"]["results"][0]["matches"][0]["text"] == "alpha"
 
 
+def test_batch_maps_common_tool_names(tmp_path):
+    server = make(tmp_path)
+    (tmp_path / "a.txt").write_text("needle\n")
+    out = server.batch([{"tool": "grep", "arguments": {"query": "needle"}},
+                        {"tool": "MyHost_localforge_mcp__bash", "arguments": {"command": [sys.executable, "-c", "print(7)"]}},
+                        {"tool": "nope", "arguments": {}}])
+    first, second, third = out["results"]
+    assert first["tool"] == "search" and first["result"]["match_count"] == 1
+    assert 'no "grep" tool' in first["note"] and 'Call "search" directly' in first["note"]
+    assert second["tool"] == "execute" and second["result"]["success"] and '"bash"' in second["note"]
+    assert third["error"]["code"] == "tool_not_found" and "note" not in third
+
 def test_batch_edits_distinct_files_in_parallel(tmp_path):
     server = make(tmp_path)
     names = ["a.txt", "b.txt", "c.txt"]

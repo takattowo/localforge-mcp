@@ -243,6 +243,8 @@ For dependent steps, pass `"sequential": true`: the calls run one at a time in t
 ]}
 ```
 
+A batch entry may name a tool as other agents call it: `bash`, `shell`, `sh`, `powershell`, `pwsh` and `cmd` run as `execute`, and `grep`, `rg` and `ripgrep` as `search`. The entry then reports the tool that ran and a `note` (`There is no "bash" tool, so this ran as "execute". Call "execute" directly.`).
+
 Prefer `filesystem write`, `replace_text`, `multi_edit`, and `apply_patch` for file edits over shelling out to python or shell commands: they are atomic, policy-checked, and give structured errors. `execute` and `process` are for running programs, builds, and tests — those legitimately write files as the current user.
 
 ### `todo`
