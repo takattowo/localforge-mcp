@@ -1082,13 +1082,31 @@ class Capabilities:
         rg = shutil.which("rg")
         if root.is_file():
             if rg:
-                return self._short_paths(base, self._search_rg_file(rg, root, query, case_sensitive, maximum, files_only, fixed_string, context, applied))
-            return self._short_paths(base, self._search_python_file(root, query, case_sensitive, maximum, files_only, fixed_string, context, int(max_file_size_bytes), applied))
-        if not root.is_dir():
+                out = self._search_rg_file(rg, root, query, case_sensitive, maximum, files_only, fixed_string, context, applied)
+            else:
+                out = self._search_python_file(root, query, case_sensitive, maximum, files_only, fixed_string, context, int(max_file_size_bytes), applied)
+        elif not root.is_dir():
             raise RuntimeFault("not_directory", f"Not a directory: {root}")
-        if rg:
-            return self._short_paths(base, self._search_rg(rg, root, query, glob or [], applied, case_sensitive, maximum, files_only, fixed_string, context, bool(include_hidden)))
-        return self._short_paths(base, self._search_python(root, query, glob or [], applied, case_sensitive, maximum, files_only, fixed_string, context, int(max_file_size_bytes), bool(include_hidden)))
+        elif rg:
+            out = self._search_rg(rg, root, query, glob or [], applied, case_sensitive, maximum, files_only, fixed_string, context, bool(include_hidden))
+        else:
+            out = self._search_python(root, query, glob or [], applied, case_sensitive, maximum, files_only, fixed_string, context, int(max_file_size_bytes), bool(include_hidden))
+        if not files_only:
+            self._group_by_file(out)
+        return self._short_paths(base, out)
+
+    @staticmethod
+    def _group_by_file(out):
+        """One entry per file holding its matches, not the path on every match.
+
+        Saves tokens on files with many hits; match_count is the total.
+        """
+        grouped = {}
+        for entry in out["results"]:
+            grouped.setdefault(entry.pop("path"), []).append(entry)
+        out["results"] = [{"path": path, "matches": matches} for path, matches in grouped.items()]
+        out["match_count"] = sum(len(matches) for matches in grouped.values())
+        return out
 
     @staticmethod
     def _short_paths(base, out):

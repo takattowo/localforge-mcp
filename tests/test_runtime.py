@@ -103,7 +103,7 @@ def test_search_fallback_and_git(tmp_path, monkeypatch):
     (tmp_path / "src" / "x.py").write_text("# TODO UserService\n")
     monkeypatch.setattr(shutil, "which", lambda name: None)
     result = server.cap.search("UserService", glob=["*.py"])
-    assert result["results"][0]["line"] == 1
+    assert result["results"][0]["matches"][0]["line"] == 1
     files = server.cap.search(path=".", glob=["*.py"], files_only=True)
     assert files["results"]
     if shutil.which("git") is None:
@@ -159,9 +159,10 @@ def test_search_defaults_and_guards(tmp_path, monkeypatch):
     assert not any("big.py" in p for p in paths)
     assert "**/.git/" in content["applied_excludes"]
     ctx = server.cap.search("UserService", path="src/hit.py", context_lines=1)
-    assert ctx["results"][0]["line"] == 2
-    assert ctx["results"][0]["before"] == ["1\tline one"]
-    assert ctx["results"][0]["after"] == ["3\tline three"]
+    [hit] = ctx["results"][0]["matches"]
+    assert hit["line"] == 2
+    assert hit["before"] == ["1\tline one"]
+    assert hit["after"] == ["3\tline three"]
     with pytest.raises(RuntimeFault):
         server.cap.search("UserService", files_only=True)
 
@@ -493,7 +494,7 @@ def test_search_single_file_with_rg(tmp_path):
     (tmp_path / "a.txt").write_text("hello UserService\n")
     out = server.cap.search("UserService", path="a.txt")
     assert out["engine"] == "ripgrep"
-    assert len(out["results"]) == 1 and out["results"][0]["line"] == 1
+    assert len(out["results"]) == 1 and out["results"][0]["matches"][0]["line"] == 1
     assert "**/.git/" in out["applied_excludes"]
 
 
@@ -530,7 +531,7 @@ def test_multi_search_runs_queries_in_one_call(tmp_path):
     assert len(out["results"]) == 2
     first, second = out["results"]
     assert first["index"] == 0 and first["label"] == "first"
-    assert first["results"][0]["text"] == "alpha beta"
+    assert first["results"][0]["matches"][0]["text"] == "alpha beta"
     assert second["index"] == 1 and second["label"] is None
     assert second["results"][0]["path"] == "b.txt"
 
@@ -544,7 +545,7 @@ def test_multi_search_isolates_failures(tmp_path):
         {"files_only": True, "glob": ["*.txt"]},
     ]})
     ok, bad, files = out["results"]
-    assert ok["results"][0]["text"] == "alpha"
+    assert ok["results"][0]["matches"][0]["text"] == "alpha"
     assert bad["error"]["code"] == "invalid_arguments"
     assert files["results"]
 
@@ -608,7 +609,7 @@ def test_batch_runs_calls_in_one_round_trip(tmp_path):
     assert slow_one["index"] == 0 and slow_one["tool"] == "execute"
     assert slow_one["label"] == "slow-1" and "done" in slow_one["result"]["stdout"]
     assert slow_two["label"] == "slow-2" and "done" in slow_two["result"]["stdout"]
-    assert find["result"]["results"][0]["text"] == "alpha"
+    assert find["result"]["results"][0]["matches"][0]["text"] == "alpha"
     assert elapsed < 1.9, f"batch calls serialized: {elapsed:.2f}s"
 
 
@@ -660,7 +661,7 @@ def test_batch_accepts_host_prefixed_tool_names(tmp_path):
     entry = out["results"][0]
     assert "result" in entry, entry
     assert entry["label"] == "prefixed"
-    assert entry["result"]["results"][0]["text"] == "alpha"
+    assert entry["result"]["results"][0]["matches"][0]["text"] == "alpha"
 
 
 def test_batch_edits_distinct_files_in_parallel(tmp_path):
@@ -791,7 +792,7 @@ def test_argument_aliases_renamed_before_dispatch(tmp_path):
                                "old": "hello", "replacement": "hi"})
     assert (tmp_path / "a.txt").read_text() == "hi world"
     found = server.call("search", {"pattern": "hi", "path": str(tmp_path)})
-    assert found["results"][0]["text"] == "hi world"
+    assert found["results"][0]["matches"][0]["text"] == "hi world"
     run = server.call("execute", {"cmd": [sys.executable, "-c", "print('aliased')"]})
     assert run["success"] and "aliased" in run["stdout"]
     info = server.call("workspace", {"action": "get", "dir": str(tmp_path)})
@@ -813,7 +814,7 @@ def test_multi_search_entries_accept_aliases(tmp_path):
     server = make(tmp_path)
     (tmp_path / "a.txt").write_text("alpha\n")
     out = server.call("multi_search", {"searches": [{"pattern": "alpha", "label": "p"}]})
-    assert out["results"][0]["results"][0]["text"] == "alpha"
+    assert out["results"][0]["results"][0]["matches"][0]["text"] == "alpha"
 
 
 def test_todo_lifecycle_and_persistence(tmp_path):
@@ -1149,7 +1150,8 @@ def test_search_context_near_matches_and_lone_cr(tmp_path, monkeypatch, engine):
     (tmp_path / "a.txt").write_bytes(b"x\ry\nhit\nhit\nz\n")
     out = server.cap.search("hit", context_lines=1)
     assert out["engine"] == engine
-    first, second = out["results"]
+    [hits] = out["results"]
+    first, second = hits["matches"]
     assert first["line"] == 2 and first["before"] == ["1\tx\ry"] and first["after"] == ["3\thit"]
     assert second["line"] == 3 and second["before"] == ["2\thit"] and second["after"] == ["4\tz"]
 
@@ -1210,13 +1212,13 @@ def test_search_folder_glob_and_exact_truncation(tmp_path, monkeypatch, engine):
     files = server.cap.search(files_only=True, glob=["src/*.py"])
     assert [r["path"] for r in files["results"]] == [os.path.join("src", "a.py")]
     exact = server.cap.search("hit", path="src", max_results=2)
-    assert len(exact["results"]) == 2 and exact["truncated"] is False
+    assert exact["match_count"] == 2 and exact["truncated"] is False
     over = server.cap.search("hit", path="src", max_results=1)
-    assert len(over["results"]) == 1 and over["truncated"] is True
+    assert over["match_count"] == 1 and over["truncated"] is True
     one_file = server.cap.search("hit", path="src/a.py", max_results=2)
-    assert len(one_file["results"]) == 2 and one_file["truncated"] is False
+    assert one_file["match_count"] == 2 and one_file["truncated"] is False
     one_over = server.cap.search("hit", path="src/a.py", max_results=1)
-    assert len(one_over["results"]) == 1 and one_over["truncated"] is True
+    assert one_over["match_count"] == 1 and one_over["truncated"] is True
     all_files = server.cap.search(files_only=True, max_results=2)
     assert len(all_files["results"]) == 2 and all_files["truncated"] is False
     cut_files = server.cap.search(files_only=True, max_results=1)
@@ -1391,7 +1393,7 @@ def test_search_context_numbered_and_per_file(tmp_path, monkeypatch, engine):
     (tmp_path / "b.txt").write_text("hit\nb2\nb3\n")
     out = server.cap.search("hit", context_lines=4)
     assert out["engine"] == engine
-    by_path = {r["path"]: r for r in out["results"]}
+    by_path = {r["path"]: r["matches"][0] for r in out["results"]}
     assert by_path["a.txt"]["before"] == ["1\ta1", "2\ta2"] and by_path["a.txt"]["after"] == []
     assert by_path["b.txt"]["before"] == [] and by_path["b.txt"]["after"] == ["2\tb2", "3\tb3"]
     # Outside the runtime cwd, paths stay absolute.
@@ -1765,7 +1767,7 @@ def test_search_reads_lines_that_are_not_utf8(tmp_path):
     (tmp_path / "latin.txt").write_bytes(b"one\ncaf\xe9 needle\nthree\n")
     found = server.cap.search("needle", context_lines=1)
     assert found["engine"] == "ripgrep"
-    [hit] = found["results"]
+    [hit] = found["results"][0]["matches"]
     assert hit["text"] == "caf\ufffd needle" and hit["before"] == ["1\tone"] and hit["after"] == ["3\tthree"]
 
 
@@ -1776,11 +1778,11 @@ def test_search_query_starting_with_dash(tmp_path):
     (tmp_path / "a.txt").write_text("run --verbose\n-1 is negative\n")
     # ripgrep used to read a leading - as one of its own options.
     found = server.cap.search("--verbose")
-    assert found["engine"] == "ripgrep" and [r["text"] for r in found["results"]] == ["run --verbose"], found
+    assert found["engine"] == "ripgrep" and [m["text"] for r in found["results"] for m in r["matches"]] == ["run --verbose"], found
     one_file = server.cap.search("-1", path=str(tmp_path / "a.txt"))
-    assert [r["text"] for r in one_file["results"]] == ["-1 is negative"], one_file
+    assert [m["text"] for r in one_file["results"] for m in r["matches"]] == ["-1 is negative"], one_file
     regex = server.cap.search("-1 is", fixed_string=False)
-    assert [r["text"] for r in regex["results"]] == ["-1 is negative"], regex
+    assert [m["text"] for r in regex["results"] for m in r["matches"]] == ["-1 is negative"], regex
 
 
 def test_git_shows_non_ascii_paths(tmp_path):
@@ -2016,3 +2018,30 @@ def test_execute_marks_output_past_the_process_buffer(tmp_path):
     out = server.cap.execute([sys.executable, "-c", "import sys\nfor n in range(100): print(str(n) * 100, flush=True)"])
     assert out["success"] and out["stdout_truncated"]
     assert out["stdout"].startswith("...[earlier output dropped") and out["stdout"].rstrip().endswith("99" * 100)
+
+
+@pytest.mark.parametrize("engine", ["ripgrep", "python"])
+def test_search_groups_matches_by_file(tmp_path, monkeypatch, engine):
+    if engine == "ripgrep" and not shutil.which("rg"):
+        pytest.skip("ripgrep unavailable")
+    if engine == "python":
+        monkeypatch.setattr(shutil, "which", lambda name: None)
+    server = make(tmp_path)
+    (tmp_path / "a.txt").write_text("hit one\nmiss\nhit two\n")
+    (tmp_path / "b.txt").write_text("hit three\n")
+    out = server.cap.search("hit", context_lines=1)
+    assert out["engine"] == engine and out["match_count"] == 3 and out["truncated"] is False
+    # The path once per file, not once per match.
+    by_path = {r["path"]: r["matches"] for r in out["results"]}
+    assert set(by_path) == {"a.txt", "b.txt"} and len(out["results"]) == 2
+    assert [(m["line"], m["text"]) for m in by_path["a.txt"]] == [(1, "hit one"), (3, "hit two")]
+    assert by_path["a.txt"][1]["before"] == ["2\tmiss"] and "path" not in by_path["a.txt"][0]
+    # max_results still counts matches.
+    capped = server.cap.search("hit", max_results=2)
+    assert capped["match_count"] == 2 and capped["truncated"] is True
+    assert sum(len(r["matches"]) for r in capped["results"]) == 2
+    multi = server.cap.multi_search([{"query": "three"}])
+    assert multi["results"][0]["results"] == [{"path": "b.txt", "matches": [{"line": 1, "text": "hit three"}]}]
+    assert multi["results"][0]["match_count"] == 1
+    # files_only keeps its shape.
+    assert {"path": "b.txt"} in server.cap.search(files_only=True)["results"]

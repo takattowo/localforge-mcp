@@ -186,6 +186,18 @@ Argument names are tolerant: the server accepts common model guesses as aliases 
 
 Search text or filenames recursively with include/exclude globs, case control, fixed-string or regex matching, and result limits.
 
+Content matches come back grouped by file, with the path once per file:
+
+```json
+{"engine": "ripgrep", "results": [
+  {"path": "src\\app.py", "matches": [
+    {"line": 12, "text": "svc = UserService()"},
+    {"line": 40, "text": "class UserService:"}]}],
+ "match_count": 2, "truncated": false, "exit_code": 0, "applied_excludes": ["**/.git/"]}
+```
+
+`before`/`after` appear only with `context_lines`. `max_results` counts matches, not files; `match_count` is the number of matches returned and `truncated` says more were cut. `files_only` returns `{"path"}` entries. Paths under the runtime cwd are relative to it.
+
 ### `multi_search`
 
 Run up to 16 independent searches in one call. Each entry takes the same arguments as `search` (plus an optional `label` echoed back with its results), and all entries execute in parallel. Use it to fan out several queries in a single round-trip instead of one `search` per call — especially useful with clients that issue one tool call per turn. A failing entry is reported per-entry (`error`) without failing the whole batch.
