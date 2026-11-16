@@ -254,6 +254,7 @@ SCHEMAS = {
     "git": {"type": "object", "properties": {
         "action": {"enum": ["status", "diff", "log", "show", "branch", "root", "run"], "description": "Preset operation, or run for an arbitrary git argument array."},
         "args": {"type": "array", "items": {"type": "string"}, "description": "Extra args appended to presets, or the full git args for run."},
+        "include_untracked": {"type": "boolean", "description": "diff only: also show untracked files that .gitignore does not hide, as added (diffed through a fresh throwaway index after the plain diff; the real index is untouched). Each new file is cut to 8000 bytes."},
         "cwd": {"type": "string", "description": "Repository directory, defaults to runtime cwd."}}, "required": ["action"]},
     "execute": {"type": "object", "properties": {
         "command": {"description": "Command to run. Prefer an argv array: no shell parsing, no quoting bugs. A string runs through the configured default_shell, so match its syntax.", "oneOf": [{"type": "array", "items": {"type": "string"}}, {"type": "string"}]},
@@ -368,7 +369,7 @@ class Server:
                         "line_start", "start", "line_end", "end", "limit", "glob", "include_hidden", "patch", "overwrite", "replace_all"),
         "search": ("query", "pattern", "path", "glob", "exclude", "case_sensitive", "max_results", "files_only",
                    "fixed_string", "context_lines", "include_hidden", "max_file_size_bytes"),
-        "git": ("action", "args", "cwd"),
+        "git": ("action", "args", "cwd", "include_untracked"),
         "execute": ("command", "cmd", "cwd", "timeout", "shell", "env", "input", "kill_on_timeout"),
         "process": ("action", "process_id", "id", "command", "cmd", "cwd", "shell", "env", "after", "limit_bytes",
                     "wait_ms", "text", "append_newline", "force", "format", "pattern", "tail_lines"),

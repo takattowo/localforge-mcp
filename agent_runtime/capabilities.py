@@ -295,6 +295,8 @@ LINE_CUT = " ...[line cut]"
 # Longest line read and search return; a minified line cannot use the whole budget.
 MAX_LINE_CHARS = 2000
 RG_TIMEOUT_SECONDS = 60
+# Most of one new file a git diff with include_untracked shows.
+UNTRACKED_DIFF_BYTES = 8000
 BATCH_SEARCH_WORKERS = 8
 GIT_ROOT_TTL_SECONDS = 30
 PATH_LOCK_STRIPES = 256
@@ -580,6 +582,21 @@ def _cap_line(text, length=None):
     if length <= MAX_LINE_CHARS:
         return text
     return f"{text[:MAX_LINE_CHARS]}...[line cut: {length} chars]"
+
+
+def _cap_new_files(diff, cap=UNTRACKED_DIFF_BYTES):
+    """Each new file's part of a git diff cut to cap bytes, on a line end."""
+    out = []
+    for part in re.split(r"(?m)^(?=diff --git )", diff):
+        size = len(part.encode("utf-8"))
+        if size <= cap or "\nnew file mode " not in part.split("\n@@", 1)[0]:
+            out.append(part)
+            continue
+        kept, _ = _clip(part, cap)
+        kept = kept[:kept.rfind("\n") + 1] or kept
+        out.append(f"{kept}...[new file cut: showing {len(kept.encode('utf-8'))} of {size} bytes; "
+                   "read the file for the rest]\n")
+    return "".join(out)
 
 
 def _numbered(number, body, length, budget):
@@ -1706,8 +1723,12 @@ class Capabilities:
         # Collected up to one extra result: it marks a cut page.
         return {"engine": "python", "results": results[:maximum], "truncated": len(results) > maximum, "applied_excludes": excludes}
 
-    def git(self, action, args=None, cwd=None):
+    def git(self, action, args=None, cwd=None, include_untracked=False):
         work = self.paths.resolve(cwd or ".", cwd=self.cwd, access="read", must_exist=True)
+        if include_untracked:
+            if action != "diff":
+                raise RuntimeFault("invalid_arguments", "include_untracked works with action diff only")
+            return self._diff_untracked(work, list(args or []))
         presets = {
             "status": ["status", "--porcelain=v2", "--branch"], "diff": ["diff"],
             "log": ["log", "--oneline", "-n", "20"], "show": ["show"],
@@ -1732,6 +1753,75 @@ class Capabilities:
         # kill_on_timeout: a git command must not linger in the background.
         return self.execute(["git", "-c", "core.quotepath=false", "-C", str(work)] + subcommand + ([] if action == "run" else list(args or [])), cwd=str(work),
                             kill_on_timeout=True)
+
+    def _diff_untracked(self, work, args):
+        """git diff that also shows untracked files as added.
+
+        The plain diff runs against the real index, which is never
+        touched. The untracked files .gitignore does not hide are then
+        added as intent-to-add to a fresh throwaway index
+        (GIT_INDEX_FILE) that holds nothing else, and diffed against it
+        with the same args, so only they show; the two parts are joined.
+        (A copy of the real index would not do: its new mtime makes git
+        trust stale stat data and miss a change made in the same second
+        as the last index write.) Each new file's part is cut to
+        UNTRACKED_DIFF_BYTES, so one huge file cannot flood the reply.
+        """
+        git = ["git", "-c", "core.quotepath=false", "-C", str(work)]
+        # The same command policy as the plain diff, which runs through execute.
+        self.policy.authorize_command(git + ["diff", *args], work, False)
+        env = safe_environment(self.cfg)
+        started = time.monotonic()
+
+        def run(argv, extra=None):
+            try:
+                return subprocess.run(git + argv, capture_output=True, stdin=subprocess.DEVNULL, timeout=60,
+                                      env={**env, **(extra or {})})
+            except subprocess.TimeoutExpired:
+                raise RuntimeFault("timeout", f"git {argv[0]} timed out after 60 s") from None
+
+        listed = run(["ls-files", "-z", "--others", "--exclude-standard", "--", ":/"])
+        if listed.returncode:
+            # Not a repository, say: the plain diff says why.
+            return self.git("diff", args, str(work))
+        new = [name for name in listed.stdout.decode("utf-8", "replace").split("\0") if name]
+        command = git + ["diff", *args]
+        result = run(["diff", *args])
+        out, err = result.stdout, result.stderr
+        fd, index = tempfile.mkstemp(prefix=f"{SPILL_PREFIX}index-")
+        os.close(fd)
+        names = index + ".paths"
+        try:
+            # git makes the index itself; an empty file is not one.
+            os.unlink(index)
+            extra = {"GIT_INDEX_FILE": index}
+            if new and result.returncode == 0:
+                Path(names).write_bytes("\0".join(new).encode("utf-8"))
+                # Literal: a file named like a glob stages only itself.
+                adding = ["add", "--intent-to-add", f"--pathspec-from-file={names}", "--pathspec-file-nul"]
+                added = run(adding, {**extra, "GIT_LITERAL_PATHSPECS": "1"})
+                if added.returncode:
+                    result, command, out, err = added, git + adding, added.stdout, added.stderr
+                else:
+                    result = run(["diff", *args], extra)
+                    out, err = out + result.stdout, err + result.stderr
+        finally:
+            for leftover in (index, names, index + ".lock"):
+                with contextlib.suppress(OSError):
+                    os.unlink(leftover)
+        out, out_cut, out_path = self._inline_output(
+            "stdout", _cap_new_files(redact(out.decode("utf-8", "replace"))))
+        err, err_cut, err_path = self._inline_output("stderr", redact(err.decode("utf-8", "replace")))
+        reply = {"success": result.returncode == 0, "command": command, "cwd": str(work),
+                 "exit_code": result.returncode, "stdout": out, "stderr": err,
+                 "stdout_truncated": out_cut, "stderr_truncated": err_cut,
+                 "duration_ms": int((time.monotonic() - started) * 1000),
+                 "error_type": None if result.returncode == 0 else "process_exit", "untracked_files": len(new)}
+        if out_path:
+            reply["stdout_path"] = out_path
+        if err_path:
+            reply["stderr_path"] = err_path
+        return reply
 
     @staticmethod
     def _feed_stdin(proc, data):

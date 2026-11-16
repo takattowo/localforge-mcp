@@ -260,6 +260,9 @@ Keep it current across turns: add before starting work, mark `in_progress` while
 ### `git`
 
 Presets: `status`, `diff`, `log`, `show`, `branch`, and `root`.
+
+`diff` with `include_untracked: true` also shows new files: the plain `git diff` (with `args`) runs against the real index, then the untracked files that `.gitignore` does not hide are added as intent-to-add to a fresh throwaway index (`GIT_INDEX_FILE`) and diffed with the same `args`, so they appear as added files after the tracked changes. The real index is never touched, so they stay untracked. Each new file's part is cut to 8000 bytes (`...[new file cut: showing B of T bytes; read the file for the rest]`), and the result adds `untracked_files` (how many were found). It works with `diff` only (`invalid_arguments` otherwise).
+
 Broad `git add -A` / `--all` / `.` is blocked (stage explicit files instead), as is staging private keys (`*.pfx`, `*.p12`, `*.pem`, `*.key`).
 
 Use `run` with an argument array for other operations:

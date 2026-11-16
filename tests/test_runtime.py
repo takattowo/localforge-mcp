@@ -247,6 +247,42 @@ def test_missing_relative_path_is_retried_from_the_git_root(tmp_path):
         denied.cap.filesystem("read", "src/app.py")
     assert exc.value.code == "path_not_found" and "Git root" not in exc.value.message
 
+def test_git_diff_can_include_untracked_files(tmp_path):
+    if shutil.which("git") is None:
+        pytest.skip("git unavailable")
+    server = make(tmp_path)
+    for argv in (["init", "-q"], ["config", "user.email", "t@example.com"], ["config", "user.name", "t"],
+                 ["config", "commit.gpgsign", "false"]):
+        assert server.cap.git("run", argv)["success"]
+    (tmp_path / ".gitignore").write_text("ignored.txt\n")
+    (tmp_path / "tracked.txt").write_text("one\n")
+    assert server.cap.git("run", ["add", "--", ".gitignore", "tracked.txt"])["success"]
+    assert server.cap.git("run", ["commit", "-q", "-m", "base"])["success"]
+    (tmp_path / "tracked.txt").write_text("two\n")
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "new.txt").write_text("fresh\n")
+    (tmp_path / "ignored.txt").write_text("hidden\n")
+    (tmp_path / "big.txt").write_text("".join(f"line {n}\n" for n in range(5000)))
+    plain = server.cap.git("diff")
+    assert "+two" in plain["stdout"] and "new.txt" not in plain["stdout"]
+    server.cap.workspace("set_cwd", "sub")
+    out = server.call("git", {"action": "diff", "include_untracked": True})
+    text = out["stdout"]
+    assert out["success"] and "+two" in text and "+fresh" in text and "ignored.txt" not in text
+    assert "[new file cut:" in text and "+line 4999" not in text and len(text) < 20000
+    # The real index is untouched: the new files are still untracked.
+    status = server.cap.git("run", ["status", "--porcelain", "--untracked-files=all"])["stdout"]
+    assert "?? sub/new.txt" in status and "?? big.txt" in status
+    with pytest.raises(RuntimeFault):
+        server.call("git", {"action": "log", "include_untracked": True})
+    # A new repository has no index file yet.
+    other = tmp_path.parent / (tmp_path.name + "-fresh")
+    other.mkdir()
+    fresh = make(other)
+    assert fresh.cap.git("run", ["init", "-q"])["success"]
+    (other / "only.txt").write_text("first\n")
+    assert "+first" in fresh.call("git", {"action": "diff", "include_untracked": True})["stdout"]
+
 def test_search_fallback_and_git(tmp_path, monkeypatch):
     server = make(tmp_path)
     (tmp_path / "src").mkdir()
