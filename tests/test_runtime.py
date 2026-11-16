@@ -1146,6 +1146,8 @@ def test_batch_maps_common_tool_names(tmp_path):
     assert first["tool"] == "search" and first["result"]["match_count"] == 1
     assert 'no "grep" tool' in first["note"] and 'Call "search" directly' in first["note"]
     assert second["tool"] == "execute" and second["result"]["success"] and '"bash"' in second["note"]
+    assert "default_shell" in second["note"] and "not in bash" in second["note"]
+    assert "default_shell" not in first["note"]
     assert third["error"]["code"] == "tool_not_found" and "note" not in third
 
 def test_batch_edits_distinct_files_in_parallel(tmp_path):

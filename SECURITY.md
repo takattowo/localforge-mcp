@@ -14,6 +14,10 @@ Edit checks: `edit_checks` commands run after every edit of a matching file, wit
 
 Project instructions: `workspace get` returns `AGENTS.md`/`CLAUDE.md` from the repository, and the tool description tells the agent to follow them. An untrusted repository can use these files to steer the agent. Set `project_instruction_files` to `[]` when working on untrusted code.
 
+Git-root retry: a relative path missing from the runtime cwd can be resolved from the Git root instead, for reads (`read`, `stat`, `list`, `search`). The path found there goes through the same read policy (roots, `denied_paths`) as any other; writes are never retried there.
+
+Untracked diff: `git` `diff` with `include_untracked` runs `git ls-files`, `git rev-parse` and `git add --intent-to-add` itself, outside `execute`, under the same command policy as the plain diff. The add goes to a fresh throwaway index (`GIT_INDEX_FILE` in the temp folder, deleted afterwards); the real index is never touched.
+
 ## Reporting
 
 Do not open a public issue for an exploitable vulnerability. Use the repository security-advisory channel configured by the maintainer.

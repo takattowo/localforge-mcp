@@ -115,7 +115,8 @@ def _shrink(value, limit, items=None, dropped=None):
     In every dict whose subtree lost part of a string or list, the
     cursors that described the uncut value are dropped (their names
     added to the dropped set, when given), and truncated (or the
-    child's own <key>_truncated) is set.
+    child's own <key>_truncated) is set to true where the dict already
+    has that key; no such key is added.
     """
     if isinstance(value, str):
         out = _cut_text(value, limit)
@@ -327,7 +328,7 @@ SCHEMAS = {
         "calls": {"type": "array", "minItems": 1, "maxItems": 16,
             "description": "Tool calls to run in parallel (or in order, with sequential), e.g. [{\"tool\": \"search\", \"arguments\": {\"query\": \"todo\"}}, {\"tool\": \"git\", \"arguments\": {\"action\": \"status\"}}].",
             "items": {"type": "object", "properties": {
-                "tool": {"type": "string", "description": "Tool to run: workspace, filesystem, search, multi_search, git, execute, or process. bash/shell/powershell/cmd run as execute and grep/rg as search, with a note."},
+                "tool": {"type": "string", "description": "Tool to run: workspace, filesystem, search, multi_search, git, execute, or process. bash/shell/powershell/cmd run as execute (string commands in the configured default_shell, not that shell) and grep/rg as search, with a note."},
                 "arguments": {"type": "object", "description": "Arguments for the tool; same shape as a tools/call request."},
                 "label": {"type": "string", "description": "Optional label echoed back with this call's result."}},
                 "required": ["tool"]}},
@@ -590,6 +591,9 @@ class Server:
             if name not in SCHEMAS and name.lower() in TOOL_ALIASES:
                 alias = TOOL_ALIASES[name.lower()]
                 notes[index] = f'There is no "{name}" tool, so this ran as "{alias}". Call "{alias}" directly.'
+                if alias == "execute" and name.lower() != str(self.cfg.default_shell).lower():
+                    notes[index] += (f" A string command runs in the configured default_shell "
+                                     f"({self.cfg.default_shell}), not in {name}.")
                 name = alias
             specs.append((index, name, dict(arguments), call.get("label")))
         results: list[dict] = [None] * len(specs)
