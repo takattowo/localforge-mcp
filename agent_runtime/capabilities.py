@@ -1814,6 +1814,16 @@ class Capabilities:
             # Not a repository, say: the plain diff says why.
             return self.git("diff", args, str(work))
         new = [name for name in listed.stdout.decode("utf-8", "replace").split("\0") if name]
+        # The new files are diffed against the working tree: with a staged
+        # view or a revision the throwaway index would show every tracked
+        # file as deleted.
+        staged = next((a for a in args if a in ("--cached", "--staged") or a.startswith("--merge-base")), None)
+        revs = run(["rev-parse", "--revs-only", "--no-flags", *args])
+        if staged or (revs.returncode == 0 and revs.stdout.strip()):
+            raise RuntimeFault("invalid_arguments",
+                               f"include_untracked diffs new files against the working tree, so it cannot be "
+                               f"combined with {staged or 'a revision'}; drop one of them (git diff without "
+                               "include_untracked takes any args).")
         command = git + ["diff", *args]
         result = run(["diff", *args])
         out, err = result.stdout, result.stderr

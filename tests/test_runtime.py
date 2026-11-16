@@ -310,6 +310,15 @@ def test_git_diff_can_include_untracked_files(tmp_path):
     # The real index is untouched: the new files are still untracked.
     status = server.cap.git("run", ["status", "--porcelain", "--untracked-files=all"])["stdout"]
     assert "?? sub/new.txt" in status and "?? big.txt" in status
+    # The new files are diffed against the working tree only: a staged
+    # view or a revision would show every tracked file as deleted.
+    for extra in (["--cached"], ["--staged"], ["HEAD"], ["--stat", "HEAD~0..HEAD"]):
+        with pytest.raises(RuntimeFault) as exc:
+            server.call("git", {"action": "diff", "include_untracked": True, "args": extra})
+        assert exc.value.code == "invalid_arguments" and "include_untracked" in exc.value.message, extra
+    # Options and pathspecs still work.
+    only = server.call("git", {"action": "diff", "include_untracked": True, "args": ["-U1", "--", "new.txt"]})
+    assert "+fresh" in only["stdout"] and "+two" not in only["stdout"] and "deleted" not in only["stdout"]
     with pytest.raises(RuntimeFault):
         server.call("git", {"action": "log", "include_untracked": True})
     # A new repository has no index file yet.
