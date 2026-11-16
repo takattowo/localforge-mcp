@@ -16,7 +16,7 @@ Project instructions: `workspace get` returns `AGENTS.md`/`CLAUDE.md` from the r
 
 Git-root retry: a relative path missing from the runtime cwd can be resolved from the Git root instead, for reads (`read`, `stat`, `list`, `search`). The path found there goes through the same read policy (roots, `denied_paths`) as any other; writes are never retried there.
 
-Untracked diff: `git` `diff` with `include_untracked` runs `git ls-files`, `git rev-parse` and `git add --intent-to-add` itself, outside `execute`, under the same command policy as the plain diff. The add goes to a fresh throwaway index (`GIT_INDEX_FILE` in the temp folder, deleted afterwards); the real index is never touched.
+Untracked diff: `git` `diff` with `include_untracked` runs `git ls-files`, `git rev-parse`, `git add --intent-to-add` and both `git diff` runs (against the real index, then the throwaway one) itself, outside `execute`, under the same command policy as a plain `git diff`. The add goes to a fresh throwaway index (`GIT_INDEX_FILE` in the temp folder, deleted afterwards); the real index is never touched.
 
 ## Reporting
 

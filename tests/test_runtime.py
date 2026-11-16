@@ -389,6 +389,9 @@ def test_git_diff_can_include_untracked_files(tmp_path):
     # Options and pathspecs still work.
     only = server.call("git", {"action": "diff", "include_untracked": True, "args": ["-U1", "--", "new.txt"]})
     assert "+fresh" in only["stdout"] and "+two" not in only["stdout"] and "deleted" not in only["stdout"]
+    # An option's value given as its own argument is not taken for a revision.
+    pick = server.call("git", {"action": "diff", "include_untracked": True, "args": ["-S", "HEAD", "--", "new.txt"]})
+    assert pick["success"] and "deleted" not in pick["stdout"], pick
     with pytest.raises(RuntimeFault):
         server.call("git", {"action": "log", "include_untracked": True})
     # A new repository has no index file yet.
@@ -425,6 +428,10 @@ def test_git_diff_untracked_skips_what_it_cannot_add(tmp_path, monkeypatch):
     # Only the pathspec's files are counted.
     only = server.call("git", {"action": "diff", "include_untracked": True, "args": ["--", "tracked.txt"]})
     assert only["untracked_files"] == 0 and "untracked_skipped" not in only and "+two" in only["stdout"]
+    # Counted from the diff itself: a pathspec without "--", or a filter.
+    for extra in (["tracked.txt"], ["--diff-filter=M"]):
+        bare = server.call("git", {"action": "diff", "include_untracked": True, "args": extra})
+        assert bare["untracked_files"] == 0 and "+two" in bare["stdout"] and "+fresh" not in bare["stdout"], (extra, bare)
     # A failed add keeps the plain diff and says why.
     import agent_runtime.capabilities as caps
     real = caps.subprocess.run
@@ -460,6 +467,13 @@ def test_pcre2_retry_is_kept_despite_per_file_errors(tmp_path, monkeypatch):
     replies["pcre2"] = subprocess.CompletedProcess([], 2, "{}\n", "rg: ./locked.txt: Access is denied. (os error 5)\n")
     notes = []
     assert server.cap._run_rg_regex(["rg", "-e", "foo(?=bar)", "."], notes) is replies["pcre2"] and "--pcre2" in notes[0]
+    # A PCRE2 match error in one file: the regex compiled, keep the retry.
+    replies["pcre2"] = subprocess.CompletedProcess([], 2, "{}\n", "rg: ./big.txt: PCRE2: error matching: match limit exceeded\n")
+    notes = []
+    assert server.cap._run_rg_regex(["rg", "-e", "foo(?=bar)", "."], notes) is replies["pcre2"] and "--pcre2" in notes[0]
+    # A pattern PCRE2 cannot compile either: the first error stays.
+    replies["pcre2"] = subprocess.CompletedProcess([], 2, "", "rg: PCRE2: error compiling pattern at offset 9: missing closing parenthesis\n")
+    assert server.cap._run_rg_regex(["rg", "-e", "foo(?=bar)", "."], []) is first
     # A ripgrep built without PCRE2: the first error stays, with a note.
     replies["pcre2"] = subprocess.CompletedProcess([], 2, "", "PCRE2 is not available in this build of ripgrep.\n")
     notes = []

@@ -973,8 +973,9 @@ class Capabilities:
                     except FileNotFoundError:
                         pass
                     target.parent.mkdir(parents=True, exist_ok=True)
-                    # A file that starts with a byte order mark keeps it,
-                    # like its line endings, unless the content has its own.
+                    # A file that starts with a byte order mark keeps it, like
+                    # its line endings, whatever the content starts with; a
+                    # file without one gets it only from the content.
                     data, own_bom = _split_bom(data)
                     written = self._atomic_write(target, data, encoding, eol, bom or own_bom)
                 except OSError as e:
@@ -1156,16 +1157,23 @@ class Capabilities:
                     wanted = Path(str(destination).rstrip("/\\")).name
                     if (wanted and wanted != target.name and dest.exists() and os.path.samefile(target, dest)
                             and wanted.lower() == target.name.lower()):
-                        # Case-only rename on a case-insensitive file system,
-                        # which a plain replace leaves as it was.
-                        temp = target.with_name(f".localforge-{uuid.uuid4().hex[:8]}-{target.name}")
-                        target.replace(temp)
-                        try:
-                            temp.replace(dest.with_name(wanted))
-                        except OSError:
-                            temp.replace(target)
-                            raise
-                        dest = dest.with_name(wanted)
+                        # Case-only rename on a case-insensitive file system. Windows
+                        # renames in place; where a plain replace leaves the name as
+                        # it was, go through a temporary name.
+                        renamed = dest.with_name(wanted)
+                        target.replace(renamed)
+                        if wanted not in os.listdir(target.parent):
+                            temp = target.with_name(f".localforge-{uuid.uuid4().hex[:8]}-{target.name}")
+                            target.replace(temp)
+                            try:
+                                temp.replace(renamed)
+                            except OSError:
+                                try:
+                                    temp.replace(target)
+                                except OSError as e:
+                                    raise RuntimeFault("io_error", f"Case-only rename failed; the file is left at {temp}: {e}") from e
+                                raise
+                        dest = renamed
                     else:
                         target.replace(dest)
                 except OSError as e:
@@ -1591,8 +1599,8 @@ class Capabilities:
             if "pcre2 is not available" in err.lower():
                 out_note.append("The regex needs look-around or backreferences, but this ripgrep build has no "
                                 "PCRE2 (PCRE2 unavailable); rewrite it without them.")
-            # Exit 2 without a regex error: the search ran, some files could not be read.
-            elif retry.returncode in (0, 1) or not any(mark in err for mark in ("regex parse error", "PCRE2:")):
+            # Exit 2 without a compile error: the search ran, some files could not be read or matched.
+            elif retry.returncode in (0, 1) or not any(mark in err for mark in ("regex parse error", "error compiling pattern")):
                 out_note.append("The regex needs look-around or backreferences, so it ran with ripgrep's --pcre2.")
                 return retry
         return result
@@ -1843,11 +1851,13 @@ class Capabilities:
         Only the untracked files under the pathspecs after "--" in args
         are listed (all of them without "--"); nested repositories and
         files over max_file_read_bytes are left out and listed in
-        untracked_skipped. untracked_files counts the files diffed; when
-        adding them fails, the plain diff comes back with a note.
+        untracked_skipped. untracked_files counts the new files the diff
+        shows (its "diff --git" headers, so 0 with --stat and the like);
+        when adding them fails, the plain diff comes back with a note.
         """
         git = ["git", "-c", "core.quotepath=false", "-C", str(work)]
-        # The same command policy as the plain diff, which runs through execute.
+        # Every git command here, both diffs included, runs through run()
+        # below, outside execute, under the command policy a plain diff gets.
         self.policy.authorize_command(git + ["diff", *args], work, False)
         env = safe_environment(self.cfg)
         started = time.monotonic()
@@ -1885,7 +1895,11 @@ class Capabilities:
         # view or a revision the throwaway index would show every tracked
         # file as deleted.
         staged = next((a for a in args if a in ("--cached", "--staged") or a.startswith("--merge-base")), None)
-        revs = run(["rev-parse", "--revs-only", "--no-flags", *args])
+        # The value of -S, -G, -O or --diff-filter may come as its own
+        # argument (-S HEAD); it is not a revision.
+        values = ("-S", "-G", "-O", "--diff-filter")
+        revs = run(["rev-parse", "--revs-only", "--no-flags",
+                    *(a for i, a in enumerate(args) if not (i and args[i - 1] in values))])
         if staged or (revs.returncode == 0 and revs.stdout.strip()):
             raise RuntimeFault("invalid_arguments",
                                f"include_untracked diffs new files against the working tree, so it cannot be "
@@ -1912,8 +1926,9 @@ class Capabilities:
                     reason = redact(added.stderr.decode("utf-8", "replace")).strip()[:500]
                     note = f"git add --intent-to-add failed, so only tracked changes are shown: {reason}"
                 else:
-                    included = len(new)
                     result = run(["diff", *args], extra)
+                    # What the diff shows: a pathspec without "--" or a filter can leave some out.
+                    included = sum(1 for line in result.stdout.split(b"\n") if line.startswith(b"diff --git "))
                     out, err = out + result.stdout, err + result.stderr
         finally:
             for leftover in (index, names, index + ".lock"):
