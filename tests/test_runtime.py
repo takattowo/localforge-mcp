@@ -439,6 +439,36 @@ def test_filesystem_copy_dir_needs_recursive(tmp_path):
     assert out["copied_items"] >= 2
 
 
+def test_move_and_copy_refuse_to_overwrite(tmp_path):
+    server = make(tmp_path)
+    (tmp_path / "a.txt").write_text("a")
+    (tmp_path / "b.txt").write_text("b")
+    for action in ("move", "copy"):
+        with pytest.raises(RuntimeFault) as exc:
+            server.call("filesystem", {"action": action, "path": "a.txt", "destination": "b.txt"})
+        assert exc.value.code == "invalid_arguments" and "overwrite" in exc.value.message
+    assert (tmp_path / "b.txt").read_text() == "b" and (tmp_path / "a.txt").exists()
+    server.call("filesystem", {"action": "copy", "path": "a.txt", "destination": "b.txt", "overwrite": True})
+    assert (tmp_path / "b.txt").read_text() == "a"
+    (tmp_path / "b.txt").write_text("b")
+    server.call("filesystem", {"action": "move", "path": "a.txt", "destination": "b.txt", "overwrite": True})
+    assert (tmp_path / "b.txt").read_text() == "a" and not (tmp_path / "a.txt").exists()
+    # An existing directory is never replaced or merged, even with overwrite.
+    (tmp_path / "d1").mkdir()
+    (tmp_path / "d2").mkdir()
+    (tmp_path / "d2" / "keep").write_text("k")
+    for action in ("move", "copy"):
+        for source in ("d1", "b.txt"):
+            with pytest.raises(RuntimeFault) as exc:
+                server.call("filesystem", {"action": action, "path": source, "destination": "d2",
+                                           "recursive": True, "overwrite": True})
+            assert "directory" in exc.value.message
+    assert (tmp_path / "d2" / "keep").exists() and (tmp_path / "d1").is_dir() and (tmp_path / "b.txt").exists()
+    # The source itself under another spelling is not an overwrite.
+    server.call("filesystem", {"action": "move", "path": "b.txt", "destination": "./b.txt"})
+    assert (tmp_path / "b.txt").read_text() == "a"
+
+
 def test_redact_keeps_code_redacts_secrets():
     from agent_runtime.security import redact
     code = "SharepointCertificatePassword = OverrideSecret(\n    body, \"sharepoint_certificate_password\", current.SharepointCertificatePassword),"

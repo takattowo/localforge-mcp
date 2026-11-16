@@ -782,7 +782,7 @@ class Capabilities:
     def filesystem(self, action, path=".", content=None, destination=None, recursive=False,
                    encoding="utf-8", offset=0, max_bytes=None, expected_occurrences=None,
                    old_text=None, new_text=None, edits=None, line_start=None, line_end=None,
-                   limit=200, glob=None, include_hidden=False, patch=None):
+                   limit=200, glob=None, include_hidden=False, patch=None, overwrite=False):
         if action == "copy":
             if not destination:
                 raise RuntimeFault("invalid_arguments", "copy requires destination")
@@ -792,14 +792,14 @@ class Capabilities:
             with self._locked_paths([src, dest]):
                 try:
                     if src.is_file():
+                        self._check_destination("copy", src, dest, overwrite)
                         dest.parent.mkdir(parents=True, exist_ok=True)
                         shutil.copy2(src, dest)
                         return {"source": str(src), "destination": str(dest), "bytes": dest.stat().st_size}
                     if src.is_dir():
                         if not recursive:
                             raise RuntimeFault("invalid_arguments", "copying a directory requires recursive=true")
-                        if dest.exists():
-                            raise RuntimeFault("invalid_arguments", f"Copy destination already exists: {dest}")
+                        self._check_destination("copy", src, dest, overwrite)
                         dest.parent.mkdir(parents=True, exist_ok=True)
                         shutil.copytree(src, dest)
                         count = sum(1 for _ in dest.rglob("*")) + 1
@@ -1033,6 +1033,7 @@ class Capabilities:
             dest = self.paths.resolve(destination, cwd=self.cwd, access="write", must_exist=False)
             self.policy.authorize_path("move")
             with self._locked_paths([target, dest]):
+                self._check_destination("move", target, dest, overwrite)
                 try:
                     dest.parent.mkdir(parents=True, exist_ok=True)
                     target.replace(dest)
@@ -1040,6 +1041,33 @@ class Capabilities:
                     _fs_error("move", target, e)
             return {"source": str(target), "destination": str(dest)}
         raise RuntimeFault("invalid_action", f"Unknown filesystem action: {action}")
+
+    @staticmethod
+    def _check_destination(action, src, dest, overwrite):
+        """Refuse an existing move/copy destination, unless overwrite
+        replaces a file with a file.
+
+        An existing directory is never replaced or merged. A move onto
+        the source itself (another spelling of its path) is not an
+        overwrite.
+        """
+        if not dest.exists():
+            return
+        if action == "move":
+            with contextlib.suppress(OSError):
+                if os.path.samefile(src, dest):
+                    return
+        name = action.capitalize()
+        if dest.is_dir():
+            raise RuntimeFault("invalid_arguments",
+                               f"{name} destination is an existing directory: {dest}. A directory is never "
+                               "replaced or merged: give the full destination path, or delete it first.")
+        if src.is_dir():
+            raise RuntimeFault("invalid_arguments",
+                               f"{name} destination is an existing file: {dest}; a directory never replaces a file.")
+        if not overwrite:
+            raise RuntimeFault("invalid_arguments",
+                               f"{name} destination already exists: {dest}. Pass overwrite: true to replace it.")
 
     @staticmethod
     def _list_dir(target, limit, offset, glob, include_hidden):
