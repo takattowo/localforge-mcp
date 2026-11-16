@@ -1769,6 +1769,20 @@ def test_search_reads_lines_that_are_not_utf8(tmp_path):
     assert hit["text"] == "caf\ufffd needle" and hit["before"] == ["1\tone"] and hit["after"] == ["3\tthree"]
 
 
+def test_search_query_starting_with_dash(tmp_path):
+    if shutil.which("rg") is None:
+        pytest.skip("ripgrep unavailable")
+    server = make(tmp_path)
+    (tmp_path / "a.txt").write_text("run --verbose\n-1 is negative\n")
+    # ripgrep used to read a leading - as one of its own options.
+    found = server.cap.search("--verbose")
+    assert found["engine"] == "ripgrep" and [r["text"] for r in found["results"]] == ["run --verbose"], found
+    one_file = server.cap.search("-1", path=str(tmp_path / "a.txt"))
+    assert [r["text"] for r in one_file["results"]] == ["-1 is negative"], one_file
+    regex = server.cap.search("-1 is", fixed_string=False)
+    assert [r["text"] for r in regex["results"]] == ["-1 is negative"], regex
+
+
 def test_git_shows_non_ascii_paths(tmp_path):
     if shutil.which("git") is None:
         pytest.skip("git unavailable")

@@ -1006,7 +1006,8 @@ class Capabilities:
             command.append("-i")
         if context > 0:
             command += ["-C", str(context)]
-        command += [query, str(root)]
+        # -e: a query starting with - (--verbose, -1) is a pattern, not an option.
+        command += ["-e", query, str(root)]
         result = subprocess.run(command, cwd=str(root), capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
                                 stdin=subprocess.DEVNULL,
                                 env=safe_environment(self.cfg))
@@ -1066,7 +1067,7 @@ class Capabilities:
             command.append("-i")
         if context > 0:
             command += ["-C", str(context)]
-        command += [query, str(target)]
+        command += ["-e", query, str(target)]
         result = subprocess.run(command, capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=60,
                                 stdin=subprocess.DEVNULL,
                                 env=safe_environment(self.cfg))
