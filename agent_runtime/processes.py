@@ -221,6 +221,9 @@ class ProcessManager:
                     break
                 output.append({"seq": chunk.seq, "stream": chunk.stream, "text": chunk.text, "at": chunk.at})
                 used += size
+                # The agent has seen the whole chunk: a wait from this
+                # cursor goes on after it, not inside it past an old match.
+                item.marks.pop(chunk.seq, None)
         result = {
             **self.status(process_id), "oldest_sequence": oldest,
             "cursor_lost": lost, "truncated": truncated,
@@ -250,9 +253,12 @@ class ProcessManager:
         max_inline_output_bytes), and next_after: after a match, the
         chunk holding the matched line, and a wait from it goes on with
         the line after the match (a read from it skips the rest of that
-        chunk, which tail shows); otherwise the newest chunk. A process
-        whose pipes something it started still holds counts as exited
-        EXIT_GRACE_SECONDS after it exits, with output_held true.
+        chunk, which tail shows, and a wait from a cursor a read returned
+        goes on after the whole chunk); otherwise the newest chunk. A
+        process whose pipes something it started still holds counts as
+        exited EXIT_GRACE_SECONDS after it exits, with output_held true;
+        with a pattern it is watched until wait_ms passes instead, so a
+        daemon it started can still print the line waited for.
         """
         try:
             regex = re.compile(pattern) if pattern is not None else None
@@ -283,8 +289,10 @@ class ProcessManager:
                 # Something it started may hold its output pipes for long:
                 # past a short grace for the rest of its own output, it
                 # counts as exited all the same (output_held says so).
-                exited = code is not None and (not held(item)
-                                               or time.monotonic() - exit_seen >= EXIT_GRACE_SECONDS)
+                # A pattern may still come from what it started: keep
+                # watching until the deadline.
+                exited = code is not None and (not held(item) or (
+                    regex is None and time.monotonic() - exit_seen >= EXIT_GRACE_SECONDS))
                 if regex is not None:
                     for chunk in item.chunks:
                         if chunk.seq <= scanned:
@@ -301,14 +309,17 @@ class ProcessManager:
                             hit = (chunk.seq, end)
                             break
                     if matched is None and exited and not held(item):
-                        # Nothing more is coming: unfinished last lines count too.
-                        for stream, line in partial.items():
-                            if line and regex.search(line.rstrip("\r")):
+                        # Nothing more is coming: unfinished last lines count too,
+                        # oldest stream first. A stream whose last chunk is at or
+                        # before the cursor has nothing new, unless the cursor is
+                        # a mark inside that chunk.
+                        finals = {c.stream: c for c in item.chunks if c.seq <= scanned}
+                        for final in sorted(finals.values(), key=lambda c: c.seq):
+                            line = partial.get(final.stream)
+                            if (final.seq > after or final.seq in skip) and line and regex.search(line.rstrip("\r")):
                                 matched = line.rstrip("\r")
                                 # Marked at its stream's last chunk, so it is not matched again.
-                                final = next((c for c in reversed(item.chunks)
-                                              if c.stream == stream and c.seq <= scanned), None)
-                                hit = (final.seq, len(final.text)) if final is not None else None
+                                hit = (final.seq, len(final.text))
                                 break
                     if matched is not None:
                         reason = "matched"
@@ -334,7 +345,7 @@ class ProcessManager:
         if len(raw) > cap:
             tail = raw[len(raw) - cap:].decode("utf-8", "ignore")
             result["tail_truncated"] = True
-        if reason == "exited" and held(item):
+        if item.proc.poll() is not None and held(item):
             result["output_held"] = True
         result["tail"] = tail
         return result

@@ -158,6 +158,54 @@ def test_process_wait_matches_a_line_the_cursor_cuts_as_a_whole(tmp_path):
     finally:
         server.processes.stop(pid, True)
 
+def _waits(server, pid, pattern, rounds=4):
+    # Waits from each next_after until one does not match.
+    seen, after = [], 0
+    for _ in range(rounds):
+        out = server.call("process", {"action": "wait", "process_id": pid, "pattern": pattern,
+                                      "after": after, "wait_ms": 20000})
+        if out["reason"] != "matched":
+            break
+        seen.append(out["matched"])
+        after = out["next_after"]
+    return seen, out
+
+def test_process_wait_at_exit_matches_each_unfinished_last_line_once(tmp_path):
+    server = make(tmp_path)
+    # Both streams end without a newline, then the process exits.
+    pid = server.call("process", {"action": "start", "command": [sys.executable, "-c", (
+        "import sys, time; sys.stdout.write('AAA match'); sys.stdout.flush(); time.sleep(0.3); "
+        "sys.stderr.write('BBB match'); sys.stderr.flush()")]})["process_id"]
+    try:
+        seen, out = _waits(server, pid, "match")
+        assert seen == ["AAA match", "BBB match"] and out["reason"] == "exited", (seen, out)
+    finally:
+        server.processes.stop(pid, True)
+    # An unfinished last line after a match in the same chunk is still new.
+    pid = server.call("process", {"action": "start", "command": [sys.executable, "-c", (
+        "import sys; sys.stdout.write('x match\\ny match'); sys.stdout.flush()")]})["process_id"]
+    try:
+        seen, out = _waits(server, pid, "match")
+        assert seen == ["x match", "y match"] and out["reason"] == "exited", (seen, out)
+    finally:
+        server.processes.stop(pid, True)
+
+def test_process_wait_from_a_read_cursor_skips_the_chunk_read_returned(tmp_path):
+    server = make(tmp_path)
+    pid = server.call("process", {"action": "start", "command": [sys.executable, "-c", (
+        "import sys, time; sys.stdout.write('err one\\nerr two\\n'); sys.stdout.flush(); time.sleep(30)")]})["process_id"]
+    try:
+        first = server.call("process", {"action": "wait", "process_id": pid, "pattern": "err", "wait_ms": 20000})
+        assert first["matched"] == "err one", first
+        read = server.processes.read(pid)
+        assert "err two" in read["stdout"], read
+        # read showed the whole chunk, so its cursor does not resume inside it.
+        again = server.call("process", {"action": "wait", "process_id": pid, "pattern": "err",
+                                        "after": read["next_after"], "wait_ms": 500})
+        assert again["reason"] == "timeout", again
+    finally:
+        server.processes.stop(pid, True)
+
 @pytest.mark.parametrize("engine", ["ripgrep", "python"])
 def test_long_lines_are_cut_in_reads_and_search(tmp_path, monkeypatch, engine):
     if engine == "python":
@@ -2912,6 +2960,23 @@ def test_process_wait_ends_soon_after_exit_while_output_is_held(tmp_path):
         elapsed = time.monotonic() - started
         assert out["reason"] == "exited" and out["state"] == "exited" and out["output_held"] is True, out
         assert elapsed < 10, elapsed
+    finally:
+        server.processes.stop(pid, True)
+
+
+# Like _GRANDCHILD, but what it leaves running prints a line a few seconds
+# after the command exits.
+_LATE_READY = ("ping -n 2 127.0.0.1 >nul & echo parent & start /b cmd /c ping -n 5 127.0.0.1 ^>nul "
+               "^& echo daemon ready ^& ping -n 30 127.0.0.1 ^>nul" if os.name == "nt"
+               else "echo parent; (sleep 4; echo daemon ready; sleep 30) &")
+
+
+def test_process_wait_for_a_pattern_outlasts_the_exit_grace_while_output_is_held(tmp_path):
+    server = make(tmp_path)
+    pid = server.call("process", {"action": "start", "command": _LATE_READY})["process_id"]
+    try:
+        out = server.call("process", {"action": "wait", "process_id": pid, "pattern": "daemon ready", "wait_ms": 20000})
+        assert out["reason"] == "matched" and out["state"] == "exited" and out["output_held"] is True, out
     finally:
         server.processes.stop(pid, True)
 
