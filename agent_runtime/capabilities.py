@@ -1,4 +1,5 @@
 from __future__ import annotations
+import codecs
 import contextlib
 import difflib
 from concurrent.futures import ThreadPoolExecutor
@@ -295,7 +296,7 @@ class Capabilities:
             else:
                 # One folder per config, so instances with different
                 # policies never read or prune each other's output.
-                key = str(cfg.config_path or cfg.workspace_root)
+                key = os.path.normcase(str(Path(cfg.config_path or cfg.workspace_root).resolve()))
                 digest = hashlib.sha256(key.encode("utf-8", "surrogatepass")).hexdigest()[:12]
                 spill = Path(tempfile.gettempdir()) / "localforge-results" / digest
             spill.mkdir(parents=True, exist_ok=True)
@@ -387,8 +388,10 @@ class Capabilities:
                 except (RuntimeFault, OSError):
                     continue
                 cut = len(raw) > budget
-                # "ignore" on a cut read drops the partial character at the end.
-                content, extra = _clip(raw[:budget].decode("utf-8", "ignore" if cut else "replace"), budget)
+                # On a cut read, final=False holds back only a partial
+                # character at the end; bad bytes elsewhere become U+FFFD.
+                text = codecs.getincrementaldecoder("utf-8")("replace").decode(raw[:budget], final=not cut)
+                content, extra = _clip(text, budget)
                 cut = cut or extra
                 budget -= len(content.encode("utf-8"))
                 entry = {"path": str(target), "content": content}

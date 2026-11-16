@@ -1527,6 +1527,13 @@ def test_windows_powershell_curl_and_and_hint(tmp_path):
     # Statements that must open a script still work behind the prelude.
     using = server.cap.execute("using namespace System.Text\n[StringBuilder]::new('ok').ToString()")
     assert using["success"] and using["stdout"].strip() == "ok"
+    # Comments and help blocks may come first; so may odd spacing.
+    for script in ("# note\n<# help\n#>\nusing namespace System.Text\n[StringBuilder]::new('ok').ToString()",
+                   "param\t($v = 'ok')\n$v"):
+        ran = server.cap.execute(script)
+        assert ran["success"] and ran["stdout"].strip() == "ok", ran["stderr"]
+    # A leading comment does not stop the prelude for ordinary commands.
+    assert server.cap.execute("# x\n(Get-Command curl).CommandType")["stdout"].strip() == "Application"
     # The prelude shares line 1, so error line numbers stay as written.
     assert "At line:1" in server.cap.execute("throw 'x'")["stderr"]
 
@@ -1555,7 +1562,17 @@ def test_diff_skipped_for_large_or_binary_files(tmp_path):
     assert "diff_skipped" not in off.cap.filesystem("write", "big.txt", "small\n")
 
 
+def test_project_instructions_cut_keeps_bad_bytes_visible(tmp_path):
+    server = make(tmp_path, max_project_instruction_bytes=7)
+    (tmp_path / "AGENTS.md").write_bytes(b"x\xffyz\xc3\xa9\xc3\xa9")
+    [entry] = server.cap._project_instructions(None, tmp_path)
+    assert entry["content"] == "x\ufffdyz" and entry["truncated"]
+
+
 def test_spill_dir_paths_and_failures(tmp_path, monkeypatch):
+    import tempfile
+    # Default spill folders go under %TEMP%; keep them in tmp_path.
+    monkeypatch.setattr(tempfile, "tempdir", str(tmp_path / "tmp"))
     monkeypatch.setenv("LF_SPILL_TEST", str(tmp_path))
     expanded = make(tmp_path, spill_dir=os.path.join("$LF_SPILL_TEST", "s"))
     assert expanded.cap.spill_dir == (tmp_path / "s").resolve()
@@ -1566,6 +1583,7 @@ def test_spill_dir_paths_and_failures(tmp_path, monkeypatch):
     (tmp_path / "b").mkdir()
     first, second = make(tmp_path / "a", spill_dir=None), make(tmp_path / "b", spill_dir=None)
     assert first.cap.spill_dir != second.cap.spill_dir
+    assert first.cap.spill_dir.parent == (tmp_path / "tmp" / "localforge-results").resolve()
     # An unusable folder turns saving off instead of failing startup.
     (tmp_path / "file").write_text("x")
     broken = make(tmp_path, spill_dir=str(tmp_path / "file"), max_inline_output_bytes=1000)

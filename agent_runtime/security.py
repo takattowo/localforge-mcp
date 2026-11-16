@@ -120,12 +120,15 @@ class Policy:
 # curl.exe runs. pwsh 6+ has no such aliases.
 # Same line as the command, so error line numbers stay as written.
 POWERSHELL_PRELUDE = "Remove-Item Alias:curl, Alias:wget -Force -ErrorAction SilentlyContinue; "
-# Statements PowerShell accepts only at the very start of a script;
-# such commands run without the prelude.
-_PS_SCRIPT_START = ("using ", "#requires", "param(", "param (", "[cmdletbinding")
+# Statements PowerShell accepts only at the very start of a script
+# (after blank lines and comments); such commands run without the
+# prelude. #requires lines stay visible to the start check.
+_PS_LEADING = re.compile(r"\A(?:\s|#(?!requires)[^\n]*|<#.*?#>)*", re.S | re.I)
+_PS_SCRIPT_START = re.compile(r"using\s|#requires|param\s*\(|\[cmdletbinding", re.I)
 
 def _powershell_script(command):
-    if command.lstrip().lower().startswith(_PS_SCRIPT_START):
+    body = command[_PS_LEADING.match(command).end():]
+    if _PS_SCRIPT_START.match(body):
         return command
     return POWERSHELL_PRELUDE + command
 
