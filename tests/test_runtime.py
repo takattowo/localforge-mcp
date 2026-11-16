@@ -2020,6 +2020,69 @@ def test_execute_marks_output_past_the_process_buffer(tmp_path):
     assert out["stdout"].startswith("...[earlier output dropped") and out["stdout"].rstrip().endswith("99" * 100)
 
 
+def test_execute_without_input_gives_an_empty_stdin(tmp_path):
+    if shutil.which("rg") is None:
+        pytest.skip("ripgrep unavailable")
+    server = make(tmp_path)
+    (tmp_path / "a.txt").write_text("needle\n")
+    # With a closed stdin pipe, rg searched that (empty) pipe instead of the cwd.
+    out = server.cap.execute(["rg", "-c", "needle"])
+    assert out["success"] and "a.txt" in out["stdout"], out
+    # A process started without a stdin pipe says its stdin is closed.
+    item = server.processes.spawn([sys.executable, "-c", "import time; time.sleep(30)"], stdin=subprocess.DEVNULL)
+    try:
+        with pytest.raises(RuntimeFault) as exc:
+            server.processes.write(item.id, "x")
+        assert exc.value.code == "stdin_closed"
+    finally:
+        server.processes.stop(item.id, True)
+
+
+# The command exits soon; what it starts keeps its output pipes and
+# prints every second. The first ping gives cmd time to be put in its
+# job before it starts anything. Not Python: a Store Python's children
+# are started outside the caller's job.
+_GRANDCHILD = ("ping -n 2 127.0.0.1 >nul & echo parent & start /b ping -n 30 127.0.0.1" if os.name == "nt"
+               else "echo parent; (while :; do echo tick; sleep 1; done) &")
+
+
+def _pipes_close(item, seconds=10):
+    # The pipes close once whatever held them is gone.
+    for pump in item.pumps:
+        pump.join(seconds)
+    return not any(pump.is_alive() for pump in item.pumps)
+
+
+def test_execute_backgrounds_a_grandchild_holding_the_pipes(tmp_path):
+    server = make(tmp_path)
+    started = time.monotonic()
+    out = server.cap.execute(_GRANDCHILD, timeout=5)
+    elapsed = time.monotonic() - started
+    pid = out.get("process_id")
+    try:
+        assert out["error_type"] == "backgrounded" and out["exit_code"] == 0 and pid, out
+        assert "parent" in out["stdout"] and pid in out["hint"]
+        # One deadline for both pipes, not a second more per pipe.
+        assert elapsed < 5.9, elapsed
+        # Output keeps flowing, and process stop ends what holds the pipes.
+        assert server.processes.read(pid, after=out["next_after"], wait_ms=5000)["stdout"]
+        item = server.processes._get(pid)
+    finally:
+        if pid:
+            server.processes.stop(pid, True)
+    assert _pipes_close(item)
+
+
+def test_execute_kills_a_grandchild_holding_the_pipes_on_kill_on_timeout(tmp_path, monkeypatch):
+    server = make(tmp_path)
+    dropped = []
+    discard = server.processes.discard
+    monkeypatch.setattr(server.processes, "discard", lambda item: (dropped.append(item), discard(item)))
+    out = server.cap.execute(_GRANDCHILD, timeout=5, kill_on_timeout=True)
+    assert out["error_type"] == "timeout" and "process_id" not in out and _exec_entries(server) == [], out
+    assert "parent" in out["stdout"] and _pipes_close(dropped[0])
+
+
 @pytest.mark.parametrize("engine", ["ripgrep", "python"])
 def test_search_groups_matches_by_file(tmp_path, monkeypatch, engine):
     if engine == "ripgrep" and not shutil.which("rg"):

@@ -1,4 +1,5 @@
 from __future__ import annotations
+import contextlib
 import ctypes
 import os
 import sys
@@ -63,7 +64,7 @@ class WindowsJob:
     job and behavior is unchanged from before.
     """
 
-    def __init__(self):
+    def __init__(self, kill_on_close=True):
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
         kernel32.CreateJobObjectW.restype = wintypes.HANDLE
         # LPSECURITY_ATTRIBUTES is not in ctypes.wintypes; passing None
@@ -77,10 +78,15 @@ class WindowsJob:
         kernel32.OpenProcess.restype = wintypes.HANDLE
         kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
         kernel32.CloseHandle.restype = wintypes.BOOL
+        kernel32.TerminateJobObject.argtypes = [wintypes.HANDLE, wintypes.UINT]
+        kernel32.TerminateJobObject.restype = wintypes.BOOL
         self._kernel32 = kernel32
         job = kernel32.CreateJobObjectW(None, None)
         if not job:
             raise OSError(ctypes.get_last_error(), "CreateJobObjectW failed")
+        self._job = job
+        if not kill_on_close:
+            return
         info = _EXTENDED_LIMIT_INFORMATION()
         info.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE
         if not kernel32.SetInformationJobObject(
@@ -88,8 +94,8 @@ class WindowsJob:
                 ctypes.byref(info), ctypes.sizeof(info)):
             error = ctypes.get_last_error()
             kernel32.CloseHandle(job)
+            self._job = None
             raise OSError(error, "SetInformationJobObject failed")
-        self._job = job
 
     def assign(self, pid: int) -> bool:
         handle = self._kernel32.OpenProcess(
@@ -100,6 +106,32 @@ class WindowsJob:
             return bool(self._kernel32.AssignProcessToJobObject(self._job, handle))
         finally:
             self._kernel32.CloseHandle(handle)
+
+    def terminate(self):
+        """Kill every process in the job, however deep in the tree."""
+        self._kernel32.TerminateJobObject(self._job, 1)
+
+    def __del__(self):
+        # Per-process jobs are dropped with their process entry.
+        with contextlib.suppress(Exception):
+            if self._job:
+                self._kernel32.CloseHandle(self._job)
+
+
+def track(pid: int):
+    """Best-effort: a job holding pid and everything it starts, or None.
+
+    Lets a process tree be stopped after its root exited, when
+    taskkill /T no longer reaches the rest. Windows only; nested in
+    the kill-on-close job when pid is already in it.
+    """
+    if os.name != "nt":
+        return None
+    try:
+        job = WindowsJob(kill_on_close=False)
+        return job if job.assign(pid) else None
+    except Exception:
+        return None
 
 
 _job: WindowsJob | None = None

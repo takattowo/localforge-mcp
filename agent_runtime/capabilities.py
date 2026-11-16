@@ -1583,25 +1583,43 @@ class Capabilities:
         try:
             # A process entry, so a command still running at its timeout
             # can keep running and be followed with the process tool.
+            # No input: an empty stdin, not a closed pipe, which tools
+            # such as rg read as piped input instead of searching the cwd.
             item = self.processes.spawn(command, str(work), shell, env, f"exec-{uuid.uuid4().hex[:10]}",
-                                        enforce_limit=False)
+                                        enforce_limit=False,
+                                        stdin=subprocess.PIPE if stdin_bytes is not None else subprocess.DEVNULL)
         except OSError as e:
             return {"success": False, "command": command, "cwd": str(work), "exit_code": None,
                     "stdout": "", "stderr": str(e), "duration_ms": int((time.monotonic() - started) * 1000),
                     "error_type": "process_start"}
         proc = item.proc
-        if stdin_bytes:
+        if stdin_bytes is not None:
             threading.Thread(target=self._feed_stdin, args=(proc, stdin_bytes), daemon=True).start()
-        else:
-            proc.stdin.close()
         try:
             proc.wait(timeout=max(0.0, deadline - time.monotonic()))
         except subprocess.TimeoutExpired:
             pass
+
+        def drain():
+            # Let the readers drain the pipes, both by one deadline (with a
+            # second of grace past it, for a command that ended or was
+            # stopped right at it): a grandchild that holds them open must
+            # not hold up the reply.
+            until = max(deadline, time.monotonic() + 1.0)
+            for pump in item.pumps:
+                pump.join(max(0.0, until - time.monotonic()))
+
+        if proc.poll() is not None:
+            drain()
         error_type, hint = None, None
-        if proc.poll() is None:
-            # active() counts this command too, so <= leaves it room.
-            if not kill_on_timeout and self.processes.active() <= int(self.cfg.max_processes):
+        running = proc.poll() is None
+        if running or any(pump.is_alive() for pump in item.pumps):
+            # Still running, or exited while a process it started holds
+            # its output open: either way it can move to the background.
+            # active() counts a running command, so <= leaves it room; an
+            # exited one is not counted, so it needs a free slot.
+            room = int(self.cfg.max_processes) - (0 if running else 1)
+            if not kill_on_timeout and self.processes.active() <= room:
                 error_type = "backgrounded"
             else:
                 if not kill_on_timeout:
@@ -1609,13 +1627,10 @@ class Capabilities:
                             "stopped at its timeout instead of moving to the background.")
                 self.processes.stop(item.id, True)
                 error_type = "timeout"
+                drain()
         elif proc.returncode != 0:
             error_type = "process_exit"
         if error_type != "backgrounded":
-            # Let the readers drain the pipes; a grandchild that holds
-            # them open must not hold up the reply past the deadline.
-            for pump in item.pumps:
-                pump.join(max(1.0, deadline - time.monotonic()))
             self.processes.discard(item)
         with item.lock:
             chunks, last = list(item.chunks), item.next_seq - 1
@@ -1646,9 +1661,14 @@ class Capabilities:
         if error_type == "backgrounded":
             result["process_id"] = item.id
             result["next_after"] = last
-            hint = (f"Still running after {effective_timeout:g} s, so it keeps running in the background "
-                    f"as process {item.id}: process read with that process_id (after={last}, wait_ms) "
-                    "shows new output, process stop ends it. Do not start another copy while it runs.")
+            if running:
+                hint = (f"Still running after {effective_timeout:g} s, so it keeps running in the background "
+                        f"as process {item.id}: process read with that process_id (after={last}, wait_ms) "
+                        "shows new output, process stop ends it. Do not start another copy while it runs.")
+            else:
+                hint = (f"The command exited, but a process it started still held its output open after "
+                        f"{effective_timeout:g} s, so it is kept as process {item.id}: process read with that "
+                        f"process_id (after={last}, wait_ms) shows new output, process stop ends it.")
         if and_or_failed:
             hint = ("Windows PowerShell 5.1 has no && or ||. Chain with ; "
                     "(or 'if ($?) { ... }'), or make separate calls.")

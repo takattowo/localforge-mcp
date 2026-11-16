@@ -10,6 +10,7 @@ import time
 import uuid
 from .errors import RuntimeFault
 from .job import adopt as job_adopt
+from .job import track as job_track
 from .security import coerce_command, command_for_spawn, redact, spawn_environment
 
 STDIN_WRITE_TIMEOUT_SECONDS = 30
@@ -38,6 +39,8 @@ class Managed:
     stdin_lock: threading.Lock = field(default_factory=threading.Lock)
     chunk_cond: threading.Condition = field(init=False)
     pumps: list = field(default_factory=list)
+    # Windows: a job holding the process tree (see job.track).
+    job: object = None
 
     def __post_init__(self):
         self.chunk_cond = threading.Condition(self.lock)
@@ -54,9 +57,9 @@ class ProcessManager:
             return {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP}
         return {"start_new_session": True}
 
-    def _popen(self, command, cwd, shell, env):
+    def _popen(self, command, cwd, shell, env, stdin=subprocess.PIPE):
         return subprocess.Popen(
-            command_for_spawn(self.cfg, command, shell), cwd=cwd, shell=False, stdin=subprocess.PIPE,
+            command_for_spawn(self.cfg, command, shell), cwd=cwd, shell=False, stdin=stdin,
             stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=False,
             env=spawn_environment(self.cfg, shell, env), **self._creation(),
         )
@@ -111,11 +114,13 @@ class ProcessManager:
         return self.status(self.spawn(command, cwd, shell, env, process_id, base_cwd).id)
 
     def spawn(self, command, cwd=None, shell=False, env=None, process_id=None, base_cwd=None,
-              enforce_limit=True):
+              enforce_limit=True, stdin=subprocess.PIPE):
         """Start a managed process and return its entry.
 
         enforce_limit=False skips the max_processes check; execute
         uses it and checks the limit itself before keeping a command.
+        stdin is passed to Popen; execute gives DEVNULL when it has no
+        input, so the child sees an empty stdin, not a closed pipe.
         """
         # base_cwd is the runtime cwd; a relative or missing cwd
         # resolves against it, like execute.
@@ -129,13 +134,14 @@ class ProcessManager:
         with self.lock:
             if pid in self.items and self.items[pid].proc.poll() is None:
                 raise RuntimeFault("process_exists", f"Process id already active: {pid}")
-            proc = self._popen(command, str(work), shell, env)
+            proc = self._popen(command, str(work), shell, env, stdin)
             if self.cfg.kill_children_on_exit:
                 # Kernel-side cleanup: the child dies with
                 # this process however it dies, not just on
                 # a clean exit (see agent_runtime/job.py).
                 job_adopt(proc.pid)
-            item = Managed(pid, proc, command, str(work), shell, env, time.time())
+            # After job_adopt, so this job nests inside that one.
+            item = Managed(pid, proc, command, str(work), shell, env, time.time(), job=job_track(proc.pid))
             self.items[pid] = item
         for stream, pipe in (("stdout", proc.stdout), ("stderr", proc.stderr)):
             pump = threading.Thread(target=self._pump, args=(item, pipe, stream), daemon=True)
@@ -204,6 +210,9 @@ class ProcessManager:
         item = self._get(process_id)
         if item.proc.poll() is not None:
             raise RuntimeFault("process_exited", "Process already exited")
+        if item.proc.stdin is None:
+            # Started without a stdin pipe (execute with no input).
+            raise RuntimeFault("stdin_closed", "Process stdin is closed")
         data = (text + ("\n" if append_newline else "")).encode("utf-8")
         # stdin is a pipe: a child that never drains it fills
         # the buffer and blocks the write forever, pinning a
@@ -236,14 +245,19 @@ class ProcessManager:
         return {"process_id": process_id, "written_bytes": len(data)}
 
     def _terminate_tree(self, item, force=False):
-        if item.proc.poll() is not None:
-            return
+        # An exited process may have left children running (holding its
+        # output pipes, say); they are stopped too.
         if os.name == "nt":
-            command = ["taskkill", "/PID", str(item.proc.pid), "/T"]
-            if force:
-                command.append("/F")
-            subprocess.run(command, capture_output=True, stdin=subprocess.DEVNULL, timeout=15)
+            if item.proc.poll() is None:
+                command = ["taskkill", "/PID", str(item.proc.pid), "/T"]
+                if force:
+                    command.append("/F")
+                subprocess.run(command, capture_output=True, stdin=subprocess.DEVNULL, timeout=15)
+            elif item.job is not None:
+                # taskkill /T cannot reach them through a dead PID.
+                item.job.terminate()
         else:
+            # The process group outlives its leader while members remain.
             try:
                 os.killpg(item.proc.pid, signal.SIGKILL if force else signal.SIGTERM)
             except ProcessLookupError:
