@@ -21,6 +21,7 @@ def test_mcp_protocol(tmp_path):
     assert init["result"]["protocolVersion"] == "2025-06-18"
     assert init["result"]["serverInfo"]["name"] == "localforge-mcp"
     assert "logging" in init["result"]["capabilities"]
+    assert init["result"]["instructions"].startswith("LocalForge rules:")
     tools = server.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})["result"]["tools"]
     assert {item["name"] for item in tools} == {"workspace", "filesystem", "search", "multi_search", "batch", "git", "execute", "process", "todo"}
     assert server.handle({"jsonrpc": "2.0", "method": "notifications/initialized"}) is None

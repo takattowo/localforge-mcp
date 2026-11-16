@@ -22,6 +22,16 @@ PROTOCOL = "2025-06-18"
 MAX_BATCH_CALLS = 16
 STDOUT_WRITE_TIMEOUT_SECONDS = 30
 MAX_PENDING_REQUESTS = 128
+# Sent in the initialize result; MCP clients may show it to the model.
+INSTRUCTIONS = (
+    "LocalForge rules: "
+    "Put independent reads/searches in ONE batch call (max 16, match results by index/label); "
+    "fan out searches with multi_search. "
+    "Edit files only with filesystem write/replace_text/multi_edit/apply_patch, "
+    "never via execute, process, or any script. "
+    "Long runs (builds, tests): process start + read with wait_ms, not a long execute timeout. "
+    "Stage explicit files only; git add -A/./--all is blocked."
+)
 
 def _guarded_write(emit, timeout):
     """Run emit() on a helper thread with a timeout.
@@ -407,7 +417,8 @@ class Server:
         if method == "initialize":
             result = {"protocolVersion": PROTOCOL,
                       "capabilities": {"tools": {}, "logging": {}},
-                      "serverInfo": {"name": "localforge-mcp", "version": __version__}}
+                      "serverInfo": {"name": "localforge-mcp", "version": __version__},
+                      "instructions": INSTRUCTIONS}
         elif method == "tools/list":
             result = {"tools": self.tools()}
         elif method == "tools/call":
