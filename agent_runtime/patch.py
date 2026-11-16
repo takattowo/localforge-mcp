@@ -210,13 +210,31 @@ def _place(lines, hunk, cursor, rel):
                        f"Patch hunk failed in {rel}: {hunk.header} (expected {old[at - stated]!r}, found {found!r})")
 
 
-def build_new(original, filepatch, rel, eol=None):
+def _drop_bom(hunk):
+    """Strip the byte order mark a git diff shows on line 1.
+
+    The file is read without its BOM (it is written back), so the first
+    old and new line of a hunk at line 1 compare without it.
+    """
+    if hunk.old_start > 1:
+        return
+    for side in (" -", " +"):
+        first = next((k for k, op in enumerate(hunk.ops) if op in side), None)
+        if first is not None and hunk.texts[first].startswith("\ufeff"):
+            hunk.texts[first] = hunk.texts[first][1:]
+
+
+def build_new(original, filepatch, rel, eol=None, bom=False):
     # Untouched lines keep their exact bytes; added lines take the
     # file's dominant line ending (eol), LF when it has none. parse
     # LF-normalizes patch text, so lines compare without endings.
+    # bom: the file had a byte order mark, removed from original.
     newline = eol or "\n"
     lines = _split_lines(original)
     out = []
+    if bom:
+        for hunk in filepatch.hunks:
+            _drop_bom(hunk)
 
     def emit(line):
         # A line after one that lacks a newline (the old last line)

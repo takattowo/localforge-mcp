@@ -1110,7 +1110,7 @@ class Capabilities:
                             raise RuntimeFault("binary_file", "Binary file patch is not supported")
                         original, bom = _split_bom(raw.decode(encoding, "replace"))
                         eol = _detect_eol(original)
-                    planned.append((dest, build_patched(original, fp, rel, eol), creating, bom))
+                    planned.append((dest, build_patched(original, fp, rel, eol, bom), creating, bom))
                 results = []
                 for dest, updated, creating, bom in planned:
                     try:

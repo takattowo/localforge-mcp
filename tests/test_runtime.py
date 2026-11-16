@@ -228,6 +228,17 @@ def test_utf8_bom_is_hidden_and_kept(tmp_path):
     server.cap.filesystem("write", "plain.txt", "y\n")
     assert (tmp_path / "plain.txt").read_bytes() == b"y\n"
 
+def test_patch_from_git_diff_of_a_bom_file_applies(tmp_path):
+    server = make(tmp_path)
+    bom = b"\xef\xbb\xbf"
+    path = tmp_path / "c.txt"
+    path.write_bytes(bom + b"first\nsecond\n")
+    # git diff shows the BOM as "\ufeff" on line 1, old and new.
+    server.cap.filesystem("apply_patch", ".", patch="--- a/c.txt\n+++ b/c.txt\n@@ -1,2 +1,2 @@\n-\ufefffirst\n+\ufeffFIRST\n second\n")
+    assert path.read_bytes() == bom + b"FIRST\nsecond\n"
+    server.cap.filesystem("apply_patch", ".", patch="--- a/c.txt\n+++ b/c.txt\n@@ -1,2 +1,2 @@\n \ufeffFIRST\n-second\n+SECOND\n")
+    assert path.read_bytes() == bom + b"FIRST\nSECOND\n"
+
 def test_replace_all_replaces_every_exact_match(tmp_path):
     server = make(tmp_path)
     path = tmp_path / "r.txt"

@@ -169,7 +169,7 @@ A blank terminal means the server is waiting for newline-delimited JSON-RPC inpu
 
 A negative `line_start` reads from the end: `line_start: -50` returns the last 50 lines (at most 2000), numbered with their real line numbers, with `line_start`/`line_end` set to the lines shown and `total_lines`; a file shorter than that comes back whole. It cannot be combined with `line_end`. When `max_read_chars` cannot hold all of them, the newest that fit come back with `truncated: true` and a `note`.
 
-A UTF-8 byte order mark is hidden and kept, like line endings: reads do not return it, edits (`replace_text`, `multi_edit`, `apply_patch`, `write`) match and diff without it and write it back on a file that had one. `write` keeps it unless the new content starts with its own.
+A UTF-8 byte order mark is hidden and kept, like line endings: reads do not return it, edits (`replace_text`, `multi_edit`, `apply_patch`, `write`) match and diff without it and write it back on a file that had one; a `git diff` patch that shows it as `\ufeff` on line 1 applies too. `write` always keeps an existing file's BOM (delete the file first to drop it); a file without one gets one only when the new content starts with one.
 
 `replace_all: true` (on `replace_text`, or per `multi_edit` entry) replaces every exact match of `old_text` without giving the count; it must find at least one (`content_mismatch` otherwise) and cannot be combined with `expected_occurrences` (`invalid_arguments`). It matches exactly only: the typography and trailing-whitespace fallbacks are not tried, since a wrong fallback match would be repeated at every match.
 
