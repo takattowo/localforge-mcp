@@ -72,6 +72,12 @@ def _bare_tool_name(name):
 # Smallest per-string cut tried before long lists are trimmed instead.
 PREVIEW_MIN_CUT = 256
 PREVIEW_CUT_NOTE = "; full result in result_path]"
+# A string only this much over the cut stays whole: the marker would
+# make it longer, not shorter.
+PREVIEW_MARKER_ROOM = 80
+# Cursors and counts that describe the uncut result: following them
+# from a cut preview would skip what was cut, so they are dropped.
+PREVIEW_STALE_KEYS = ("next_line", "next_offset", "next_after", "line_end", "bytes_returned")
 
 def _safe_text(text):
     # Lone surrogates (Windows file names) cannot be sent as UTF-8.
@@ -80,24 +86,53 @@ def _safe_text(text):
 def _cut_text(text, limit):
     """Head of text up to limit characters, on a line boundary when possible."""
     text = _safe_text(text)
-    if len(text) <= limit:
+    if len(text) <= limit + PREVIEW_MARKER_ROOM:
         return text
     head = text[:limit]
-    if head.rfind("\n") > 0:
-        head = head[:head.rfind("\n") + 1]
+    newline = head.rfind("\n")
+    # Snap to a line end only when that keeps most of the head, so a
+    # short first line cannot swallow a long one.
+    if newline >= limit // 2:
+        head = head[:newline + 1]
         total = text.count("\n") + (not text.endswith("\n"))
         shown = f"lines 1-{head.count(chr(10))} of {total}"
     else:
         shown = f"{len(head.encode('utf-8'))} of {len(text.encode('utf-8'))} bytes"
     return f"{head}...[cut: showing {shown}{PREVIEW_CUT_NOTE}"
 
+def _keeps_whole(key):
+    # Paths and ids are handles the agent passes back: never cut them.
+    return isinstance(key, str) and (key == "cwd" or key.endswith("path") or key.endswith("_id"))
+
 def _shrink(value, limit, items=None):
-    """Copy of a JSON value with strings cut to limit and lists to items."""
+    """Copy of a JSON value with strings cut to limit and lists to items.
+
+    In a dict that lost part of a string or list, the cursors that
+    described the uncut value are dropped, and truncated (or the
+    string's own <key>_truncated) is set.
+    """
     if isinstance(value, str):
         return _cut_text(value, limit)
     if isinstance(value, dict):
-        return {(_safe_text(key) if isinstance(key, str) else key): _shrink(item, limit, items)
-                for key, item in value.items()}
+        out, cut = {}, []
+        for key, item in value.items():
+            name = _safe_text(key) if isinstance(key, str) else key
+            if isinstance(item, str) and _keeps_whole(key):
+                out[name] = _safe_text(item)
+                continue
+            out[name] = _shrink(item, limit, items)
+            if (isinstance(item, str) and len(out[name]) != len(_safe_text(item))) or (
+                    isinstance(item, list) and items is not None and len(item) > items):
+                cut.append(name)
+        if cut:
+            for key in PREVIEW_STALE_KEYS:
+                out.pop(key, None)
+            if "truncated" in out:
+                out["truncated"] = True
+            for key in cut:
+                if f"{key}_truncated" in out:
+                    out[f"{key}_truncated"] = True
+        return out
     if isinstance(value, list):
         kept = [_shrink(item, limit, items) for item in value[:items]]
         if len(kept) < len(value):
@@ -196,13 +231,13 @@ SCHEMAS = {
         }, "required": ["searches"]},
     "batch": {"type": "object", "properties": {
         "calls": {"type": "array", "minItems": 1, "maxItems": 16,
-            "description": "Tool calls to run in parallel, e.g. [{\"tool\": \"search\", \"arguments\": {\"query\": \"todo\"}}, {\"tool\": \"git\", \"arguments\": {\"action\": \"status\"}}].",
+            "description": "Tool calls to run in parallel (or in order, with sequential), e.g. [{\"tool\": \"search\", \"arguments\": {\"query\": \"todo\"}}, {\"tool\": \"git\", \"arguments\": {\"action\": \"status\"}}].",
             "items": {"type": "object", "properties": {
                 "tool": {"type": "string", "description": "Tool to run: workspace, filesystem, search, multi_search, git, execute, or process."},
                 "arguments": {"type": "object", "description": "Arguments for the tool; same shape as a tools/call request."},
                 "label": {"type": "string", "description": "Optional label echoed back with this call's result."}},
                 "required": ["tool"]}},
-        "sequential": {"type": "boolean", "description": "Run the calls one at a time in order and stop at the first failed call (an error, or a result with success false); later calls are reported as skipped. Default false: run in parallel."},
+        "sequential": {"type": "boolean", "description": "Run the calls one at a time in order and stop at the first failed call (an error, or a result with success false); later calls are reported as skipped, as are calls left once the run has taken longer than execute_background_after_seconds. Default false: run in parallel."},
         }, "required": ["calls"]},
 }
 DESCRIPTIONS = {
@@ -213,7 +248,7 @@ DESCRIPTIONS = {
     "execute": "Run a command and wait for it, with structured output; argv arrays preferred. {shell_note}Long output is cut to head and tail and saved at stdout_path/stderr_path (up to max_capture_bytes; past process_buffer_bytes the oldest part is dropped and marked). A command still running at its timeout keeps running in the background instead of being killed (so does one that exited while a process it started still holds its output); the result has the output so far, error_type backgrounded, and a process_id for the process tool (read, stop). For long waits or polling, use the process tool instead of a long-timeout execute. Do not edit files with it; prefer the filesystem write, replace_text, or apply_patch actions.",
     "process": "Manage long-running processes with stable IDs, split streams, cursors, stdin, restart, and tree stop. execute commands that outlive their timeout appear here with exec-* ids. For file edits, prefer the filesystem write, replace_text, or apply_patch actions.",
     "multi_search": "Run up to 16 independent searches in one call, e.g. {\"searches\": [{\"query\": \"UserService\", \"glob\": [\"*.py\"], \"label\": \"users\"}, {\"query\": \"TODO\", \"files_only\": true}]}. Each entry takes the same arguments as the search tool and returns the same grouped-by-file results. A failing entry is reported per-entry without failing the batch.",
-    "batch": "Run up to 16 tool calls in one call, in parallel, e.g. {\"calls\": [{\"tool\": \"search\", \"arguments\": {\"query\": \"todo\"}}, {\"tool\": \"git\", \"arguments\": {\"action\": \"status\"}}]}. Each entry names a tool and its arguments; tool names may carry the host prefix (MyHost_localforge_mcp__search). Distinct paths run concurrently while edits to the same file serialize. Results come back with index and label; match on those. A failing call is reported per-call without failing the batch. For dependent steps (edit, then run tests, then git commit) pass sequential: true: calls run one at a time in order, and after the first failed call (an error, or a result with success false, such as a failing or backgrounded execute or git command) the rest come back as skipped, so the commit never runs when the tests fail. The reply adds completed (calls run without failure) and stopped_at (index of the failed call, or null). Other results never stop the run: an edit whose check has ok false still counts as done, so check it yourself.",
+    "batch": "Run up to 16 tool calls in one call, in parallel, e.g. {\"calls\": [{\"tool\": \"search\", \"arguments\": {\"query\": \"todo\"}}, {\"tool\": \"git\", \"arguments\": {\"action\": \"status\"}}]}. Each entry names a tool and its arguments; tool names may carry the host prefix (MyHost_localforge_mcp__search). Distinct paths run concurrently while edits to the same file serialize. Results come back with index and label; match on those. A failing call is reported per-call without failing the batch. For dependent steps (edit, then run tests, then git commit) pass sequential: true: calls run one at a time in order, and after the first failed call (an error, or a result with success false, such as a failing or backgrounded execute or git command) the rest come back as skipped, so the commit never runs when the tests fail. The reply adds completed (calls run without failure) and stopped_at (index of the failed call, or of the first call skipped because the run already took longer than execute_background_after_seconds, or null). Other results never stop the run: an edit whose check has ok false still counts as done, so check it yourself.",
     "todo": "Persistent task list (TodoWrite-style) with get, add, update, delete, and clear. Keep it current across turns: add before starting work, mark in_progress while working, completed when done. State survives server restarts.",
 }
 
@@ -458,16 +493,24 @@ class Server:
                                   "error": payload}
 
         if sequential:
-            stopped_at = None
+            stopped_at, reason = None, None
+            # One worker runs the whole batch: past this budget the client
+            # may have given up, so later calls (a commit, say) are skipped.
+            budget = float(self.cfg.execute_background_after_seconds)
+            started = time.monotonic()
             for index, name, arguments, label in specs:
+                if stopped_at is None and index and time.monotonic() - started > budget:
+                    stopped_at = index
+                    reason = (f"the batch's time budget ({budget:g} s, execute_background_after_seconds) "
+                              "was used up")
                 if stopped_at is not None:
                     results[index] = {"index": index, "tool": name, "label": label, "skipped": True,
-                                      "reason": f"an earlier call failed (index {stopped_at})"}
+                                      "reason": reason}
                     continue
                 run(index, name, arguments, label)
                 result = results[index].get("result")
                 if "error" in results[index] or (isinstance(result, dict) and result.get("success") is False):
-                    stopped_at = index
+                    stopped_at, reason = index, f"an earlier call failed (index {index})"
             completed = len(specs) if stopped_at is None else stopped_at
             return {"results": results, "completed": completed, "stopped_at": stopped_at}
 
@@ -514,15 +557,19 @@ class Server:
                 steps.append((PREVIEW_MIN_CUT, items))
                 items //= 2
             for cut, items in steps:
-                # The meta keys come first and win over same-named result keys.
+                # The meta keys come first and win over same-named result
+                # keys, except a hint of the result's own, which is kept.
                 preview = dict(meta)
                 for key, item in _shrink(value, cut, items).items():
-                    preview.setdefault(key, item)
+                    if key == "hint" and isinstance(item, str):
+                        preview["hint"] = f"{meta['hint']} {item}"
+                    else:
+                        preview.setdefault(key, item)
                 out = json.dumps(preview, ensure_ascii=False, separators=(",", ":"))
                 if len(out.encode("utf-8")) <= budget:
                     return preview, out
         value = meta
-        safe = text.encode("utf-8", "replace").decode("utf-8")
+        safe = _safe_text(text)
         # JSON escaping can grow the preview, so shrink it until the reply fits.
         cap = min(2000, limit // 2)
         while True:

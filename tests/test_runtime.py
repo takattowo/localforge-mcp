@@ -1968,6 +1968,62 @@ def test_git_shows_non_ascii_paths(tmp_path):
     assert "f\u00e9.txt" in status["stdout"] and "\\303" not in status["stdout"]
 
 
+def test_cut_preview_drops_stale_cursors_and_keeps_own_hint(tmp_path):
+    server = make(tmp_path, max_result_bytes=20000)
+    big = "\n".join(f"{n}\tline {n} " + "x" * 50 for n in range(1, 2001))
+    value = {"path": str(tmp_path / "f.txt"), "content": big, "line_start": 1, "line_end": 2000,
+             "truncated": False, "next_line": 2001, "total_lines": 2000}
+    fitted, _ = server._fit_result("filesystem", value, json.dumps(value))
+    assert fitted["result_too_large"] and "[cut:" in fitted["content"]
+    # These described the uncut content: following next_line would skip lines.
+    assert "next_line" not in fitted and "line_end" not in fitted and fitted["truncated"] is True
+    assert fitted["total_lines"] == 2000
+    ran = {"success": True, "stdout": big, "stdout_truncated": False, "stderr": "", "stderr_truncated": False,
+           "hint": "own hint", "process_id": "exec-1"}
+    fitted, _ = server._fit_result("execute", ran, json.dumps(ran))
+    assert fitted["stdout_truncated"] is True and fitted["stderr_truncated"] is False
+    assert "result_path" in fitted["hint"] and fitted["hint"].endswith("own hint") and fitted["process_id"] == "exec-1"
+
+
+def test_cut_text_snaps_to_a_line_only_near_the_limit():
+    from agent_runtime.server import _cut_text
+    # A short first line must not swallow a long one.
+    cut = _cut_text("hdr\n" + "y" * 100000, 50000)
+    assert len(cut) > 40000 and "bytes" in cut
+    cut = _cut_text("\n".join("z" * 99 for _ in range(1000)), 50000)
+    assert "lines 1-" in cut and len(cut) > 25000
+    # Only a little over the limit: the marker would make it longer, so it stays whole.
+    assert _cut_text("a" * 300, 256) == "a" * 300
+
+
+def test_preview_never_cuts_paths_or_ids(tmp_path):
+    server = make(tmp_path, max_result_bytes=8000)
+    long_path = "C:\\" + "d" * 400 + "\\f.txt"
+    value = {"path": long_path, "cwd": long_path, "process_id": "exec-" + "1" * 300, "content": "c" * 50000}
+    fitted, _ = server._fit_result("filesystem", value, json.dumps(value))
+    assert fitted["result_too_large"] and "[cut:" in fitted["content"]
+    assert fitted["path"] == long_path and fitted["cwd"] == long_path and fitted["process_id"] == value["process_id"]
+
+
+def test_sequential_batch_stops_once_its_time_budget_is_used(tmp_path):
+    server = make(tmp_path, execute_background_after_seconds=1)
+    slow = {"tool": "execute", "arguments": {"command": [sys.executable, "-c", "import time; time.sleep(1.5)"],
+                                              "timeout": 10}}
+    write = {"tool": "filesystem", "arguments": {"action": "write", "path": "after.txt", "content": "x"}}
+    out = server.batch([slow, write], sequential=True)
+    assert out["results"][0]["result"]["success"], out
+    assert out["completed"] == 1 and out["stopped_at"] == 1
+    assert out["results"][1]["skipped"] and "time budget" in out["results"][1]["reason"]
+    assert not (tmp_path / "after.txt").exists()
+
+
+def test_config_requires_room_for_the_oversized_reply(tmp_path):
+    path = tmp_path / "lf.json"
+    path.write_text(json.dumps({"workspace_root": str(tmp_path), "max_result_bytes": 500}))
+    with pytest.raises(ValueError):
+        Config.load(str(path))
+
+
 def test_result_with_lone_surrogate_still_fits(tmp_path):
     server = make(tmp_path, max_result_bytes=800)
     value = {"name": "bad\udc80name", "pad": "p" * 2000}
