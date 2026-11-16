@@ -1151,7 +1151,22 @@ class Capabilities:
                 self._check_destination("move", target, dest, overwrite)
                 try:
                     dest.parent.mkdir(parents=True, exist_ok=True)
-                    target.replace(dest)
+                    # The resolved dest has the on-disk case; the name asked for may not.
+                    wanted = Path(str(destination).rstrip("/\\")).name
+                    if (wanted and wanted != target.name and dest.exists() and os.path.samefile(target, dest)
+                            and wanted.lower() == target.name.lower()):
+                        # Case-only rename on a case-insensitive file system,
+                        # which a plain replace leaves as it was.
+                        temp = target.with_name(f".localforge-{uuid.uuid4().hex[:8]}-{target.name}")
+                        target.replace(temp)
+                        try:
+                            temp.replace(dest.with_name(wanted))
+                        except OSError:
+                            temp.replace(target)
+                            raise
+                        dest = dest.with_name(wanted)
+                    else:
+                        target.replace(dest)
                 except OSError as e:
                     _fs_error("move", target, e)
             return {"source": str(target), "destination": str(dest)}

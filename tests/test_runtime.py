@@ -788,6 +788,14 @@ def test_move_and_copy_refuse_a_folder_into_itself(tmp_path):
         assert exc.value.code == "invalid_arguments" and "source itself" in exc.value.message, (dest, exc.value)
     assert (tmp_path / "dd" / "f.txt").read_text() == "x"
 
+def test_move_renames_a_file_whose_name_changes_only_in_case(tmp_path):
+    (tmp_path / "Case.txt").write_text("x")
+    if not (tmp_path / "case.txt").exists():
+        pytest.skip("case-sensitive file system")
+    server = make(tmp_path)
+    out = server.call("filesystem", {"action": "move", "path": "Case.txt", "destination": "case.txt"})
+    assert [p.name for p in tmp_path.iterdir()] == ["case.txt"] and (tmp_path / "case.txt").read_text() == "x", out
+
 
 def test_redact_keeps_code_redacts_secrets():
     from agent_runtime.security import redact
