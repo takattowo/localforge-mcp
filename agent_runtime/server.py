@@ -150,6 +150,63 @@ def _shrink(value, limit, items=None, dropped=None):
         return kept, cut
     return value, False
 
+_INTEGER = re.compile(r"[+-]?\d+")
+_NUMBER = re.compile(r"[+-]?(?:\d+\.?\d*|\.\d+)(?:[eE][+-]?\d+)?")
+
+def _shown(value):
+    text = repr(value)
+    return text if len(text) <= 60 else text[:57] + "..."
+
+def _coerce(schema, value, where, errors):
+    """value fixed to its schema type, where the form is unambiguous.
+
+    Models often send "false" or "5" as strings, a bare string for a
+    list of strings, or an array or object as a JSON string. Only those
+    forms are fixed: "true"/"false" (any case) for booleans, digit
+    strings for integers and numbers, a string that is not a JSON list
+    as a one-item list of strings, and a JSON string holding the
+    expected array or object. Any other string for a boolean, number,
+    array or object adds "<where>: expected ..., got ..." to errors.
+    Values of other types pass through unchanged.
+    """
+    kind = schema.get("type")
+    if isinstance(value, str):
+        text = value.strip()
+        if kind == "boolean":
+            if text.lower() in ("true", "false"):
+                return text.lower() == "true"
+            errors.append(f"{where}: expected true or false, got {_shown(value)}")
+            return value
+        if kind in ("integer", "number"):
+            if _INTEGER.fullmatch(text):
+                return int(text)
+            if kind == "number" and _NUMBER.fullmatch(text):
+                return float(text)
+            errors.append(f"{where}: expected {'an integer' if kind == 'integer' else 'a number'}, got {_shown(value)}")
+            return value
+        if kind in ("array", "object"):
+            try:
+                parsed = json.loads(value)
+            except ValueError:
+                parsed = None
+            if isinstance(parsed, list if kind == "array" else dict):
+                value = parsed
+            elif kind == "array" and schema.get("items", {}).get("type") == "string":
+                return [value]
+            else:
+                wanted = "an array (a JSON list)" if kind == "array" else "an object"
+                errors.append(f"{where}: expected {wanted}, got {_shown(value)}")
+                return value
+    if kind == "array" and isinstance(value, list) and "items" in schema:
+        return [_coerce(schema["items"], item, f"{where}[{index}]", errors) for index, item in enumerate(value)]
+    if kind == "object" and isinstance(value, dict) and "properties" in schema:
+        return _coerce_fields(schema["properties"], value, f"{where}.", errors)
+    return value
+
+def _coerce_fields(properties, args, prefix, errors):
+    return {key: _coerce(properties[key], item, prefix + key, errors) if key in properties else item
+            for key, item in args.items()}
+
 SCHEMAS = {
     "workspace": {"type": "object", "properties": {
         "action": {"enum": ["get", "set_cwd"], "description": "get returns roots and Git root; set_cwd changes runtime directory."},
@@ -389,6 +446,10 @@ class Server:
         missing = [key for key in SCHEMAS[name].get("required", []) if key not in args]
         if missing:
             raise RuntimeFault("invalid_arguments", f"Missing required argument(s): {', '.join(missing)}")
+        errors = []
+        args = _coerce_fields(SCHEMAS[name]["properties"], args, "", errors)
+        if errors:
+            raise RuntimeFault("invalid_arguments", "Invalid argument value(s): " + "; ".join(errors) + ".")
         if name == "workspace": return self.cap.workspace(**args)
         if name == "filesystem": return self.cap.filesystem(**args)
         if name == "search": return self.cap.search(**args)

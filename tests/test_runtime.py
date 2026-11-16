@@ -326,6 +326,54 @@ def test_unknown_argument_suggests(tmp_path):
         server.call("execute", {"command": ["x"], "bogus": 1})
     assert "Valid arguments" in exc2.value.message and "command" in exc2.value.message
 
+def test_argument_types_follow_the_schema(tmp_path):
+    server = make(tmp_path)
+    (tmp_path / "d").mkdir()
+    (tmp_path / "d" / "keep.txt").write_text("x")
+    # "false" is a non-empty string, so it used to be truthy and ran rmtree.
+    with pytest.raises(RuntimeFault):
+        server.call("filesystem", {"action": "delete", "path": "d", "recursive": "false"})
+    assert (tmp_path / "d" / "keep.txt").exists()
+    (tmp_path / "a.py").write_text("needle\n")
+    (tmp_path / "b.md").write_text("needle\n")
+    # A bare glob string used to become one glob per character ("*" matched everything).
+    found = server.call("search", {"query": "needle", "glob": "*.py"})
+    assert [entry["path"] for entry in found["results"]] == ["a.py"]
+    listed = server.call("filesystem", {"action": "list", "path": ".", "glob": "*.py"})
+    assert [entry["name"] for entry in listed["entries"]] == ["a.py"]
+    # fixed_string "false" means a regex.
+    assert server.call("search", {"query": "ne+dle", "fixed_string": "FALSE", "glob": "*.py"})["match_count"] == 1
+    assert server.call("search", {"query": "needle", "max_results": "1", "glob": '["*.py"]'})["match_count"] == 1
+    multi = server.call("multi_search", {"searches": json.dumps([{"query": "needle", "glob": "*.md", "case_sensitive": "true"}])})
+    assert [entry["path"] for entry in multi["results"][0]["results"]] == ["b.md"]
+    # Stringified arrays and objects.
+    edited = server.call("filesystem", {"action": "multi_edit", "path": "a.py", "edits": json.dumps(
+        [{"old_text": "needle", "new_text": "pin", "expected_occurrences": "1"}])})
+    assert edited["edits"][0]["replacements"] == 1 and (tmp_path / "a.py").read_text() == "pin\n"
+    batch = server.call("batch", {"calls": json.dumps(
+        [{"tool": "filesystem", "arguments": json.dumps({"action": "stat", "path": "b.md"})}])})
+    assert batch["results"][0]["result"]["type"] == "file"
+    ran = server.call("execute", {"command": [sys.executable, "-c", "import os; print(os.environ['LF_X'])"],
+                                  "env": json.dumps({"LF_X": "hi"})})
+    assert ran["success"] and "hi" in ran["stdout"]
+    # Calls inside a batch are fixed the same way.
+    inner = server.call("batch", {"calls": [{"tool": "filesystem", "arguments": {
+        "action": "delete", "path": "d", "recursive": "false"}}]})
+    assert "error" in inner["results"][0] and (tmp_path / "d" / "keep.txt").exists()
+
+def test_bad_argument_types_are_reported_together(tmp_path):
+    server = make(tmp_path)
+    with pytest.raises(RuntimeFault) as exc:
+        server.call("filesystem", {"action": "delete", "path": "x", "recursive": "maybe", "limit": "lots",
+                                   "edits": "not json"})
+    message = exc.value.message
+    assert exc.value.code == "invalid_arguments"
+    assert "recursive: expected true or false, got 'maybe'" in message
+    assert "limit: expected an integer, got 'lots'" in message and "edits: expected an array" in message
+    with pytest.raises(RuntimeFault) as exc:
+        server.call("multi_search", {"searches": [{"query": "x", "max_results": "many"}]})
+    assert "searches[0].max_results: expected an integer" in exc.value.message
+
 def test_apply_patch_modify_and_create(tmp_path):
     server = make(tmp_path)
     (tmp_path / "a.txt").write_text("one\ntwo\nthree\n")
