@@ -168,7 +168,8 @@ def _coerce(schema, value, where, errors):
     list of strings, or an array or object as a JSON string. Only those
     forms are fixed: "true"/"false" (any case) for booleans, digit
     strings for integers and numbers, a string that is not a JSON list
-    as a one-item list of strings, and a JSON string holding the
+    as a one-item list of strings (also one that is JSON but not a
+    list of strings, like the glob "[1]"), and a JSON string holding the
     expected array or object. Any other string for a boolean, number,
     array or object adds "<where>: expected ..., got ..." to errors.
     Values of other types pass through unchanged.
@@ -193,9 +194,14 @@ def _coerce(schema, value, where, errors):
                 parsed = json.loads(value)
             except ValueError:
                 parsed = None
+            strings = kind == "array" and schema.get("items", {}).get("type") == "string"
+            # "[1]" is JSON, but for a list of strings it is a one-item
+            # list (a character-class glob), not [1].
+            if strings and isinstance(parsed, list) and not all(isinstance(item, str) for item in parsed):
+                return [value]
             if isinstance(parsed, list if kind == "array" else dict):
                 value = parsed
-            elif kind == "array" and schema.get("items", {}).get("type") == "string":
+            elif strings:
                 return [value]
             else:
                 wanted = "an array (a JSON list)" if kind == "array" else "an object"

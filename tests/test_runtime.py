@@ -641,6 +641,11 @@ def test_argument_types_follow_the_schema(tmp_path):
     assert server.call("search", {"query": "needle", "max_results": "1", "glob": '["*.py"]'})["match_count"] == 1
     multi = server.call("multi_search", {"searches": json.dumps([{"query": "needle", "glob": "*.md", "case_sensitive": "true"}])})
     assert [entry["path"] for entry in multi["results"][0]["results"]] == ["b.md"]
+    # "[1]" is valid JSON, but not a list of strings: a character-class glob.
+    (tmp_path / "1").write_text("needle\n")
+    assert [entry["path"] for entry in server.call("search", {"query": "needle", "glob": "[1]"})["results"]] == ["1"]
+    assert [e["name"] for e in server.call("filesystem", {"action": "list", "path": ".", "glob": "[1]"})["entries"]] == ["1"]
+    (tmp_path / "1").unlink()
     # Stringified arrays and objects.
     edited = server.call("filesystem", {"action": "multi_edit", "path": "a.py", "edits": json.dumps(
         [{"old_text": "needle", "new_text": "pin", "expected_occurrences": "1"}])})
