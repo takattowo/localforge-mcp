@@ -250,7 +250,7 @@ SCHEMAS = {
         "edits": {"type": "array", "minItems": 1, "maxItems": 32,
             "description": "Exact replacements for multi_edit, applied in order: [{\"old_text\": \"foo\", \"new_text\": \"bar\"}]. The whole set is validated before anything is written; a failing edit leaves the file untouched. Pass expected_occurrences inside an entry when the text repeats.",
             "items": {"type": "object", "properties": {
-                "old_text": {"type": "string", "description": "Text to find; exact, else retried ignoring typographic quotes/dashes/spaces, then trailing whitespace per line, then without read's N<TAB> line-number prefixes (the edit then has match)."},
+                "old_text": {"type": "string", "description": "Text to find; exact, else retried ignoring typographic quotes/dashes/spaces, then trailing whitespace per line, then without read's N<TAB> line-number prefixes, unless an earlier entry changed the line count (the edit then has match)."},
                 "new_text": {"type": "string", "description": "Replacement text."},
                 "expected_occurrences": {"type": "integer", "description": "Required match count, default 1."},
                 "replace_all": {"type": "boolean", "description": "Replace every exact match (at least one); not with expected_occurrences."}},

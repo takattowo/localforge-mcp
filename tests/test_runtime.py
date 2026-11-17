@@ -3568,6 +3568,28 @@ def test_edit_accepts_old_text_copied_with_line_numbers(tmp_path):
     assert path.read_text() == "a\nb\nc\n"
 
 
+def test_multi_edit_refuses_line_numbers_after_the_line_count_changed(tmp_path):
+    server = make(tmp_path)
+    path = tmp_path / "n.txt"
+    path.write_text("a\n}\n}\nb\n}\n")
+    # The numbers come from a read taken before the call: after an edit
+    # adds lines, line 5 is the "}" read as line 3.
+    with pytest.raises(RuntimeFault) as exc:
+        server.cap.filesystem("multi_edit", "n.txt", edits=[
+            {"old_text": "a", "new_text": "a\nc\nd"}, {"old_text": "5\t}", "new_text": "5\t};"}])
+    assert exc.value.code == "content_mismatch" and "edits[1]" in exc.value.message
+    assert "line count" in exc.value.message
+    assert path.read_text() == "a\n}\n}\nb\n}\n"
+    # Numbered edits first, or after edits that keep the line count, apply.
+    out = server.cap.filesystem("multi_edit", "n.txt", edits=[
+        {"old_text": "5\t}", "new_text": "5\t};"}, {"old_text": "a", "new_text": "a\nc\nd"}])
+    assert [entry.get("match") for entry in out["edits"]] == ["line_numbers", None]
+    assert path.read_text() == "a\nc\nd\n}\n}\nb\n};\n"
+    server.cap.filesystem("multi_edit", "n.txt", edits=[
+        {"old_text": "a", "new_text": "A"}, {"old_text": "4\t}", "new_text": "4\t)"}])
+    assert path.read_text() == "A\nc\nd\n)\n}\nb\n};\n"
+
+
 def test_edit_refuses_empty_old_text(tmp_path):
     server = make(tmp_path)
     (tmp_path / "e.txt").write_text("")

@@ -472,6 +472,9 @@ def _find_spans(view, old, new, expected):
 _LINE_NUMBER = re.compile(r"(\d{1,9})\t")
 NUMBERED_HINT = (" old_text lines start with line numbers (N<TAB>) that do not match the file there;"
                  " leave the line-number prefixes out.")
+NUMBERED_SHIFT_HINT = (" old_text lines start with line numbers (N<TAB>), but an earlier edit in this call"
+                       " changed the line count, so they may point at other lines than the ones read;"
+                       " put line-numbered edits first, or leave the prefixes out.")
 
 
 def _split_numbered(text, consecutive=True):
@@ -1561,8 +1564,13 @@ class Capabilities:
         """
         view, exact = _lf(original), original
         counts, tiers = [], []
+        # Line numbers in old_text come from a read taken before the
+        # call: once an edit changes the line count, they are refused.
+        shifted = False
         for index, (old, new, expected) in enumerate(edits):
             spans, tier, tried = _find_spans(view, old, new, expected)
+            if tier == "line_numbers" and shifted:
+                raise mismatch(index, expected, 0, NUMBERED_SHIFT_HINT)
             if tier is None:
                 found = len(spans)
                 if any(matches for _, matches in tried):
@@ -1577,7 +1585,9 @@ class Capabilities:
             if exact is not None:
                 written = new.replace("\n", "\r\n") if eol == "\r\n" else new
                 exact = _replace_spans(exact, _source_spans(exact, spans), written)
+            lines = view.count("\n")
             view = _replace_spans(view, spans, new)
+            shifted = shifted or view.count("\n") != lines
             if exact is not None and _lf(exact) != view:
                 exact = None
             counts.append(len(spans))
