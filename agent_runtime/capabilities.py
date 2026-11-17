@@ -1902,7 +1902,6 @@ class Capabilities:
         # The new files are diffed against the working tree: with a staged
         # view or a revision the throwaway index would show every tracked
         # file as deleted.
-        staged = next((a for a in args if a in ("--cached", "--staged") or a.startswith("--merge-base")), None)
         # The value of -S, -G, -O or --diff-filter may come as its own
         # argument (-S HEAD); it is not a revision.
         values = ("-S", "-G", "-O", "--diff-filter")
@@ -1912,11 +1911,13 @@ class Capabilities:
             if not skip_next:
                 kept.append(a)
             skip_next = a in values and not skip_next
+        # Only options count for --cached and colour: not an option's value
+        # (-S --cached) or a pathspec after --.
+        flags = kept[:kept.index("--")] if "--" in kept else kept
+        staged = next((a for a in flags if a in ("--cached", "--staged") or a.startswith("--merge-base")), None)
         revs = run(["rev-parse", "--revs-only", "--no-flags", *kept])
         # Colour codes hide the "diff --git" headers new files are counted and cut at.
-        # The last --color/--no-color wins; --color=auto never colours a pipe. Only
-        # options count: not an option's value (-S --color) or a pathspec after --.
-        flags = kept[:kept.index("--")] if "--" in kept else kept
+        # The last --color/--no-color wins; --color=auto never colours a pipe.
         color = next((a for a in flags if a.startswith("--color-words") or a == "--word-diff=color"), None)
         last = next((a for a in reversed(flags) if a in ("--color", "--no-color") or a.startswith("--color=")), None)
         if color is None and last not in (None, "--no-color") and last.partition("=")[2].lower() not in ("never", "auto"):
