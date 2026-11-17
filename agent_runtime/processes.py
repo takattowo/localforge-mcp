@@ -351,12 +351,17 @@ class ProcessManager:
                 # Pumps notify on new output and when a stream closes; the
                 # short slice catches the exit itself, which nothing notifies.
                 item.chunk_cond.wait(min(remaining, 0.25))
-            if matched is None and item.chunks and item.chunks[-1].seq not in item.marks:
+            if matched is None and item.chunks:
                 # A wait from this cursor goes on past the finished lines but
                 # still looks at unfinished last lines; read() clears the mark.
-                # An existing mark (a match's, with its tails) is kept.
+                # An existing mark (a match's) keeps its offset; the last lines
+                # this wait already counted as done are added to its tails.
                 newest = item.chunks[-1]
-                self._mark(item, newest.seq, newest.text.rfind("\n") + 1, tails)
+                old = item.marks.get(newest.seq)
+                if old is None:
+                    self._mark(item, newest.seq, newest.text.rfind("\n") + 1, tails)
+                else:
+                    item.marks[newest.seq] = (old[0], old[1] | tails)
             chunks, last = list(item.chunks), item.next_seq - 1
         text = "".join(c.text for c in chunks).replace("\r\n", "\n").rstrip("\n")
         tail = "\n".join(text.split("\n")[-tail_lines:]) if text else ""

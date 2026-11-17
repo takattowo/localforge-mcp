@@ -246,6 +246,28 @@ def test_process_wait_from_a_read_cursor_skips_the_chunk_read_returned(tmp_path)
     finally:
         server.processes.stop(pid, True)
 
+def test_process_wait_from_a_read_cursor_keeps_read_lines_done_under_an_older_mark(tmp_path):
+    server = make(tmp_path)
+    pid = server.call("process", {"action": "start", "command": [sys.executable, "-c", (
+        "import sys, time; sys.stdout.write('a\\n'); sys.stdout.flush(); time.sleep(1); "
+        "sys.stderr.write('ERR half done'); sys.stderr.flush(); time.sleep(1); "
+        "sys.stdout.write('Compiled\\n'); sys.stdout.flush(); time.sleep(2)")]})["process_id"]
+    try:
+        # A match marks the newest chunk (3).
+        first = server.call("process", {"action": "wait", "process_id": pid, "pattern": "Compiled", "wait_ms": 20000})
+        assert first["matched"] == "Compiled" and first["next_after"] == 3, first
+        # read stops at chunk 2, so the mark at 3 stays; it showed "ERR half done".
+        # 20 bytes: "a\n" (3 with Windows' CRLF) + 13, not "Compiled" too.
+        read = server.processes.read(pid, limit_bytes=20)
+        assert read["next_after"] == 2 and read["stderr"] == "ERR half done", read
+        early = server.call("process", {"action": "wait", "process_id": pid, "pattern": "done",
+                                        "after": 2, "wait_ms": 20000})
+        assert early["reason"] == "exited", early
+        seen, last = _waits(server, pid, "done", after=early["next_after"])
+        assert seen == [] and last["reason"] == "exited", (seen, last)
+    finally:
+        server.processes.stop(pid, True)
+
 @pytest.mark.parametrize("first", ["timeout", "exited", "no-pattern"])
 def test_process_wait_from_a_read_cursor_never_repeats_what_read_showed(tmp_path, first):
     server = make(tmp_path)
@@ -516,6 +538,9 @@ def test_git_diff_untracked_skips_what_it_cannot_add(tmp_path, monkeypatch):
         assert exc.value.code == "invalid_arguments" and "--color" in exc.value.message, extra
     searched = server.call("git", {"action": "diff", "include_untracked": True, "args": ["-S", "--color"]})
     assert "\x1b[" not in searched["stdout"], searched
+    # Same for the staged check: -S's value or a pathspec named --cached is not --cached.
+    for extra in (["-S", "--cached"], ["--", "--cached"]):
+        assert "untracked_files" in server.call("git", {"action": "diff", "include_untracked": True, "args": extra}), extra
     # The last --color/--no-color wins, and auto never colours a pipe.
     for extra in (["--color=never"], ["--no-color"], ["--color=auto"], ["--color", "--no-color"]):
         assert server.call("git", {"action": "diff", "include_untracked": True, "args": extra})["untracked_files"] == 1, extra
