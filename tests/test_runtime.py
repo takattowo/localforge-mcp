@@ -915,6 +915,28 @@ def test_argument_types_follow_the_schema(tmp_path):
         "action": "delete", "path": "d", "recursive": "false"}}]})
     assert "error" in inner["results"][0] and (tmp_path / "d" / "keep.txt").exists()
 
+def test_delete_removes_read_only_files(tmp_path):
+    import stat
+    server = make(tmp_path)
+    (tmp_path / "d" / "sub").mkdir(parents=True)
+    for p in (tmp_path / "d" / "ro.txt", tmp_path / "d" / "sub" / "ro.txt", tmp_path / "one.txt"):
+        p.write_text("x")
+        os.chmod(p, stat.S_IREAD)
+    assert server.call("filesystem", {"action": "delete", "path": "one.txt"})["deleted_items"] == 1
+    assert server.call("filesystem", {"action": "delete", "path": "d", "recursive": True})["deleted_items"] == 4
+    assert not (tmp_path / "one.txt").exists() and not (tmp_path / "d").exists()
+    if shutil.which("git") is None:
+        pytest.skip("git unavailable")
+    # Git object files are read-only on Windows.
+    (tmp_path / "repo").mkdir()
+    (tmp_path / "repo" / "a.txt").write_text("a\n")
+    git = ["git", "-c", "user.name=t", "-c", "user.email=t@example.com"]
+    assert server.cap.execute(git + ["init", "-q"], cwd="repo")["success"]
+    assert server.cap.execute(git + ["add", "a.txt"], cwd="repo")["success"]
+    assert server.cap.execute(git + ["commit", "-q", "-m", "x"], cwd="repo")["success"]
+    server.call("filesystem", {"action": "delete", "path": "repo", "recursive": True})
+    assert not (tmp_path / "repo").exists()
+
 def test_bad_argument_types_are_reported_together(tmp_path):
     server = make(tmp_path)
     with pytest.raises(RuntimeFault) as exc:

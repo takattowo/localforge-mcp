@@ -167,6 +167,8 @@ A blank terminal means the server is waiting for newline-delimited JSON-RPC inpu
 - `list`, `stat`, `read`
 - `write`, `replace_text`, `apply_patch`, `mkdir`, `move`, `delete`, `copy`
 
+`delete` removes read-only files too (on Windows it clears the read-only attribute and retries, so a folder holding a Git repository, whose object files are read-only, deletes with `recursive: true`). Links are never changed.
+
 A negative `line_start` reads from the end: `line_start: -50` returns the last 50 lines (at most 2000), numbered with their real line numbers, with `line_start`/`line_end` set to the lines shown and `total_lines`; a file shorter than that comes back whole. It cannot be combined with `line_end`. When `max_read_chars` cannot hold all of them, the newest that fit come back with `truncated: true` and a `note`.
 
 A UTF-8 byte order mark is hidden and kept, like line endings: reads (and `project_instructions`) do not return it, edits (`replace_text`, `multi_edit`, `apply_patch`, `write`) match and diff without it and write it back on a file that had one; a `git diff` patch that shows it as `\ufeff` on line 1 applies too. `write` always keeps an existing file's BOM (delete the file first to drop it); a file without one gets one only when the new content starts with one.

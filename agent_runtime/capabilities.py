@@ -13,6 +13,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -37,6 +38,24 @@ def _fs_error(action, target, exc):
     if isinstance(exc, OSError):
         raise RuntimeFault("io_error", f"Filesystem error during {action}: {exc}") from exc
     raise
+
+def _remove_read_only(func, path, exc):
+    """Delete error hook (rmtree onexc/onerror): Windows refuses to delete
+    read-only entries, such as Git object files. Clear the attribute and
+    retry once. Links are never touched; other systems are unchanged."""
+    exc = exc[1] if isinstance(exc, tuple) else exc
+    try:
+        read_only = (os.name == "nt" and isinstance(exc, PermissionError) and not os.path.islink(path)
+                     and not getattr(os.path, "isjunction", lambda _: False)(path)
+                     and not os.stat(path).st_mode & stat.S_IWRITE)
+    except OSError:
+        read_only = False
+    if not read_only:
+        raise exc
+    os.chmod(path, stat.S_IWRITE)
+    func(path)
+
+_RMTREE_HOOK = "onexc" if sys.version_info >= (3, 12) else "onerror"
 
 
 def _lf(text: str):
@@ -1147,10 +1166,14 @@ class Capabilities:
             with self._locked_paths([target]):
                 try:
                     count = sum(1 for _ in target.rglob("*")) + 1 if target.is_dir() else 1
-                    if target.is_dir():
-                        shutil.rmtree(target) if recursive else target.rmdir()
+                    if target.is_dir() and recursive:
+                        shutil.rmtree(target, **{_RMTREE_HOOK: _remove_read_only})
                     else:
-                        target.unlink()
+                        remove = os.rmdir if target.is_dir() else os.unlink
+                        try:
+                            remove(target)
+                        except OSError as e:
+                            _remove_read_only(remove, target, e)
                 except OSError as e:
                     _fs_error("delete", target, e)
             return {"path": str(target), "deleted_items": count}
