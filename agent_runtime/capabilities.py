@@ -132,6 +132,36 @@ def _edit_diff(before: str, after: str, cap: int):
     return _clip(body, cap)
 
 
+# A capped content search keeps up to max_results matches per file and
+# this many times max_results in all, to spread the page across files.
+SEARCH_SPREAD_FACTOR = 5
+
+
+def _spread_page(matches, maximum, total, exact=True):
+    """A search page of at most maximum of matches (grouped by file, in
+    order). With more, they are taken round-robin by file, so every file
+    gets a share; files keep their order and matches their line order.
+    total counts every match found, a lower bound unless exact."""
+    page = {"results": matches, "truncated": total > maximum}
+    if len(matches) > maximum:
+        files = {}
+        for match in matches:
+            files.setdefault(match["path"], []).append(match)
+        files = list(files.values())
+        taken, left, active = [0] * len(files), maximum, list(range(len(files)))
+        while left:
+            for i in active[:left]:
+                taken[i] += 1
+            left -= min(left, len(active))
+            active = [i for i in active if taken[i] < len(files[i])]
+        page["results"] = [m for kept, n in zip(files, taken) for m in kept[:n]]
+        if len(files) > 1:
+            page["spread"] = True
+    if page["truncated"]:
+        page["total_matches" if exact else "total_matches_at_least"] = total
+    return page
+
+
 def _clip_ends(data: str, cap: int):
     """Clip data to cap UTF-8 bytes, keeping the head and the tail.
 
@@ -1759,10 +1789,13 @@ class Capabilities:
                 events.append(json.loads(line))
             except ValueError:
                 continue
-        # One extra match tells a full page from a cut one.
-        matches = self._rg_matches(events, maximum + 1, context)
-        out = {"engine": "ripgrep", "results": matches[:maximum], "exit_code": result.returncode,
-                "truncated": len(matches) > maximum, "applied_excludes": excludes}
+        # Up to max_results per file and SEARCH_SPREAD_FACTOR times that in
+        # all, so a cut page can be spread across files; ripgrep's output
+        # is read whole, so the total is exact.
+        matches = self._rg_matches(events, maximum * SEARCH_SPREAD_FACTOR, context, per_file=maximum)
+        total = sum(1 for event in events if event.get("type") == "match")
+        out = {"engine": "ripgrep", **_spread_page(matches, maximum, total), "exit_code": result.returncode,
+               "applied_excludes": excludes}
         if notes:
             out["note"] = notes[0]
         err = self._rg_error(result)
@@ -1771,13 +1804,17 @@ class Capabilities:
         return out
 
     @staticmethod
-    def _rg_matches(events, maximum, context):
-        matches = []
+    def _rg_matches(events, maximum, context, per_file=None):
+        matches, seen = [], {}
         for i, event in enumerate(events):
             if event.get("type") != "match":
                 continue
             data = event["data"]
-            entry = {"path": _rg_text(data["path"]), "line": data["line_number"],
+            path = _rg_text(data["path"])
+            seen[path] = seen.get(path, 0) + 1
+            if per_file is not None and seen[path] > per_file:
+                continue
+            entry = {"path": path, "line": data["line_number"],
                      "text": _cap_line((_rg_text(data["lines"]) or "").rstrip("\r\n"))}
             if context > 0:
                 entry["before"] = Capabilities._rg_context(events, i, -1, context)
@@ -1821,9 +1858,10 @@ class Capabilities:
                 events.append(json.loads(line))
             except ValueError:
                 continue
-        matches = self._rg_matches(events, maximum + 1, context)
-        out = {"engine": "ripgrep", "results": matches[:maximum], "exit_code": result.returncode,
-                "truncated": len(matches) > maximum, "applied_excludes": applied}
+        matches = self._rg_matches(events, maximum, context)
+        total = sum(1 for event in events if event.get("type") == "match")
+        out = {"engine": "ripgrep", **_spread_page(matches, maximum, total), "exit_code": result.returncode,
+               "applied_excludes": applied}
         if notes:
             out["note"] = notes[0]
         err = self._rg_error(result)
@@ -1860,6 +1898,11 @@ class Capabilities:
         excluded = [r for r in (_glob_regex(p) for p in excludes) if r is not None]
         # One combined regex: one match per path instead of one per exclude.
         exclude_re = re.compile("|".join(f"(?:{r.pattern})" for r in excluded)) if excluded else None
+        # Content: up to maximum per file, SEARCH_SPREAD_FACTOR times that
+        # in all (see _spread_page), every match counted. Files: one extra
+        # marks a cut page.
+        limit = maximum + 1 if files_only else maximum * SEARCH_SPREAD_FACTOR
+        counted, stopped = 0, False
         # root is a file for a single-file search: read only that file.
         for item in ([root] if root.is_file() else root.rglob("*")):
             if not item.is_file():
@@ -1897,6 +1940,7 @@ class Capabilities:
                     lines = [line[:-1] if line.endswith("\r") else line for line in text.split("\n")]
                     if not text or text.endswith("\n"):
                         lines.pop()
+                    kept = 0
                     for number, line in enumerate(lines, 1):
                         if pattern is not None:
                             matched = pattern.search(line) is not None
@@ -1905,17 +1949,23 @@ class Capabilities:
                         else:
                             matched = query.lower() in line.lower()
                         if matched:
+                            counted += 1
+                            if kept >= maximum:
+                                continue
+                            kept += 1
                             entry = {"path": str(item), "line": number, "text": _cap_line(line)}
                             if context > 0:
                                 entry["before"] = [f"{n}\t{_cap_line(lines[n - 1])}" for n in range(max(1, number - context), number)]
                                 entry["after"] = [f"{n}\t{_cap_line(lines[n - 1])}" for n in range(number + 1, min(len(lines), number + context) + 1)]
                             results.append(entry)
-                            if len(results) > maximum:
-                                break
                 except OSError:
                     pass
-            if len(results) > maximum:
+            if len(results) >= limit:
+                stopped = True
                 break
+        if not files_only:
+            return {"engine": "python", **_spread_page(results, maximum, counted, not stopped),
+                    "applied_excludes": excludes}
         # Collected up to one extra result: it marks a cut page.
         return {"engine": "python", "results": results[:maximum], "truncated": len(results) > maximum, "applied_excludes": excludes}
 

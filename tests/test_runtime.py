@@ -2157,6 +2157,28 @@ def test_search_folder_glob_and_exact_truncation(tmp_path, monkeypatch, engine):
 
 
 @pytest.mark.parametrize("engine", ["ripgrep", "python"])
+def test_search_spreads_capped_matches_across_files(tmp_path, monkeypatch, engine):
+    if engine == "ripgrep" and not shutil.which("rg"):
+        pytest.skip("ripgrep unavailable")
+    if engine == "python":
+        monkeypatch.setattr(shutil, "which", lambda name: None)
+    server = make(tmp_path)
+    for name in ("a.txt", "b.txt", "c.txt"):
+        (tmp_path / name).write_text("hit\n" * 300)
+    out = server.cap.search("hit", max_results=200)
+    assert out["engine"] == engine and out["match_count"] == 200 and out["truncated"] is True
+    assert sorted(entry["path"] for entry in out["results"]) == ["a.txt", "b.txt", "c.txt"]
+    for entry in out["results"]:
+        lines = [m["line"] for m in entry["matches"]]
+        assert lines == list(range(1, len(lines) + 1)) and len(lines) in (66, 67)
+    assert out["total_matches"] == 900 and out["spread"] is True
+    # Under the cap nothing changes.
+    whole = server.cap.search("hit", max_results=900)
+    assert whole["match_count"] == 900 and whole["truncated"] is False
+    assert "spread" not in whole and "total_matches" not in whole
+
+
+@pytest.mark.parametrize("engine", ["ripgrep", "python"])
 def test_search_globs_follow_ripgrep_rules(tmp_path, monkeypatch, engine):
     # Expectations recorded from ripgrep 15.1.0 run from the search root;
     # the Python fallback must give the same answers.
