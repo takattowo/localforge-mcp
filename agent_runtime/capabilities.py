@@ -411,7 +411,9 @@ def _find_spans(view, old, new, expected):
     Exact matches win. Only when there are none, and the edit has no
     lone CR (one asks for exact bytes, as when old and new differ only
     in line endings), retry ignoring typographic variants, then per
-    line ignoring trailing whitespace too. A fallback tier counts only
+    line ignoring trailing whitespace too, then (for one expected match)
+    old copied with read's 'N<TAB>' line-number prefixes. A fallback
+    tier counts only
     with exactly expected matches, none overlapping; otherwise the next
     one is tried. Returns (spans, tier, tried); tier None is a mismatch,
     spans then being the exact matches. tried lists (tier, spans) for
@@ -431,7 +433,65 @@ def _find_spans(view, old, new, expected):
         if spans and _apart(spans) and len(spans) == expected:
             return spans, tier, tried
         tried.append((tier, spans))
+    span = _numbered_span(view, old) if expected == 1 else None
+    if span:
+        return [span], "line_numbers", tried
     return [], None, tried
+
+
+_LINE_NUMBER = re.compile(r"(\d{1,9})\t")
+NUMBERED_HINT = (" old_text lines start with line numbers (N<TAB>) that do not match the file there;"
+                 " leave the line-number prefixes out.")
+
+
+def _split_numbered(text, consecutive=True):
+    """(first number, lines without prefix, ends with a line break) when
+    every line of text starts with an 'N<TAB>' prefix, as line-mode read
+    prints them, numbered on from 1 or more if consecutive; else None."""
+    trailing = text.endswith("\n")
+    parts = text.split("\n")
+    if trailing:
+        parts.pop()
+    numbers, lines = [], []
+    for part in parts:
+        m = _LINE_NUMBER.match(part)
+        if not m:
+            return None
+        numbers.append(int(m.group(1)))
+        lines.append(part[m.end():])
+    if not numbers or consecutive and (numbers[0] < 1 or numbers != list(range(numbers[0], numbers[0] + len(numbers)))):
+        return None
+    return numbers[0], lines, trailing
+
+
+def _numbered_span(view, old):
+    """Span of old copied with line-number prefixes, when its lines are
+    exactly the view's lines at those numbers; else None."""
+    numbered = _split_numbered(old)
+    if numbered is None:
+        return None
+    first, wanted, trailing = numbered
+    lines = view.split("\n")
+    real = len(lines) - 1 if view.endswith("\n") else len(lines)
+    last = first + len(wanted) - 1
+    if last > real or lines[first - 1:last] != wanted:
+        return None
+    start = sum(len(line) + 1 for line in lines[:first - 1])
+    end = start + sum(len(line) + 1 for line in wanted) - 1
+    if trailing:
+        if end >= len(view):
+            return None
+        end += 1
+    return start, end
+
+
+def _strip_numbers(new):
+    """new without 'N<TAB>' prefixes when every line has one."""
+    numbered = _split_numbered(new, consecutive=False)
+    if numbered is None:
+        return new
+    _, lines, trailing = numbered
+    return "\n".join(lines) + ("\n" if trailing else "")
 
 
 def _apart(spans):
@@ -1260,13 +1320,14 @@ class Capabilities:
     def _expected(replace_all, expected_occurrences, old, where):
         """Match count an edit needs: None for replace_all (every exact
         match, at least one), else expected_occurrences or 1."""
+        if not old:
+            raise RuntimeFault("invalid_arguments", f"{where}old_text is empty; pass the text to replace "
+                                                    "(write replaces a whole file)")
         if not replace_all:
             return 1 if expected_occurrences is None else int(expected_occurrences)
         if expected_occurrences is not None:
             raise RuntimeFault("invalid_arguments",
                                f"{where}replace_all replaces every occurrence; do not pass expected_occurrences with it")
-        if not old:
-            raise RuntimeFault("invalid_arguments", f"{where}replace_all needs a non-empty old_text")
         return None
 
     @staticmethod
@@ -1467,7 +1528,11 @@ class Capabilities:
                     found, hint = _fallback_miss(view, found, tried)
                 else:
                     hint = _miss_hint(view, old, new, found, expected)
+                if not found and _split_numbered(old, consecutive=False) is not None:
+                    hint = NUMBERED_HINT + hint
                 raise mismatch(index, expected, found, hint)
+            if tier == "line_numbers":
+                new = _strip_numbers(new)
             if exact is not None:
                 written = new.replace("\n", "\r\n") if eol == "\r\n" else new
                 exact = _replace_spans(exact, _source_spans(exact, spans), written)

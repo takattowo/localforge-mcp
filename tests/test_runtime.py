@@ -3438,6 +3438,47 @@ def test_edit_fallback_tries_the_next_tier_after_a_wrong_count(tmp_path):
     assert (tmp_path / "n.py").read_text(encoding="utf-8") == 'x = "b"\nx = \u201ca\u201d!\n'
 
 
+def test_edit_accepts_old_text_copied_with_line_numbers(tmp_path):
+    server = make(tmp_path)
+    path = tmp_path / "n.txt"
+    path.write_text("a\nb\nc\nd\n")
+    out = server.cap.filesystem("replace_text", "n.txt", old_text="2\tb\n3\tc", new_text="2\tB\n3\tC")
+    assert out["match"] == "line_numbers" and out["replacements"] == 1
+    assert path.read_text() == "a\nB\nC\nd\n"
+    # new_text without prefixes is used as given; a final line break counts.
+    server.cap.filesystem("replace_text", "n.txt", old_text="3\tC\n", new_text="X\nY\n")
+    assert path.read_text() == "a\nB\nX\nY\nd\n"
+    # CRLF and BOM are kept.
+    path.write_bytes("\ufeffone\r\ntwo\r\n".encode("utf-8"))
+    out = server.cap.filesystem("multi_edit", "n.txt", edits=[{"old_text": "2\ttwo", "new_text": "2\tTWO"}])
+    assert out["edits"][0]["match"] == "line_numbers" and path.read_bytes() == "\ufeffone\r\nTWO\r\n".encode("utf-8")
+    # Numbers that do not match the file there, or do not run on, are a miss.
+    path.write_text("a\nb\nc\n")
+    for old in ("1\tb", "1\ta\n3\tc", "2\tb\n3\tx"):
+        with pytest.raises(RuntimeFault) as exc:
+            server.cap.filesystem("replace_text", "n.txt", old_text=old, new_text="z")
+        assert exc.value.code == "content_mismatch" and "line-number prefixes" in exc.value.message, old
+    # Not with replace_all.
+    with pytest.raises(RuntimeFault) as exc:
+        server.cap.filesystem("replace_text", "n.txt", old_text="2\tb", new_text="z", replace_all=True)
+    assert exc.value.code == "content_mismatch"
+    assert path.read_text() == "a\nb\nc\n"
+
+
+def test_edit_refuses_empty_old_text(tmp_path):
+    server = make(tmp_path)
+    (tmp_path / "e.txt").write_text("")
+    (tmp_path / "f.txt").write_text("x\n")
+    for name in ("e.txt", "f.txt"):
+        with pytest.raises(RuntimeFault) as exc:
+            server.cap.filesystem("replace_text", name, old_text="", new_text="y")
+        assert exc.value.code == "invalid_arguments" and "old_text" in exc.value.message
+        with pytest.raises(RuntimeFault) as exc:
+            server.cap.filesystem("multi_edit", name, edits=[{"old_text": "", "new_text": "y"}])
+        assert exc.value.code == "invalid_arguments" and "edits[0]" in exc.value.message
+    assert (tmp_path / "e.txt").read_text() == "" and (tmp_path / "f.txt").read_text() == "x\n"
+
+
 def test_edit_miss_hint_skips_very_common_lines(tmp_path):
     server = make(tmp_path)
     (tmp_path / "c.txt").write_text("end\n" * 150 + "def target():\n    return 1\nend\n")
