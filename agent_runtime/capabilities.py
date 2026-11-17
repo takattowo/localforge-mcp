@@ -1860,7 +1860,10 @@ class Capabilities:
         shows (its "diff --git" headers, so 0 with --stat and the like);
         when adding them fails, the plain diff comes back with a note.
         """
-        git = ["git", "-c", "core.quotepath=false", "-C", str(work)]
+        # color.diff=never (it beats color.ui): colour from git config would
+        # hide the "diff --git" headers new files are counted and cut at. A
+        # --color flag beats it, so that is refused below.
+        git = ["git", "-c", "core.quotepath=false", "-c", "color.diff=never", "-C", str(work)]
         # Every git command here, both diffs included, runs through run()
         # below, outside execute, under the command policy a plain diff gets.
         self.policy.authorize_command(git + ["diff", *args], work, False)

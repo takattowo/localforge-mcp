@@ -493,6 +493,26 @@ def test_git_diff_untracked_skips_what_it_cannot_add(tmp_path, monkeypatch):
     assert failed["success"] and "+two" in failed["stdout"] and "+fresh" not in failed["stdout"], failed
     assert failed["untracked_files"] == 0 and "boom" in failed["note"]
 
+def test_git_diff_untracked_ignores_colour_config(tmp_path):
+    if shutil.which("git") is None:
+        pytest.skip("git unavailable")
+    server = make(tmp_path)
+    for argv in (["init", "-q"], ["config", "user.email", "t@example.com"], ["config", "user.name", "t"],
+                 ["config", "commit.gpgsign", "false"]):
+        assert server.cap.git("run", argv)["success"]
+    (tmp_path / "tracked.txt").write_text("one\n")
+    assert server.cap.git("run", ["add", "--", "tracked.txt"])["success"]
+    assert server.cap.git("run", ["commit", "-q", "-m", "base"])["success"]
+    (tmp_path / "tracked.txt").write_text("two\n")
+    (tmp_path / "big.txt").write_text("".join(f"line {n}\n" for n in range(5000)))
+    # Colour from config would hide the headers new files are counted and cut at.
+    for key in ("color.ui", "color.diff"):
+        assert server.cap.git("run", ["config", key, "always"])["success"]
+        out = server.call("git", {"action": "diff", "include_untracked": True})
+        text = out["stdout"]
+        assert out["success"] and out["untracked_files"] == 1 and "\x1b[" not in text, (key, out)
+        assert "+two" in text and "[new file cut:" in text and "+line 4999" not in text, key
+
 def test_search_retries_lookaround_with_pcre2(tmp_path):
     rg = shutil.which("rg")
     if rg is None or subprocess.run([rg, "--pcre2-version"], capture_output=True).returncode != 0:
