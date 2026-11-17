@@ -738,6 +738,7 @@ class Capabilities:
                 # On a cut read, final=False holds back only a partial
                 # character at the end; bad bytes elsewhere become U+FFFD.
                 text = codecs.getincrementaldecoder("utf-8")("replace").decode(raw[:budget], final=not cut)
+                text, _ = _split_bom(text)
                 content, extra = _clip(text, budget)
                 cut = cut or extra
                 budget -= len(content.encode("utf-8"))
@@ -916,6 +917,15 @@ class Capabilities:
             target, note = self._resolve_existing(path, access, retry=access == "read")
         else:
             target = self.paths.resolve(path, cwd=self.cwd, access=access, must_exist=False)
+            if action == "write" and not target.exists() and not str(path).startswith(("./", ".\\")):
+                # read retries such a path from the Git root; writing it here would
+                # make a second file instead of changing the one read.
+                found = self._from_git_root(path, "read", self.cwd)
+                if found is not None:
+                    raise RuntimeFault("invalid_arguments",
+                                       f"{path} is not in the cwd ({self.cwd}) but exists relative to the Git "
+                                       f"root: {found}. Writes are not retried there: pass {found} to "
+                                       f"overwrite that file, or ./{path} to create a new file in the cwd.")
         self.policy.authorize_path(action)
         if action == "read":
             if target.is_dir():
@@ -1942,7 +1952,10 @@ class Capabilities:
             # git makes the index itself; an empty file is not one.
             os.unlink(index)
             extra = {"GIT_INDEX_FILE": index}
-            if new and result.returncode == 0:
+            # --exit-code and --quiet make git exit 1 when something differs.
+            differs = 1 if any(a in ("--exit-code", "--quiet") for a in flags) else 0
+            if new and result.returncode in (0, differs):
+                first = result.returncode
                 Path(names).write_bytes("\0".join(new).encode("utf-8"))
                 # Literal: a file named like a glob stages only itself.
                 adding = ["add", "--intent-to-add", f"--pathspec-from-file={names}", "--pathspec-file-nul"]
@@ -1953,6 +1966,9 @@ class Capabilities:
                     note = f"git add --intent-to-add failed, so only tracked changes are shown: {reason}"
                 else:
                     result = run(["diff", *args], extra)
+                    if first and not result.returncode:
+                        # Tracked files differ even if no new file is shown.
+                        result.returncode = first
                     # What the diff shows: a pathspec without "--" or a filter can leave some out.
                     included = sum(1 for line in result.stdout.split(b"\n") if line.startswith(b"diff --git "))
                     out, err = out + result.stdout, err + result.stderr

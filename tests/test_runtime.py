@@ -439,6 +439,20 @@ def test_missing_relative_path_is_retried_from_the_git_root(tmp_path):
     assert exc.value.code == "path_not_found" and "Git root" in exc.value.message and "app.py" in exc.value.message
     assert "writes, deletes and moves are not retried" in exc.value.message
     assert (tmp_path / "src" / "app.py").read_text() == "needle\n"
+    # A write there would make a second file instead of changing the one read.
+    (tmp_path / "README.md").write_text("root\n")
+    assert "Git root" in server.cap.filesystem("read", "README.md")["note"]
+    with pytest.raises(RuntimeFault) as exc:
+        server.cap.filesystem("write", "README.md", content="new\n")
+    assert exc.value.code == "invalid_arguments" and "Git root" in exc.value.message, exc.value.message
+    assert "./README.md" in exc.value.message
+    assert not (tmp_path / "docs" / "README.md").exists() and (tmp_path / "README.md").read_text() == "root\n"
+    # ./ (or an absolute path) means create it in the cwd.
+    server.cap.filesystem("write", "./README.md", content="here\n")
+    assert (tmp_path / "docs" / "README.md").read_text() == "here\n"
+    # A path that exists nowhere is created in the cwd as before.
+    server.cap.filesystem("write", "fresh.md", content="x\n")
+    assert (tmp_path / "docs" / "fresh.md").read_text() == "x\n"
     # The same path policy applies from the Git root.
     denied = make(tmp_path, denied_paths=[str(tmp_path / "src")])
     denied.cap.workspace("set_cwd", "docs")
@@ -493,6 +507,27 @@ def test_git_diff_can_include_untracked_files(tmp_path):
     assert fresh.cap.git("run", ["init", "-q"])["success"]
     (other / "only.txt").write_text("first\n")
     assert "+first" in fresh.call("git", {"action": "diff", "include_untracked": True})["stdout"]
+
+def test_git_diff_untracked_with_exit_code(tmp_path):
+    if shutil.which("git") is None:
+        pytest.skip("git unavailable")
+    server = make(tmp_path)
+    for argv in (["init", "-q"], ["config", "user.email", "t@example.com"], ["config", "user.name", "t"],
+                 ["config", "commit.gpgsign", "false"]):
+        assert server.cap.git("run", argv)["success"]
+    (tmp_path / "t.txt").write_text("one\n")
+    assert server.cap.git("run", ["add", "--", "t.txt"])["success"]
+    assert server.cap.git("run", ["commit", "-q", "-m", "base"])["success"]
+    (tmp_path / "t.txt").write_text("two\n")
+    (tmp_path / "new.txt").write_text("fresh\n")
+    # With tracked changes, --exit-code makes the plain diff exit 1; the new files are still added.
+    coded = server.call("git", {"action": "diff", "include_untracked": True, "args": ["--exit-code"]})
+    assert coded["untracked_files"] == 1 and "+fresh" in coded["stdout"] and "+two" in coded["stdout"], coded
+    assert coded["exit_code"] == 1 and "note" not in coded, coded
+    # Only the new file differs: still exit 1.
+    assert server.cap.git("run", ["commit", "-q", "-am", "two"])["success"]
+    alone = server.call("git", {"action": "diff", "include_untracked": True, "args": ["--quiet"]})
+    assert alone["exit_code"] == 1 and alone["stdout"] == "", alone
 
 def test_git_diff_untracked_skips_what_it_cannot_add(tmp_path, monkeypatch):
     if shutil.which("git") is None:
@@ -2014,6 +2049,10 @@ def test_apply_patch_places_hunks_by_content(tmp_path):
     (tmp_path / "sql.txt").write_text("-- note\nkeep\n")
     server.cap.filesystem("apply_patch", ".", patch="--- a/sql.txt\n+++ b/sql.txt\n@@ -1,2 +1,1 @@\n--- note\n keep\n")
     assert (tmp_path / "sql.txt").read_text() == "keep\n"
+    # Nor is a removed "-- " line followed by an added "++ " line.
+    (tmp_path / "sql2.txt").write_text("-- a\nkeep\n")
+    server.cap.filesystem("apply_patch", ".", patch="--- a/sql2.txt\n+++ b/sql2.txt\n@@ -1,2 +1,2 @@\n--- a\n+++ A\n keep\n")
+    assert (tmp_path / "sql2.txt").read_text() == "++ A\nkeep\n"
 
 
 def test_apply_patch_refuses_ambiguous_places_and_renames(tmp_path):
@@ -2854,6 +2893,13 @@ def test_project_instructions_cut_keeps_bad_bytes_visible(tmp_path):
     (tmp_path / "AGENTS.md").write_bytes(b"x\xffyz\xc3\xa9\xc3\xa9")
     [entry] = server.cap._project_instructions(None, tmp_path)
     assert entry["content"] == "x\ufffdyz" and entry["truncated"]
+
+
+def test_project_instructions_hide_a_bom(tmp_path):
+    server = make(tmp_path)
+    (tmp_path / "AGENTS.md").write_bytes(b"\xef\xbb\xbfrules\n")
+    [entry] = server.cap._project_instructions(None, tmp_path)
+    assert entry["content"] == "rules\n", entry
 
 
 def test_spill_dir_paths_and_failures(tmp_path, monkeypatch):

@@ -63,15 +63,17 @@ def _refuse_move(old, new, verb="renames"):
 def _in_body(lines, i):
     """True when lines[i] continues a hunk body.
 
-    A "--- " line ends the body only when a "+++ " line follows (the
-    next file's header): alone, it is a removed line starting "-- ".
+    A "--- " line ends the body only when a "+++ " line and then a hunk
+    header follow (the next file's header): otherwise it is a removed
+    line starting "-- " (and the "+++ " one an added line "++ ").
     """
     line = lines[i]
     if line == _NO_NEWLINE:
         return True
     if line[:1] not in (" ", "-", "+"):
         return False
-    return not (line.startswith("--- ") and i + 1 < len(lines) and lines[i + 1].startswith("+++ "))
+    return not (line.startswith("--- ") and i + 2 < len(lines) and lines[i + 1].startswith("+++ ")
+                and lines[i + 2].startswith("@@"))
 
 
 def parse(text):
