@@ -1182,9 +1182,8 @@ class Capabilities:
                     lambda index, want, found, hint: RuntimeFault(
                         "content_mismatch", ("replace_all found no exact occurrence of old_text." if want is None else
                                              f"Expected {want} occurrence(s), found {found}."
-                                             + ((" Pass expected_occurrences "
-                                                 + ("(or replace_all: true) " if self.cfg.advanced_features else "")
-                                                 + "to replace all of them at once.") if found else "")) + hint))
+                                             + (" Pass expected_occurrences (or replace_all: true) to replace all of "
+                                                "them at once." if found else "")) + hint))
                 try:
                     written = self._atomic_write(target, updated, encoding, write_eol, bom)
                 except OSError as e:

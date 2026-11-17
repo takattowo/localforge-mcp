@@ -59,8 +59,7 @@ class Config:
     load_project_instructions: bool = True
     project_instruction_files: list[str] = field(default_factory=lambda: ["AGENTS.md", "CLAUDE.md"])
     max_project_instruction_bytes: int = 8_000
-    # Turns on the batch and multi_search tools and the extra edit,
-    # wait and diff options.
+    # Turns on the batch and multi_search tools and filesystem multi_edit.
     advanced_features: bool = False
 
     def __post_init__(self):

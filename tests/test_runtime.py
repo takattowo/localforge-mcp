@@ -3839,8 +3839,7 @@ def test_edit_miss_hint_skips_very_common_lines(tmp_path):
     assert "151\tdef target():" in exc.value.message
 
 
-SWITCHED_WORDS = ("batch", "multi_search", "multi_edit", "edits", "sequential", "wait", "tail_lines",
-                  "replace_all", "include_untracked", "untracked_skipped", "advanced_features")
+SWITCHED_WORDS = ("batch", "multi_search", "multi_edit", "edits", "sequential")
 
 
 def _words_in(text, words=SWITCHED_WORDS):
@@ -3886,13 +3885,12 @@ def test_switch_off_tools_list(tmp_path):
     assert set(by_name) == {"workspace", "filesystem", "search", "git", "execute", "process", "todo"}
     props = {name: tool["inputSchema"]["properties"] for name, tool in by_name.items()}
     assert "multi_edit" not in props["filesystem"]["action"]["enum"]
-    assert "wait" not in props["process"]["action"]["enum"]
-    assert not {"edits", "replace_all"} & set(props["filesystem"])
-    assert not {"pattern", "tail_lines"} & set(props["process"])
-    assert "include_untracked" not in props["git"]
+    assert "wait" in props["process"]["action"]["enum"]
+    assert "edits" not in props["filesystem"] and "replace_all" in props["filesystem"]
+    assert {"pattern", "tail_lines"} <= set(props["process"])
+    assert "include_untracked" in props["git"]
     # "For file edits, prefer ..." is plain English, not the edits argument.
     assert _words_in(json.dumps(tools).replace("For file edits,", "")) == []
-    assert _words_in(json.dumps(by_name["process"]), ("pattern",)) == []
     assert init["instructions"].startswith("LocalForge rules:") and _words_in(init["instructions"]) == []
     assert _words_in(json.dumps(server.call("workspace", {"action": "get"}))) == []
     # The rest of the surface is the same as with advanced_features.
@@ -3902,6 +3900,34 @@ def test_switch_off_tools_list(tmp_path):
     assert props["filesystem"]["action"]["enum"] == [action for action in full["filesystem"]["inputSchema"]["properties"]["action"]["enum"] if action != "multi_edit"]
 
 
+def test_switch_off_keeps_ungated_features_as_on(tmp_path):
+    # replace_all, include_untracked and process wait are on in both modes.
+    off = {tool["name"]: tool for tool in make(tmp_path, advanced_features=False).tools()}
+    full = {tool["name"]: tool for tool in make(tmp_path).tools()}
+    for name in ("process", "git", "execute"):
+        assert off[name] == full[name]
+    off_fs, full_fs = off["filesystem"]["inputSchema"]["properties"], full["filesystem"]["inputSchema"]["properties"]
+    for key in ("old_text", "new_text", "expected_occurrences", "replace_all"):
+        assert off_fs[key] == full_fs[key]
+
+
+def test_switch_off_ungated_features_work(tmp_path):
+    server = make(tmp_path, advanced_features=False)
+    (tmp_path / "a.txt").write_text("one one\n")
+    out = server.call("filesystem", {"action": "replace_text", "path": "a.txt", "old_text": "one", "new_text": "two",
+                                     "replace_all": True})
+    assert out["replacements"] == 2 and (tmp_path / "a.txt").read_text() == "two two\n"
+    pid = server.call("process", {"action": "start", "command": [
+        sys.executable, "-c", "print('row 1'); print('READY', flush=True)"]})["process_id"]
+    ready = server.call("process", {"action": "wait", "process_id": pid, "pattern": "READY", "tail_lines": 1,
+                                    "wait_ms": 20000})
+    assert ready["reason"] == "matched" and ready["matched"] == "READY" and len(ready["tail"].splitlines()) == 1
+    if shutil.which("git"):
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+        diff = server.call("git", {"action": "diff", "include_untracked": True})
+        assert diff["success"] and "+two two" in diff["stdout"]
+
+
 def test_switch_off_tools_list_names_plain_routes(tmp_path):
     # Each step the switch takes away is described the plain way instead.
     tools = {tool["name"]: tool for tool in make(tmp_path, advanced_features=False).tools()}
@@ -3909,27 +3935,14 @@ def test_switch_off_tools_list_names_plain_routes(tmp_path):
     routes = (
         (tools["search"]["description"],
          'one regex with | and fixed_string false (e.g. "foo|bar"), or several searches sent in the same turn'),
-        (tools["process"]["description"],
-         "read with wait_ms (max 60000) and after=next_after, repeated until state is exited or the line shows"),
-        (tools["git"]["description"],
-         "diff shows tracked changes only; for new files run status (untracked files are '? path' lines) "
-         "and read them with filesystem read."),
         (tools["filesystem"]["description"], "apply_patch for several changes in one all-or-nothing step, "),
         (fs["action"]["description"],
          "Several changes to one file: one apply_patch (all-or-nothing) instead of one replace_text per change."),
-        (fs["expected_occurrences"]["description"],
-         "To replace every occurrence pass the exact count (count it with search first), or use apply_patch."),
     )
     full = json.dumps(make(tmp_path).tools(), ensure_ascii=False)
     for text, route in routes:
         assert route in text
         assert json.dumps(route, ensure_ascii=False)[1:-1] not in full
-    if shutil.which("git"):
-        # The status preset shows a new file as a '? path' line.
-        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
-        (tmp_path / "new.txt").write_text("x\n")
-        out = make(tmp_path, advanced_features=False).call("git", {"action": "status"})["stdout"]
-        assert "? new.txt" in out.splitlines()
 
 
 def test_switch_off_calls_match_unknown_names(tmp_path):
@@ -3951,16 +3964,6 @@ def test_switch_off_calls_match_unknown_names(tmp_path):
     same("multi_search", {"searches": [{"query": "one"}]}, "multi_search")
     same("filesystem", {"action": "multi_edit", "path": "a.txt"}, "multi_edit")
     same("filesystem", {"action": "multi_edit", "path": "a.txt", "edits": [{"old_text": "one", "new_text": "two"}]}, "edits")
-    same("filesystem", {"action": "replace_text", "path": "a.txt", "old_text": "one", "new_text": "two", "replace_all": True},
-         "replace_all")
-    # Not coerced either: a bad value reads as an unknown argument too.
-    same("filesystem", {"action": "replace_text", "path": "a.txt", "old_text": "one", "new_text": "two",
-                        "replace_all": "maybe"}, "replace_all")
-    same("git", {"action": "diff", "include_untracked": True}, "include_untracked")
-    same("process", {"action": "wait", "process_id": "p1"}, "wait")
-    for key, value in (("pattern", "x"), ("tail_lines", 5)):
-        same("process", {"action": "read", "process_id": "p1", key: value}, key)
-        assert server.call("process", {"action": "list", key: value}) == server.call("process", {"action": "list", "zz": value})
     assert (tmp_path / "a.txt").read_text() == "one one\n"
 
 
@@ -3968,16 +3971,14 @@ def test_switch_off_messages(tmp_path):
     server = make(tmp_path, advanced_features=False)
     (tmp_path / "a.txt").write_text("one one\n")
     code, message = _fault(server, "filesystem", {"action": "replace_text", "path": "a.txt", "old_text": "one", "new_text": "two"})
-    assert code == "content_mismatch" and "expected_occurrences" in message and _words_in(message) == []
+    assert code == "content_mismatch" and "expected_occurrences (or replace_all: true)" in message
+    assert _words_in(message) == []
     code, message = _fault(server, "filesystem", {"action": "read", "path": "a.txt", "bogus": 1})
     assert message.startswith("Unknown argument 'bogus'.") and _words_in(message) == []
     code, message = _fault(server, "process", {"action": "read", "process_id": "p1", "tail": 1})
-    assert message.startswith("Unknown argument 'tail'.") and _words_in(message, SWITCHED_WORDS + ("pattern",)) == []
+    assert message.startswith("Unknown argument 'tail'.") and "tail_lines" in message and _words_in(message) == []
     _, message = _fault(server, "git", {"action": "diff", "untracked": True})
-    assert _words_in(message) == []
-    full = make(tmp_path)
-    _, message = _fault(full, "filesystem", {"action": "replace_text", "path": "a.txt", "old_text": "one", "new_text": "two"})
-    assert "replace_all" in message
+    assert "include_untracked" in message and _words_in(message) == []
     big = make(tmp_path, advanced_features=False, max_result_bytes=1024)
     (tmp_path / "big.txt").write_text("x" * 5000)
     reply = big.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
