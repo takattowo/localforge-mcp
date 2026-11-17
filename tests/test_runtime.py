@@ -246,6 +246,36 @@ def test_process_wait_from_a_read_cursor_skips_the_chunk_read_returned(tmp_path)
     finally:
         server.processes.stop(pid, True)
 
+@pytest.mark.parametrize("first", ["timeout", "exited", "no-pattern"])
+def test_process_wait_from_a_read_cursor_never_repeats_what_read_showed(tmp_path, first):
+    server = make(tmp_path)
+    # Both streams end with an unfinished line, then the process sleeps and exits.
+    pid = server.call("process", {"action": "start", "command": [sys.executable, "-c", (
+        "import sys, time; sys.stdout.write('ok\\nout done'); sys.stdout.flush(); "
+        "sys.stderr.write('ERR half done'); sys.stderr.flush(); time.sleep(2)")]})["process_id"]
+    try:
+        out = err = ""
+        after, deadline = 0, time.monotonic() + 20
+        while not ("out done" in out and "ERR half done" in err) and time.monotonic() < deadline:
+            got = server.processes.read(pid, after=after, wait_ms=5000)
+            out, err, after = out + got["stdout"], err + got["stderr"], got["next_after"]
+        assert "out done" in out and "ERR half done" in err, (out, err)
+        # A wait from the read cursor that matches nothing, then waits from its cursor.
+        if first == "timeout":
+            early = server.call("process", {"action": "wait", "process_id": pid, "pattern": "done",
+                                            "after": after, "wait_ms": 300})
+        elif first == "exited":
+            early = server.call("process", {"action": "wait", "process_id": pid, "pattern": "done",
+                                            "after": after, "wait_ms": 20000})
+        else:
+            early = server.call("process", {"action": "wait", "process_id": pid, "after": after, "wait_ms": 20000})
+        assert early["reason"] == ("timeout" if first == "timeout" else "exited"), early
+        # read already showed both unfinished lines, so they never come back.
+        seen, last = _waits(server, pid, "done", after=early["next_after"])
+        assert seen == [] and last["reason"] == "exited", (seen, last)
+    finally:
+        server.processes.stop(pid, True)
+
 @pytest.mark.parametrize("engine", ["ripgrep", "python"])
 def test_long_lines_are_cut_in_reads_and_search(tmp_path, monkeypatch, engine):
     if engine == "python":
@@ -479,6 +509,13 @@ def test_git_diff_untracked_skips_what_it_cannot_add(tmp_path, monkeypatch):
             server.call("git", {"action": "diff", "include_untracked": True, "args": extra})
         named = [a for a in extra if a != "--no-color"][-1]
         assert exc.value.code == "invalid_arguments" and named in exc.value.message, extra
+    # Option values and pathspecs are not colour flags: -S's value, or a path after --.
+    for extra in (["--color", "-S", "--no-color"], ["--color", "-G", "--no-color"], ["--color", "--", "--no-color"]):
+        with pytest.raises(RuntimeFault) as exc:
+            server.call("git", {"action": "diff", "include_untracked": True, "args": extra})
+        assert exc.value.code == "invalid_arguments" and "--color" in exc.value.message, extra
+    searched = server.call("git", {"action": "diff", "include_untracked": True, "args": ["-S", "--color"]})
+    assert "\x1b[" not in searched["stdout"], searched
     # The last --color/--no-color wins, and auto never colours a pipe.
     for extra in (["--color=never"], ["--no-color"], ["--color=auto"], ["--color", "--no-color"]):
         assert server.call("git", {"action": "diff", "include_untracked": True, "args": extra})["untracked_files"] == 1, extra

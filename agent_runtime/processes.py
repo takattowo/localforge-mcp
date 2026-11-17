@@ -280,7 +280,11 @@ class ProcessManager:
             # A cursor from a match goes on in its chunk, past the matched line.
             mark = item.marks.get(after)
             skip = {after: mark[0]} if mark is not None else {}
-            tails = mark[1] if mark is not None else frozenset()
+            # From any other cursor (a read's, or 0), each stream's output at or
+            # before it was already shown, unfinished last lines included: start
+            # with those last chunks done, so a wait mark saved below keeps them.
+            tails = mark[1] if mark is not None else frozenset(
+                {c.stream: c.seq for c in item.chunks if c.seq <= after}.values())
             scanned = after - 1 if skip else after
             partial = self._line_heads(item, scanned) if regex is not None and scanned > 0 else {}
             for seq, offset in skip.items():
