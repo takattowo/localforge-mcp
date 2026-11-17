@@ -76,7 +76,7 @@ Several repositories under one parent: use `C:\src` for `workspace_root` and bot
 |---|---|---|
 | `default_shell` | `auto` | Shell for string commands: `auto`, `pwsh`, `powershell`, `cmd`, `sh`. |
 | `allow_shell_commands` | `true` | `false` refuses string commands (`shell_denied`); argv arrays still run. |
-| `default_timeout_seconds` | `600` | Wait for `kill_on_timeout` calls. |
+| `default_timeout_seconds` | `600` | Wait for `kill_on_timeout` calls; a longer explicit `timeout` gets a `warning`. |
 | `execute_background_after_seconds` | `120` | Foreground wait of an `execute` without `timeout`; also the time budget of a sequential `batch`. |
 | `max_processes` | `50` | Processes running or still holding output. |
 | `process_ttl_seconds` | `3600` | An exited process stays listed and readable until this long after its start. |
@@ -168,13 +168,13 @@ Runs a command and waits. Prefer argv arrays (`{"command": ["npm", "test"], "cwd
 
 - Each stream returns at most `max_inline_output_bytes`, head and tail; cut output is saved as `stdout_path`/`stderr_path` for `filesystem read` or `search`.
 - A command still running at its timeout (default `execute_background_after_seconds`) keeps running as a process entry: `success: false`, `error_type: "backgrounded"`, `process_id` (`exec-...`), `next_after`. Follow it with `process wait`/`read`, end it with `process stop`. `kill_on_timeout: true` stops it instead (`error_type: "timeout"`). So does a full `max_processes`. A command that exits while something it started holds its output is kept the same way.
-- A program that cannot be found fails with `command_not_found` (on Windows with a PATH / `shell: true` hint for `.cmd`, `.bat` and `.ps1`).
+- An argv command whose program cannot be found fails with `command_not_found` (on Windows with a PATH / `shell: true` hint for `.cmd`, `.bat` and `.ps1`).
 - Output is UTF-8: on Windows the server switches its console to code page 65001 and children get `PYTHONUTF8=1` unless set (pass `env: {"PYTHONUTF8": "0"}` for legacy programs). Children also get the two git no-prompt variables.
 - Complex quoting (multi-line PowerShell, nested `python -c`) is easier as a script written with `filesystem write` and run by path. For ssh, use key auth with `-o BatchMode=yes` so prompts never hang.
 
 ### `process`
 
-Actions `start` (`command`, optional `process_id`, `cwd`, `env`), `read` (`after` cursor from `next_after`, `limit_bytes`, `wait_ms`, `format` `text` or `chunks`), `wait`, `write` (stdin `text`), `status`, `list`, `restart`, `stop` (stops the whole tree; `force` kills it).
+Actions `start` (`command`, optional `process_id`, `cwd`, `env`, `shell`), `read` (`after` cursor from `next_after`, `limit_bytes`, `wait_ms`, `format` `text` or `chunks`), `wait`, `write` (stdin `text`), `status`, `list`, `restart`, `stop` (stops the whole tree; `force` kills it).
 
 `wait` blocks until the process exits, a finished output line matches the regex `pattern`, or `wait_ms` passes (default and max 60000), and returns `reason` (`matched`, `exited`, `timeout`), `matched`, `tail` (`tail_lines`, default 40) and `next_after`; a `wait` from that cursor goes on after the matched line. Use it instead of polling `read` during builds and tests. `cursor_lost: true` means older output was dropped from the buffer. Process state is in memory only.
 
