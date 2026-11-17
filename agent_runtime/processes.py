@@ -51,8 +51,9 @@ class Managed:
     job: object = None
     # Streams that lost output to the process_buffer_bytes cap.
     dropped: set = field(default_factory=set)
-    # wait matches: chunk seq -> offset in its text just past the
-    # matched line, so a wait from that cursor goes on from there.
+    # wait matches: chunk seq -> (offset in its text just past the
+    # matched line, so a wait from that cursor goes on from there;
+    # seqs of the last chunks whose unfinished line it matched at exit).
     marks: dict = field(default_factory=dict)
 
     def __post_init__(self):
@@ -251,7 +252,8 @@ class ProcessManager:
         the matched line (None without one), tail (the last tail_lines
         lines of the kept output, both streams in arrival order, within
         max_inline_output_bytes), and next_after: after a match, the
-        chunk holding the matched line, and a wait from it goes on with
+        chunk holding the matched line (the newest chunk for an
+        unfinished last line at exit), and a wait from it goes on with
         the line after the match (a read from it skips the rest of that
         chunk, which tail shows, and a wait from a cursor a read returned
         goes on after the whole chunk); otherwise the newest chunk. A
@@ -275,12 +277,16 @@ class ProcessManager:
 
         with item.lock:
             # A cursor from a match goes on in its chunk, past the matched line.
-            skip = {after: item.marks[after]} if after in item.marks else {}
+            mark = item.marks.get(after)
+            skip = {after: mark[0]} if mark is not None else {}
+            tails = mark[1] if mark is not None else frozenset()
             scanned = after - 1 if skip else after
             partial = self._line_heads(item, scanned) if regex is not None and scanned > 0 else {}
-            for seq in skip:
-                # The text before the mark ends with the matched line.
-                partial.pop(next((c.stream for c in item.chunks if c.seq == seq), None), None)
+            for seq, offset in skip.items():
+                # The text before the mark ends with the matched line (a mark
+                # at 0, from an unfinished line, ends no line in this chunk).
+                if offset:
+                    partial.pop(next((c.stream for c in item.chunks if c.seq == seq), None), None)
             exit_seen = None
             while True:
                 code = item.proc.poll()
@@ -306,20 +312,25 @@ class ProcessManager:
                             matched = done[index].rstrip("\r")
                             # Just past the matched line's "\n", in chunk.text.
                             end = sum(len(line) + 1 for line in done[:index + 1]) - len(head) + start
-                            hit = (chunk.seq, end)
+                            hit = (chunk.seq, end, tails)
                             break
                     if matched is None and exited and not held(item):
                         # Nothing more is coming: unfinished last lines count too,
                         # oldest stream first. A stream whose last chunk is at or
                         # before the cursor has nothing new, unless the cursor is
-                        # a mark inside that chunk.
+                        # a wait mark whose waits have not matched that line yet.
                         finals = {c.stream: c for c in item.chunks if c.seq <= scanned}
                         for final in sorted(finals.values(), key=lambda c: c.seq):
                             line = partial.get(final.stream)
-                            if (final.seq > after or final.seq in skip) and line and regex.search(line.rstrip("\r")):
+                            new = final.seq > after or (mark is not None and final.seq not in tails)
+                            if new and line and regex.search(line.rstrip("\r")):
                                 matched = line.rstrip("\r")
-                                # Marked at its stream's last chunk, so it is not matched again.
-                                hit = (final.seq, len(final.text))
+                                # Marked at the newest chunk, past its last newline, so
+                                # the cursor never moves back and a wait from it still
+                                # sees every unfinished line; tails keeps this one
+                                # from matching again.
+                                newest = item.chunks[-1]
+                                hit = (newest.seq, newest.text.rfind("\n") + 1, tails | {final.seq})
                                 break
                     if matched is not None:
                         reason = "matched"
@@ -367,12 +378,12 @@ class ProcessManager:
         return {stream: "".join(reversed(parts)) for stream, parts in heads.items()}
 
     @staticmethod
-    def _mark(item, seq, offset):
+    def _mark(item, seq, offset, tails):
         # Only marks for kept chunks, and only the newest few.
         oldest = item.chunks[0].seq if item.chunks else item.next_seq
         for key in [k for k in item.marks if k < oldest]:
             del item.marks[key]
-        item.marks[seq] = offset
+        item.marks[seq] = (offset, frozenset(tails))
         while len(item.marks) > MAX_WAIT_MARKS:
             del item.marks[min(item.marks)]
 

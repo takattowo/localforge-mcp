@@ -164,6 +164,8 @@ def _waits(server, pid, pattern, rounds=4):
     for _ in range(rounds):
         out = server.call("process", {"action": "wait", "process_id": pid, "pattern": pattern,
                                       "after": after, "wait_ms": 20000})
+        # The cursor never moves back.
+        assert out["next_after"] >= after, (out, after)
         if out["reason"] != "matched":
             break
         seen.append(out["matched"])
@@ -187,6 +189,25 @@ def test_process_wait_at_exit_matches_each_unfinished_last_line_once(tmp_path):
     try:
         seen, out = _waits(server, pid, "match")
         assert seen == ["x match", "y match"] and out["reason"] == "exited", (seen, out)
+    finally:
+        server.processes.stop(pid, True)
+
+@pytest.mark.parametrize("script, expected", [
+    # A finished line in the other stream matches after the unfinished one.
+    ("sys.stderr.write('warn match'); sys.stderr.flush(); time.sleep(1); "
+     "sys.stdout.write('ok match\\n'); sys.stdout.flush()", ["ok match", "warn match"]),
+    # The other stream finishes its line after the unfinished one.
+    ("sys.stdout.write('a match'); sys.stdout.flush(); time.sleep(1); "
+     "sys.stderr.write('b match'); sys.stderr.flush(); time.sleep(1); "
+     "sys.stdout.write('\\n'); sys.stdout.flush()", ["a match", "b match"]),
+], ids=["other-stream-match", "other-stream-newline"])
+def test_process_wait_at_exit_matches_an_unfinished_line_before_the_cursor(tmp_path, script, expected):
+    server = make(tmp_path)
+    pid = server.call("process", {"action": "start", "command": [
+        sys.executable, "-c", "import sys, time; " + script]})["process_id"]
+    try:
+        seen, out = _waits(server, pid, "match")
+        assert seen == expected and out["reason"] == "exited", (seen, out)
     finally:
         server.processes.stop(pid, True)
 
