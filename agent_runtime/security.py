@@ -199,18 +199,42 @@ def spawn_environment(cfg, shell, overrides=None):
     pipes UTF-8, so the setting is safe to inherit. Python 2 and 3.6
     ignore it. NO_COLOR=1 for pwsh shell
     commands: pwsh colours its errors with ANSI codes, which reach the
-    agent as noise. Values from the config or the caller win.
+    agent as noise. GIT_TERMINAL_PROMPT=0 and GCM_INTERACTIVE=never: a
+    git credential prompt (stdin is empty) would otherwise wait until the
+    timeout. Values from the config or the caller win; denied names are
+    not added.
     """
     env = safe_environment(cfg, overrides)
     env.setdefault("PYTHONUTF8", "1")
     if shell and resolve_shell(cfg.default_shell).lower() == "pwsh":
         env.setdefault("NO_COLOR", "1")
+    for key, value in NO_PROMPT.items():
+        if not _env_denied(cfg, key):
+            env.setdefault(key, value)
     return env
+
+NO_PROMPT = {"GIT_TERMINAL_PROMPT": "0", "GCM_INTERACTIVE": "never"}
+
+def git_environment(cfg, read_only):
+    """Variables the git tool adds so git never waits for input: no
+    credential prompt, and GIT_EDITOR/GIT_SEQUENCE_EDITOR=true (a commit
+    without -m then aborts with git's empty-message error). For
+    read-only commands also GIT_OPTIONAL_LOCKS=0, so status does not
+    take index.lock from under the user's IDE. Names the config already
+    sets, and denied names, are left out."""
+    base = safe_environment(cfg)
+    extra = {**NO_PROMPT, "GIT_EDITOR": "true", "GIT_SEQUENCE_EDITOR": "true"}
+    if read_only:
+        extra["GIT_OPTIONAL_LOCKS"] = "0"
+    return {k: v for k, v in extra.items() if k not in base and not _env_denied(cfg, k)}
+
+def _env_denied(cfg, key):
+    return any(fnmatch.fnmatch(key.upper(), pattern.upper()) for pattern in cfg.deny_environment)
 
 def safe_environment(cfg, overrides=None):
     source, result = os.environ, {}
     def denied(key):
-        return any(fnmatch.fnmatch(key.upper(), pattern.upper()) for pattern in cfg.deny_environment)
+        return _env_denied(cfg, key)
     for key in cfg.inherit_environment:
         if key in source and not denied(key):
             result[key] = source[key]

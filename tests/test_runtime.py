@@ -2679,6 +2679,63 @@ def test_spawn_environment_sets_python_utf8_mode(tmp_path):
     assert sec.spawn_environment(cfg, False)["PYTHONUTF8"] == "0"
 
 
+def test_spawn_environment_turns_off_git_prompts(tmp_path):
+    import agent_runtime.security as sec
+    cfg = Config(str(tmp_path), default_shell="cmd", inherit_environment=["PATH"])
+    env = sec.spawn_environment(cfg, False)
+    assert env["GIT_TERMINAL_PROMPT"] == "0" and env["GCM_INTERACTIVE"] == "never" and "GIT_ASKPASS" not in env
+    assert sec.spawn_environment(cfg, True, {"GIT_TERMINAL_PROMPT": "1"})["GIT_TERMINAL_PROMPT"] == "1"
+    cfg.extra_environment = {"GCM_INTERACTIVE": "auto"}
+    assert sec.spawn_environment(cfg, False)["GCM_INTERACTIVE"] == "auto"
+    # A denied name is not added either.
+    cfg.deny_environment = ["GCM_*"]
+    assert "GCM_INTERACTIVE" not in sec.spawn_environment(cfg, False)
+
+
+def test_git_never_waits_on_a_prompt_or_editor(tmp_path, monkeypatch):
+    if shutil.which("git") is None:
+        pytest.skip("git unavailable")
+    import agent_runtime.capabilities as caps
+    server = make(tmp_path, default_timeout_seconds=15)
+    calls, real = [], server.cap.execute
+    monkeypatch.setattr(server.cap, "execute", lambda command, **kw: calls.append(kw.get("env") or {}) or real(command, **kw))
+    server.cap.git("status")
+    server.cap.git("run", ["--version"])
+    status, ran = calls
+    for env in (status, ran):
+        assert env["GIT_TERMINAL_PROMPT"] == "0" and env["GCM_INTERACTIVE"] == "never"
+        assert env["GIT_EDITOR"] == "true" and env["GIT_SEQUENCE_EDITOR"] == "true" and "GIT_ASKPASS" not in env
+    assert status["GIT_OPTIONAL_LOCKS"] == "0" and "GIT_OPTIONAL_LOCKS" not in ran
+    # The config's own editor wins.
+    calls.clear()
+    other = make(tmp_path, extra_environment={"GIT_EDITOR": "my-editor"})
+    monkeypatch.setattr(other.cap, "execute", lambda command, **kw: calls.append(kw.get("env") or {}) or {})
+    other.cap.git("log")
+    assert "GIT_EDITOR" not in calls[0] and calls[0]["GIT_SEQUENCE_EDITOR"] == "true"
+    # include_untracked's own git runs get the same.
+    monkeypatch.undo()
+    seen, run = [], subprocess.run
+    def spy(argv, *a, **kw):
+        if argv[0] == "git":
+            seen.append(kw.get("env") or {})
+        return run(argv, *a, **kw)
+    monkeypatch.setattr(caps.subprocess, "run", spy)
+    assert server.cap.execute(["git", "init", "-q"])["success"]
+    (tmp_path / "new.txt").write_text("x\n")
+    assert "new.txt" in server.cap.git("diff", include_untracked=True)["stdout"]
+    assert seen and all(e["GIT_OPTIONAL_LOCKS"] == "0" and e["GIT_TERMINAL_PROMPT"] == "0" for e in seen)
+    monkeypatch.undo()
+    # A commit without -m fails at once instead of waiting on an editor,
+    # even one that would block (set here as the repo's core.editor).
+    editor = sys.executable.replace("\\", "/")
+    assert server.cap.execute(["git", "config", "core.editor", f'"{editor}" -c "import time; time.sleep(60)"'])["success"]
+    assert server.cap.execute(["git", "add", "new.txt"])["success"]
+    started = time.monotonic()
+    out = server.cap.git("run", ["-c", "user.name=t", "-c", "user.email=t@example.com", "commit"])
+    assert not out["success"] and time.monotonic() - started < 10, out
+    assert "empty commit message" in out["stderr"].lower(), out
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows console code pages")
 def test_server_children_print_unicode(tmp_path):
     import queue

@@ -24,7 +24,7 @@ from .errors import RuntimeFault
 from .patch import build_new as build_patched
 from .patch import parse as parse_diff
 from .processes import held
-from .security import coerce_command, redact, safe_environment
+from .security import coerce_command, git_environment, redact, safe_environment
 
 def _fs_error(action, target, exc):
     if isinstance(exc, FileNotFoundError):
@@ -1936,8 +1936,9 @@ class Capabilities:
         # core.quotepath=false: show non-ASCII paths as themselves, not
         # octal escapes like "f\303\251.txt".
         # kill_on_timeout: a git command must not linger in the background.
+        # The presets only read: no optional locks for them.
         return self.execute(["git", "-c", "core.quotepath=false", "-C", str(work)] + subcommand + ([] if action == "run" else list(args or [])), cwd=str(work),
-                            kill_on_timeout=True)
+                            env=git_environment(self.cfg, action != "run"), kill_on_timeout=True)
 
     def _diff_untracked(self, work, args):
         """git diff that also shows untracked files as added.
@@ -1965,7 +1966,7 @@ class Capabilities:
         # Every git command here, both diffs included, runs through run()
         # below, outside execute, under the command policy a plain diff gets.
         self.policy.authorize_command(git + ["diff", *args], work, False)
-        env = safe_environment(self.cfg)
+        env = {**safe_environment(self.cfg), **git_environment(self.cfg, True)}
         started = time.monotonic()
 
         def run(argv, extra=None):
