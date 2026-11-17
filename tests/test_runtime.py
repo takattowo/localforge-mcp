@@ -158,9 +158,9 @@ def test_process_wait_matches_a_line_the_cursor_cuts_as_a_whole(tmp_path):
     finally:
         server.processes.stop(pid, True)
 
-def _waits(server, pid, pattern, rounds=4):
+def _waits(server, pid, pattern, rounds=4, after=0):
     # Waits from each next_after until one does not match.
-    seen, after = [], 0
+    seen = []
     for _ in range(rounds):
         out = server.call("process", {"action": "wait", "process_id": pid, "pattern": pattern,
                                       "after": after, "wait_ms": 20000})
@@ -208,6 +208,25 @@ def test_process_wait_at_exit_matches_an_unfinished_line_before_the_cursor(tmp_p
     try:
         seen, out = _waits(server, pid, "match")
         assert seen == expected and out["reason"] == "exited", (seen, out)
+    finally:
+        server.processes.stop(pid, True)
+
+@pytest.mark.parametrize("first", ["timeout", "exited"])
+def test_process_wait_from_a_timeout_or_exit_cursor_keeps_the_unfinished_line(tmp_path, first):
+    server = make(tmp_path)
+    pid = server.call("process", {"action": "start", "command": [sys.executable, "-c", (
+        "import sys, time; sys.stdout.write('late match'); sys.stdout.flush(); time.sleep(1)")]})["process_id"]
+    try:
+        assert server.processes.read(pid, wait_ms=10000)["stdout"] == "late match"
+        if first == "timeout":
+            # A pattern wait times out while the last line is still unfinished.
+            early = server.call("process", {"action": "wait", "process_id": pid, "pattern": "match", "wait_ms": 300})
+        else:
+            # A wait without a pattern looks at no line.
+            early = server.call("process", {"action": "wait", "process_id": pid, "wait_ms": 20000})
+        assert early["reason"] == first and early["next_after"] > 0, early
+        seen, out = _waits(server, pid, "match", after=early["next_after"])
+        assert seen == ["late match"] and out["reason"] == "exited", (seen, out)
     finally:
         server.processes.stop(pid, True)
 

@@ -256,7 +256,8 @@ class ProcessManager:
         unfinished last line at exit), and a wait from it goes on with
         the line after the match (a read from it skips the rest of that
         chunk, which tail shows, and a wait from a cursor a read returned
-        goes on after the whole chunk); otherwise the newest chunk. A
+        goes on after the whole chunk); otherwise the newest chunk, and a
+        wait from it still looks at unfinished last lines. A
         process whose pipes something it started still holds counts as
         exited EXIT_GRACE_SECONDS after it exits, with output_held true;
         with a pattern it is watched until wait_ms passes instead, so a
@@ -346,6 +347,12 @@ class ProcessManager:
                 # Pumps notify on new output and when a stream closes; the
                 # short slice catches the exit itself, which nothing notifies.
                 item.chunk_cond.wait(min(remaining, 0.25))
+            if matched is None and item.chunks and item.chunks[-1].seq not in item.marks:
+                # A wait from this cursor goes on past the finished lines but
+                # still looks at unfinished last lines; read() clears the mark.
+                # An existing mark (a match's, with its tails) is kept.
+                newest = item.chunks[-1]
+                self._mark(item, newest.seq, newest.text.rfind("\n") + 1, tails)
             chunks, last = list(item.chunks), item.next_seq - 1
         text = "".join(c.text for c in chunks).replace("\r\n", "\n").rstrip("\n")
         tail = "\n".join(text.split("\n")[-tail_lines:]) if text else ""
