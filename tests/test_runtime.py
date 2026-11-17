@@ -3181,6 +3181,11 @@ def test_wide_file_with_another_encoding_names_the_codec(tmp_path):
     with pytest.raises(RuntimeFault, match="not valid utf-16") as fault:
         server.cap.filesystem("replace_text", "bad.txt", old_text="a", new_text="b", encoding="utf-16")
     assert "pass encoding" not in str(fault.value)
+    # No mark at all, but a wide encoding: still the file that is bad.
+    (tmp_path / "odd.txt").write_bytes(b"a")
+    with pytest.raises(RuntimeFault, match="not valid utf-16") as fault:
+        server.cap.filesystem("replace_text", "odd.txt", old_text="a", new_text="b", encoding="utf-16")
+    assert fault.value.code == "binary_file"
 
 
 def test_wide_edits_keep_the_byte_order_mark(tmp_path):
@@ -3222,6 +3227,40 @@ def test_wide_write_converts_with_one_mark(tmp_path):
     created = "--- /dev/null\n+++ b/made.txt\n@@ -0,0 +1,1 @@\n+\ufeffhi\n"
     server.cap.filesystem("apply_patch", patch=created, encoding="utf-16")
     assert (tmp_path / "made.txt").read_bytes() == mark + "hi\n".encode("utf-16-le")
+
+
+def test_wide_files_without_a_mark_stay_without_one(tmp_path):
+    server = make(tmp_path)
+    # Starts with two characters above U+00FF: no NUL in the first 4 bytes.
+    path = tmp_path / "cjk.txt"
+    path.write_bytes("日本\nabc\n".encode("utf-16-le"))
+    server.cap.filesystem("replace_text", "cjk.txt", old_text="abc", new_text="xyz", encoding="utf-16")
+    assert path.read_bytes() == "日本\nxyz\n".encode("utf-16-le")
+    patch = "--- a/cjk.txt\n+++ b/cjk.txt\n@@ -1,2 +1,2 @@\n 日本\n-xyz\n+abc\n"
+    server.cap.filesystem("apply_patch", patch=patch, encoding="utf-16")
+    assert path.read_bytes() == "日本\nabc\n".encode("utf-16-le")
+    (tmp_path / "ru.txt").write_bytes("Пр\r\nabc\r\n".encode("utf-16-le"))
+    out = server.cap.filesystem("write", "ru.txt", "Пр\nxyz\n", encoding="utf-16")
+    assert out["eol"] == "CRLF" and "diff" in out
+    assert (tmp_path / "ru.txt").read_bytes() == "Пр\r\nxyz\r\n".encode("utf-16-le")
+    files = {"a16.txt": ("one\ntwo\n", "utf-16-le", "utf-16"), "j16.txt": ("日本\n語\n", "utf-16-le", "utf-16"),
+             "a32.txt": ("one\ntwo\n", "utf-32-le", "utf-32")}
+    for name, (text, codec, encoding) in files.items():
+        (tmp_path / name).write_bytes(text.encode(codec))
+        lines = server.cap.filesystem("read", name, encoding=encoding, line_start=2, line_end=2)
+        assert lines["content"] == "2\t" + text.split("\n")[1], name
+
+
+def test_write_reads_the_old_file_in_its_own_encoding(tmp_path):
+    server = make(tmp_path)
+    (tmp_path / "w.txt").write_bytes(codecs.BOM_UTF16_LE + "one\r\ntwo\r\n".encode("utf-16-le"))
+    out = server.cap.filesystem("write", "w.txt", "one\nTWO\n")
+    assert out["eol"] == "CRLF" and "-two" in out["diff"]
+    assert (tmp_path / "w.txt").read_bytes() == codecs.BOM_UTF8 + b"one\r\nTWO\r\n"
+    (tmp_path / "u8.txt").write_bytes(b"one\r\ntwo\r\n")
+    out = server.cap.filesystem("write", "u8.txt", "one\nTWO\n", encoding="utf-16-le")
+    assert out["eol"] == "CRLF" and "-two" in out["diff"]
+    assert (tmp_path / "u8.txt").read_bytes() == "one\r\nTWO\r\n".encode("utf-16-le")
 
 
 def test_project_instructions_cut_keeps_bad_bytes_visible(tmp_path):

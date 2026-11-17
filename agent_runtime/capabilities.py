@@ -88,8 +88,8 @@ def _split_bom(text: str):
 
 
 # UTF-32 LE starts with the UTF-16 LE mark, so UTF-32 is checked first.
-_WIDE_BOMS = ((codecs.BOM_UTF32_LE, "utf-32"), (codecs.BOM_UTF32_BE, "utf-32"),
-              (codecs.BOM_UTF16_LE, "utf-16"), (codecs.BOM_UTF16_BE, "utf-16"))
+_WIDE_BOMS = ((codecs.BOM_UTF32_LE, "utf-32", "utf-32-le"), (codecs.BOM_UTF32_BE, "utf-32", "utf-32-be"),
+              (codecs.BOM_UTF16_LE, "utf-16", "utf-16-le"), (codecs.BOM_UTF16_BE, "utf-16", "utf-16-be"))
 
 
 def _codec_name(encoding: str):
@@ -108,25 +108,47 @@ def _wide_unit(encoding: str):
 def _file_codec(encoding: str, head):
     """encoding, with plain utf-16/utf-32 swapped for the -le/-be codec
     the file's byte order mark names (none: -le). Decoding then keeps
-    the mark as a character for _split_bom, so a read past it decodes
-    right and an edit writes it back as it was, instead of a fresh
-    little-endian one. head is the file's first bytes, None for a new
-    file. A new, empty, or not yet wide file (no wide mark, no NUL, as
-    ASCII-range UTF-16/32 always has one) keeps the plain codec, so
-    converting it writes a mark."""
+    the mark as a character for _split_bom, so a read past it or a file
+    without a mark decodes right, and an edit writes the mark back as it
+    was instead of a fresh little-endian one. head is the file's first
+    bytes, None for a new file, which keeps the plain codec (it writes a
+    mark)."""
     name = _codec_name(encoding)
-    if not head or name not in ("utf-16", "utf-32"):
-        return encoding
-    if not any(head.startswith(mark) for mark, _ in _WIDE_BOMS) and b"\x00" not in head:
+    if head is None or name not in ("utf-16", "utf-32"):
         return encoding
     big = codecs.BOM_UTF32_BE if name == "utf-32" else codecs.BOM_UTF16_BE
     return f"{name}-be" if head.startswith(big) else f"{name}-le"
 
 
+def _is_wide(head: bytes):
+    """Whether a file's first bytes look like UTF-16/32 text: a wide byte
+    order mark, or a NUL byte, which any ASCII character (a newline, say)
+    has in those encodings."""
+    return any(head.startswith(mark) for mark, _, _ in _WIDE_BOMS) or b"\x00" in head
+
+
+def _write_codecs(encoding: str, head: bytes):
+    """(codec to read an existing file's old text with, codec to write the
+    new text with) for write. The old text, read for its line endings,
+    mark and diff, is decoded in the file's own encoding, so converting
+    keeps them: a wide mark names it, a wide file without one takes the
+    -le/-be form of a wide encoding (else UTF-8), and a file that is not
+    wide is read with encoding, or UTF-8 when converting it to UTF-16/32.
+    A wide file is written back in its byte order; one that is not wide
+    with encoding as given, so plain utf-16/32 adds a mark."""
+    if not _is_wide(head):
+        return ("utf-8" if _wide_unit(encoding) > 1 else encoding), encoding
+    for mark, _, codec in _WIDE_BOMS:
+        if head.startswith(mark):
+            return codec, _file_codec(encoding, head)
+    own = _file_codec(encoding, head) if _wide_unit(encoding) > 1 else "utf-8"
+    return own, _file_codec(encoding, head)
+
+
 def _wide_hint(head: bytes):
     """': ... so pass encoding utf-16' when head starts with a UTF-16/32
     byte order mark, else ''."""
-    for mark, codec in _WIDE_BOMS:
+    for mark, codec, _ in _WIDE_BOMS:
         if head.startswith(mark):
             return f": it starts with a {codec.upper()} byte order mark, so pass encoding {codec}"
     return ""
@@ -1198,11 +1220,7 @@ class Capabilities:
                     codec = _file_codec(encoding, None)
                     try:
                         with target.open("rb") as handle:
-                            codec = _file_codec(encoding, handle.read(4))
-                        # Converting a file to plain utf-16/32: read the old
-                        # text as UTF-8, the default, for its line endings and
-                        # diff, as that codec's stream decoder needs a mark.
-                        reading = "utf-8" if _codec_name(codec) in ("utf-16", "utf-32") else codec
+                            reading, codec = _write_codecs(encoding, handle.read(8192))
                         with target.open("r", encoding=reading, errors="replace", newline="") as handle:
                             existed = True
                             head, bom = _split_bom(handle.read(65536))
@@ -1590,13 +1608,17 @@ class Capabilities:
         budget = int(self.cfg.max_read_chars)
         try:
             with target.open("rb") as handle:
-                _refuse_binary(handle.read(8192), encoding, "read")
+                first = handle.read(8192)
+            _refuse_binary(first, encoding, "read")
+            # -le/-be for plain utf-16/32, whose stream decoder fails on a
+            # file without a mark; _split_bom drops one on line 1.
+            codec = _file_codec(encoding, first)
             out, used, n, end, more = [], 0, 0, start - 1, False
             # The lines skipped before start, in case it is past the end.
             skipped = deque(maxlen=tail or PAST_END_LINES)
             # newline="\n": only LF ends a line, like ripgrep, so a
             # lone CR stays inside its line.
-            with target.open("r", encoding=encoding, errors="replace", newline="\n") as handle:
+            with target.open("r", encoding=codec, errors="replace", newline="\n") as handle:
                 while True:
                     line = handle.readline(budget + 1)
                     if not line:
@@ -1672,13 +1694,14 @@ class Capabilities:
             text, bom = _split_bom(raw.decode(codec))
         except UnicodeDecodeError as e:
             hint = _wide_hint(raw[:4])
-            if not hint:
-                raise
-            if hint.endswith(_codec_name(encoding)[:6]):
-                # Already the codec the mark names: the file itself is bad.
+            if hint and not hint.endswith(_codec_name(encoding)[:6]):
+                raise RuntimeFault("binary_file", f"Binary file edit is not supported{hint}") from None
+            if hint or _wide_unit(encoding) > 1:
+                # Already the codec the mark names, or a wide one without
+                # a mark: the file itself is bad.
                 raise RuntimeFault("binary_file", f"File is not valid {encoding}, so it cannot be edited: "
                                                   f"{e.reason} at byte {e.start}") from None
-            raise RuntimeFault("binary_file", f"Binary file edit is not supported{hint}") from None
+            raise
         return text, _detect_eol(text), bom, codec
 
     @staticmethod
