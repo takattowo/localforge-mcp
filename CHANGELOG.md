@@ -1,5 +1,12 @@
 # Changelog
 
+## Unreleased
+
+- UTF-16 and UTF-32 files can be read and patched: `read` (byte and line mode) and `apply_patch` no longer refuse them as `binary_file` when `encoding` names that codec (`utf-16`, `utf-16-le`, `utf-32`, ...). Their text holds NUL bytes, which the binary check used to catch whatever the encoding (so the 1.9.0 note that line-mode `read` and `apply_patch` reject them no longer holds). Read with another encoding, such a file still fails as `binary_file`, now with a hint naming the codec to pass (`replace_text` and `multi_edit` give it too, instead of a raw `UnicodeDecodeError`).
+- Byte-mode `read` with a UTF-16/32 `encoding` counts whole code units: `max_bytes` is rounded down to a multiple of 2 (UTF-16) or 4 (UTF-32), and an `offset` that is not one fails with `invalid_arguments`, so pages decode right from any page boundary. A surrogate pair cut by a page still shows as U+FFFD, like a UTF-8 character cut by `max_bytes`. With plain `utf-16`/`utf-32`, a read past the start decodes in the byte order the file's mark names.
+- **Behaviour change:** with plain `utf-16`/`utf-32`, edits (`write` of an existing file, `replace_text`, `multi_edit`, `apply_patch`) keep the file's byte order mark as it was: a big-endian file stays big-endian and a file without a mark gets none. They used to rewrite it little-endian with a fresh mark, so git showed every line as changed. New files still get a little-endian mark.
+- An unknown `encoding` fails with `invalid_arguments` (`Unknown encoding: ...`) in `read`, `apply_patch`, and edits of existing files, instead of a raw `LookupError`.
+
 ## 1.10.0
 
 - Large output no longer breaks the host relay (Quick rejects results over roughly 300 KB). `execute` returns at most `max_inline_output_bytes` (default 30000) of head and tail per stream and saves the output (up to `max_capture_bytes`, head and tail) to a log, given as `stdout_path`/`stderr_path`. Any tool result over `max_result_bytes` (default 200000) is saved as indented JSON and replaced by a cut-down reply with `result_path` (shape below). Saved files go to `spill_dir` (default: a per-config folder under `%TEMP%\localforge-results`), which is added to the read roots so `filesystem read` and `search` work on them. Saved files are named `lf-*`; only those are pruned (newest 100 kept), so other files in the folder are never touched. A relative `spill_dir` resolves against `workspace_root` and environment variables expand; an unusable folder turns saving off (output is still clipped) instead of stopping the server.

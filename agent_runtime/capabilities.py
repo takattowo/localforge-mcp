@@ -87,23 +87,53 @@ def _split_bom(text: str):
     return (text[1:], True) if text.startswith(BOM) else (text, False)
 
 
-# UTF-32 LE starts with the UTF-16 LE mark, so this covers it too.
-_WIDE_BOMS = (codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE, codecs.BOM_UTF32_BE)
+# UTF-32 LE starts with the UTF-16 LE mark, so UTF-32 is checked first.
+_WIDE_BOMS = ((codecs.BOM_UTF32_LE, "utf-32"), (codecs.BOM_UTF32_BE, "utf-32"),
+              (codecs.BOM_UTF16_LE, "utf-16"), (codecs.BOM_UTF16_BE, "utf-16"))
+
+
+def _codec_name(encoding: str):
+    try:
+        return codecs.lookup(encoding).name
+    except LookupError:
+        raise RuntimeFault("invalid_arguments", f"Unknown encoding: {encoding}") from None
+
+
+def _wide_unit(encoding: str):
+    """Bytes per code unit: 2 for UTF-16, 4 for UTF-32, else 1."""
+    name = _codec_name(encoding)
+    return 2 if name.startswith("utf-16") else 4 if name.startswith("utf-32") else 1
+
+
+def _file_codec(encoding: str, head):
+    """encoding, with plain utf-16/utf-32 swapped for the -le/-be codec
+    the file's byte order mark names (none: -le). Decoding then keeps
+    the mark as a character for _split_bom, so a read past it decodes
+    right and an edit writes it back as it was, instead of a fresh
+    little-endian one. head is the file's first bytes, None for a new
+    file, which keeps the plain codec (it writes a mark)."""
+    name = _codec_name(encoding)
+    if head is None or name not in ("utf-16", "utf-32"):
+        return encoding
+    big = codecs.BOM_UTF32_BE if name == "utf-32" else codecs.BOM_UTF16_BE
+    return f"{name}-be" if head.startswith(big) else f"{name}-le"
+
+
+def _wide_hint(head: bytes):
+    """': ... so pass encoding utf-16' when head starts with a UTF-16/32
+    byte order mark, else ''."""
+    for mark, codec in _WIDE_BOMS:
+        if head.startswith(mark):
+            return f": it starts with a {codec.upper()} byte order mark, so pass encoding {codec}"
+    return ""
 
 
 def _refuse_binary(head: bytes, encoding: str, what: str):
     """Fail with binary_file when head holds a NUL byte, unless the
     encoding is UTF-16 or UTF-32, whose ASCII characters hold zero bytes.
-    A UTF-16/32 byte order mark gets a hint to pass that encoding."""
-    try:
-        if codecs.lookup(encoding).name.startswith(("utf-16", "utf-32")):
-            return
-    except LookupError:
-        pass  # the decode that follows reports the unknown encoding
-    if b"\x00" in head:
-        hint = (": it starts with a UTF-16/32 byte order mark, so pass encoding utf-16 (or utf-32)"
-                if head.startswith(_WIDE_BOMS) else "")
-        raise RuntimeFault("binary_file", f"Binary file {what} is not supported{hint}")
+    A UTF-16/32 byte order mark gets a hint naming that encoding."""
+    if _wide_unit(encoding) == 1 and b"\x00" in head:
+        raise RuntimeFault("binary_file", f"Binary file {what} is not supported{_wide_hint(head)}")
 
 
 def _detect_eol(text: str):
@@ -1118,13 +1148,23 @@ class Capabilities:
                 return self._noted(self._read_lines(target, encoding, line_start, line_end), note)
             cap = min(int(max_bytes or self.cfg.max_file_read_bytes), self.cfg.max_file_read_bytes)
             offset = max(0, int(offset))
+            unit = _wide_unit(encoding)
+            if unit > 1:
+                # Whole code units only, so a page never starts or ends
+                # inside one and the next page decodes right too.
+                if offset % unit:
+                    raise RuntimeFault("invalid_arguments",
+                                       f"offset must be a multiple of {unit} for {encoding}, "
+                                       f"whose code units are {unit} bytes")
+                cap = max(unit, cap - cap % unit)
             with target.open("rb") as handle:
+                codec = _file_codec(encoding, handle.read(4))
                 handle.seek(offset)
                 data = handle.read(cap + 1)
             truncated = len(data) > cap
             data = data[:cap]
             _refuse_binary(data, encoding, "read")
-            content = data.decode(encoding, "replace")
+            content = data.decode(codec, "replace")
             if offset == 0:
                 content, _ = _split_bom(content)
             return self._noted({"path": str(target), "content": content, "offset": offset,
@@ -1151,8 +1191,11 @@ class Capabilities:
                     before = None
                     existed = False
                     bom = False
+                    codec = _file_codec(encoding, None)
                     try:
-                        with target.open("r", encoding=encoding, errors="replace", newline="") as handle:
+                        with target.open("rb") as handle:
+                            codec = _file_codec(encoding, handle.read(4))
+                        with target.open("r", encoding=codec, errors="replace", newline="") as handle:
                             existed = True
                             head, bom = _split_bom(handle.read(65536))
                             eol = _detect_eol(head)
@@ -1165,7 +1208,7 @@ class Capabilities:
                     # its line endings, whatever the content starts with; a
                     # file without one gets it only from the content.
                     data, own_bom = _split_bom(data)
-                    written = self._atomic_write(target, data, encoding, eol, bom or own_bom)
+                    written = self._atomic_write(target, data, codec, eol, bom or own_bom)
                 except OSError as e:
                     _fs_error("write", target, e)
             result = {"path": str(target), "bytes": written}
@@ -1192,7 +1235,7 @@ class Capabilities:
             expected = self._expected(replace_all, expected_occurrences, old_text, "")
             with self._locked_paths([target]):
                 try:
-                    original, eol, bom = self._read_text(target, encoding)
+                    original, eol, bom, codec = self._read_text(target, encoding)
                 except OSError as e:
                     _fs_error("replace_text", target, e)
                 updated, counts, tiers, write_eol = self._apply_edits(
@@ -1203,7 +1246,7 @@ class Capabilities:
                                              + (" Pass expected_occurrences (or replace_all: true) to replace all of "
                                                 "them at once." if found else "")) + hint))
                 try:
-                    written = self._atomic_write(target, updated, encoding, write_eol, bom)
+                    written = self._atomic_write(target, updated, codec, write_eol, bom)
                 except OSError as e:
                     _fs_error("replace_text", target, e)
             result = {"path": str(target), "replacements": counts[0], "bytes": written}
@@ -1240,7 +1283,7 @@ class Capabilities:
                                                        old, f"edits[{index}]: ")))
             with self._locked_paths([target]):
                 try:
-                    original, eol, bom = self._read_text(target, encoding)
+                    original, eol, bom, codec = self._read_text(target, encoding)
                 except OSError as e:
                     _fs_error("multi_edit", target, e)
                 # Edits apply in order against the evolving content and
@@ -1258,7 +1301,7 @@ class Capabilities:
                                              + ("; pass expected_occurrences (or replace_all) when it repeats."
                                                 if found else ".")) + hint))
                 try:
-                    written = self._atomic_write(target, content, encoding, write_eol, bom)
+                    written = self._atomic_write(target, content, codec, write_eol, bom)
                 except OSError as e:
                     _fs_error("multi_edit", target, e)
             applied = [{"index": index, "replacements": count} for index, count in enumerate(counts)]
@@ -1296,7 +1339,7 @@ class Capabilities:
                     if creating:
                         if dest.exists():
                             raise RuntimeFault("invalid_arguments", f"Patch creates existing file: {dest}")
-                        original, eol, bom = "", None, False
+                        original, eol, bom, codec = "", None, False, encoding
                     else:
                         if not dest.exists():
                             raise RuntimeFault("path_not_found", f"Path not found: {dest}")
@@ -1307,7 +1350,8 @@ class Capabilities:
                         except OSError as e:
                             _fs_error("apply_patch", dest, e)
                         _refuse_binary(raw[:8192], encoding, "patch")
-                        original, bom = _split_bom(raw.decode(encoding, "replace"))
+                        codec = _file_codec(encoding, raw[:4])
+                        original, bom = _split_bom(raw.decode(codec, "replace"))
                         eol = _detect_eol(original)
                     moved = []
                     updated = build_patched(original, fp, rel, eol, bom, moved)
@@ -1316,14 +1360,14 @@ class Capabilities:
                     if moved:
                         # Only hunks placed away from their stated line.
                         info["hunks"] = moved
-                    planned.append((dest, updated, creating, bom, original, info))
+                    planned.append((dest, updated, creating, bom, codec, original, info))
                 results, diffs = [], []
-                for dest, updated, creating, bom, original, info in planned:
+                for dest, updated, creating, bom, codec, original, info in planned:
                     try:
                         dest.parent.mkdir(parents=True, exist_ok=True)
                         # build_new keeps untouched lines byte-exact,
                         # so the result is written verbatim.
-                        written = self._atomic_write(dest, updated, encoding, bom=bom)
+                        written = self._atomic_write(dest, updated, codec, bom=bom)
                     except OSError as e:
                         _fs_error("apply_patch", dest, e)
                     results.append({"path": str(dest), "created": creating, "bytes": written, **info})
@@ -1612,9 +1656,18 @@ class Capabilities:
     @staticmethod
     def _read_text(target, encoding):
         """Read a file as text, line endings untouched, plus its dominant
-        ending and whether it starts with a byte order mark (removed)."""
-        text, bom = _split_bom(target.read_bytes().decode(encoding))
-        return text, _detect_eol(text), bom
+        ending, whether it starts with a byte order mark (removed), and
+        the codec to write it back with (see _file_codec)."""
+        raw = target.read_bytes()
+        codec = _file_codec(encoding, raw[:4])
+        try:
+            text, bom = _split_bom(raw.decode(codec))
+        except UnicodeDecodeError:
+            hint = _wide_hint(raw[:4])
+            if not hint:
+                raise
+            raise RuntimeFault("binary_file", f"Binary file edit is not supported{hint}") from None
+        return text, _detect_eol(text), bom, codec
 
     @staticmethod
     def _apply_edits(original, eol, edits, mismatch):
