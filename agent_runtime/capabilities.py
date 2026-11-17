@@ -1914,9 +1914,11 @@ class Capabilities:
             skip_next = a in values and not skip_next
         revs = run(["rev-parse", "--revs-only", "--no-flags", *kept])
         # Colour codes hide the "diff --git" headers new files are counted and cut at.
-        # The last --color/--no-color wins; --color=auto never colours a pipe.
-        color = next((a for a in args if a.startswith("--color-words") or a == "--word-diff=color"), None)
-        last = next((a for a in reversed(args) if a in ("--color", "--no-color") or a.startswith("--color=")), None)
+        # The last --color/--no-color wins; --color=auto never colours a pipe. Only
+        # options count: not an option's value (-S --color) or a pathspec after --.
+        flags = kept[:kept.index("--")] if "--" in kept else kept
+        color = next((a for a in flags if a.startswith("--color-words") or a == "--word-diff=color"), None)
+        last = next((a for a in reversed(flags) if a in ("--color", "--no-color") or a.startswith("--color=")), None)
         if color is None and last not in (None, "--no-color") and last.partition("=")[2].lower() not in ("never", "auto"):
             color = last
         if color:
