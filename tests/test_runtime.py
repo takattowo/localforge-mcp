@@ -3867,6 +3867,17 @@ def test_advanced_features_default_off_and_loaded_from_config(tmp_path):
     assert "bogus_key" in str(exc.value) and "advanced" not in str(exc.value)
 
 
+def test_unknown_config_keys_get_a_plain_error(tmp_path):
+    path = tmp_path / "lf.json"
+    for keys in ({"advanced_feature": True}, {"advanced_featurez": True, "max_proceses": 3}):
+        path.write_text(json.dumps({"workspace_root": str(tmp_path), **keys}))
+        with pytest.raises(ValueError) as exc:
+            Config.load(str(path))
+        message = str(exc.value)
+        assert message == ("unknown config key: " if len(keys) == 1 else "unknown config keys: ") + ", ".join(keys)
+        assert "advanced_features" not in message and "Did you mean" not in message
+
+
 def test_switch_off_tools_list(tmp_path):
     server = make(tmp_path, advanced_features=False)
     init = server.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})["result"]

@@ -1,5 +1,5 @@
 from __future__ import annotations
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 import json
 import os
@@ -80,6 +80,10 @@ class Config:
         data.pop("network_hosts", None)
         data.pop("approval_ttl_seconds", None)
         data.pop("config_path", None)
+        # Checked here, so a typo gets a plain message, not Python's own hint.
+        unknown = [key for key in data if key not in {item.name for item in fields(cls)}]
+        if unknown:
+            raise ValueError(("unknown config key: " if len(unknown) == 1 else "unknown config keys: ") + ", ".join(unknown))
         cfg = cls(**data)
         cfg.config_path = str(Path(path).expanduser())
         cfg.workspace_root = str(Path(cfg.workspace_root).expanduser())
