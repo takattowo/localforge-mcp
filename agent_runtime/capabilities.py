@@ -111,10 +111,10 @@ def _file_codec(encoding: str, head):
     the mark as a character for _split_bom, so a read past it or a file
     without a mark decodes right, and an edit writes the mark back as it
     was instead of a fresh little-endian one. head is the file's first
-    bytes, None for a new file, which keeps the plain codec (it writes a
-    mark)."""
+    bytes, None for a new file; a new or empty file keeps the plain codec
+    (it writes a mark)."""
     name = _codec_name(encoding)
-    if head is None or name not in ("utf-16", "utf-32"):
+    if not head or name not in ("utf-16", "utf-32"):
         return encoding
     big = codecs.BOM_UTF32_BE if name == "utf-32" else codecs.BOM_UTF16_BE
     return f"{name}-be" if head.startswith(big) else f"{name}-le"

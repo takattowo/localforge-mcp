@@ -248,7 +248,7 @@ SCHEMAS = {
         "destination": {"type": "string", "description": "Destination path for move/copy; move and copy create missing parent dirs. An existing file there is refused unless overwrite is true; an existing directory is never replaced. A folder cannot go into itself, nor a file be copied onto itself."},
         "overwrite": {"type": "boolean", "description": "Let move/copy replace an existing destination file, default false."},
         "recursive": {"type": "boolean", "description": "true creates parent dirs for mkdir, deletes non-empty dirs for delete, copies directories for copy."},
-        "encoding": {"type": "string", "description": "Text encoding, default utf-8. Pass utf-16 or utf-32 for such files (changes keep their byte order mark); write with utf-8 turns one into UTF-8."},
+        "encoding": {"type": "string", "description": "Text encoding, default utf-8. Pass utf-16 or utf-32 for such files (changes keep their byte order mark); write with utf-8 turns one into UTF-8 (a file with a byte order mark keeps one)."},
         "offset": {"type": "integer", "description": "Byte offset for legacy read mode; list page offset when action is list. Ignored in line mode."},
         "max_bytes": {"type": "integer", "description": "Byte cap for legacy read mode."},
         "old_text": {"type": "string", "description": "Text to find for replace_text; exact, else retried ignoring typographic quotes/dashes/spaces, then trailing whitespace per line, then without read's N<TAB> line-number prefixes (the result then has match); an exact match that could be those numbered lines instead is refused."},

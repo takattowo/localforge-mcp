@@ -3227,6 +3227,11 @@ def test_wide_write_converts_with_one_mark(tmp_path):
     created = "--- /dev/null\n+++ b/made.txt\n@@ -0,0 +1,1 @@\n+\ufeffhi\n"
     server.cap.filesystem("apply_patch", patch=created, encoding="utf-16")
     assert (tmp_path / "made.txt").read_bytes() == mark + "hi\n".encode("utf-16-le")
+    # An existing empty file patched with plain utf-16 gets a mark too, as write gives it.
+    (tmp_path / "blank.txt").write_bytes(b"")
+    added = "--- a/blank.txt\n+++ b/blank.txt\n@@ -0,0 +1,1 @@\n+hi\n"
+    server.cap.filesystem("apply_patch", patch=added, encoding="utf-16")
+    assert (tmp_path / "blank.txt").read_bytes() == mark + "hi\n".encode("utf-16-le")
 
 
 def test_wide_files_without_a_mark_stay_without_one(tmp_path):
