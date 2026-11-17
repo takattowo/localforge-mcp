@@ -2124,6 +2124,23 @@ def test_apply_patch_refuses_ambiguous_places_and_renames(tmp_path):
     assert (tmp_path / "old.txt").read_text() == "x\n" and not (tmp_path / "new.txt").exists()
 
 
+def test_apply_patch_refuses_a_file_named_in_two_sections(tmp_path):
+    server = make(tmp_path)
+    (tmp_path / "f.txt").write_text("a\nb\nc\n")
+    first = "--- a/f.txt\n+++ b/f.txt\n@@ -1 +1 @@\n-a\n+A\n"
+    # Each section was built from the file on disk, so the second write
+    # used to drop the first one's change.
+    seconds = ["--- a/f.txt\n+++ b/f.txt\n@@ -3 +3 @@\n-c\n+C\n",
+               "--- a/./f.txt\n+++ b/./f.txt\n@@ -3 +3 @@\n-c\n+C\n"]
+    if os.name == "nt":
+        seconds.append("--- a/F.TXT\n+++ b/F.TXT\n@@ -3 +3 @@\n-c\n+C\n")
+    for second in seconds:
+        with pytest.raises(RuntimeFault) as exc:
+            server.cap.filesystem("apply_patch", ".", patch=first + second)
+        assert exc.value.code == "invalid_arguments" and "one section" in exc.value.message, second
+    assert (tmp_path / "f.txt").read_text() == "a\nb\nc\n"
+
+
 @pytest.mark.parametrize("engine", ["ripgrep", "python"])
 def test_search_folder_glob_and_exact_truncation(tmp_path, monkeypatch, engine):
     if engine == "ripgrep" and not shutil.which("rg"):

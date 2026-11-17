@@ -1208,11 +1208,19 @@ class Capabilities:
                 raise RuntimeFault("not_directory", f"Patch base is not a directory: {target}")
             self.policy.authorize_path("apply_patch")
             entries = list(parse_diff(patch))
-            planned_paths = []
+            planned_paths, seen = [], {}
             for fp in entries:
                 rel = fp.new_path if fp.new_path != "/dev/null" else fp.old_path
-                planned_paths.append((fp, rel, self.paths.resolve(
-                    rel, cwd=target, access="write", must_exist=False)))
+                dest = self.paths.resolve(rel, cwd=target, access="write", must_exist=False)
+                # Each section is built from the file on disk, so a second
+                # one for the same file would drop the first one's change.
+                key = os.path.normcase(str(dest))
+                if key in seen:
+                    raise RuntimeFault("invalid_arguments",
+                                       f"Patch names {dest} in two sections ({seen[key]} and {rel}); "
+                                       "merge its hunks into one section")
+                seen[key] = rel
+                planned_paths.append((fp, rel, dest))
             with self._locked_paths([dest for _, _, dest in planned_paths]):
                 planned = []
                 for fp, rel, dest in planned_paths:
