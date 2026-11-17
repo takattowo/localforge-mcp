@@ -3993,3 +3993,14 @@ def test_replace_text_miss_message_has_no_count_tip(tmp_path):
                                {"action": "replace_text", "path": "a.txt", "old_text": "zebra", "new_text": "two"})
         assert code == "content_mismatch" and message.startswith("Expected 1 occurrence(s), found 0.")
         assert "expected_occurrences" not in message and "replace all of them" not in message
+
+
+def test_missing_program_is_a_clear_fault(tmp_path):
+    server = make(tmp_path)
+    name = "lf-no-such-program-4821"
+    for tool, args in (("process", {"action": "start", "command": [name, "x"]}), ("execute", {"command": [name, "x"]})):
+        code, message = _fault(server, tool, args)
+        assert code == "command_not_found" and message.startswith(f"Program not found: {name}.")
+        assert ("PATH" in message) == (os.name == "nt")
+    # Nothing started, so nothing is left in the process table.
+    assert not server.processes.items

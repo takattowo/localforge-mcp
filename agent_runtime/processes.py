@@ -163,7 +163,13 @@ class ProcessManager:
         with self.lock:
             if pid in self.items and self.items[pid].proc.poll() is None:
                 raise RuntimeFault("process_exists", f"Process id already active: {pid}")
-            proc = self._popen(command, str(work), shell, env, stdin)
+            try:
+                proc = self._popen(command, str(work), shell, env, stdin)
+            except FileNotFoundError as e:
+                hint = (" Check PATH, or pass the full path; a .cmd, .bat or .ps1 script needs shell: true."
+                        if os.name == "nt" else "")
+                program = command_for_spawn(self.cfg, command, shell)[0]
+                raise RuntimeFault("command_not_found", f"Program not found: {program}.{hint}") from e
             if self.cfg.kill_children_on_exit:
                 # Kernel-side cleanup: the child dies with
                 # this process however it dies, not just on
