@@ -388,7 +388,11 @@ def _switch_off_surface():
         action["enum"] = [item for item in action["enum"] if item not in actions]
     fs, process = schemas["filesystem"]["properties"], schemas["process"]["properties"]
     fs["action"]["description"] = _cut(fs["action"]["description"], (
-        " multi_edit applies several exact replacements to one file, validated end-to-end and written once.", ""))
+        " multi_edit applies several exact replacements to one file, validated end-to-end and written once.",
+        " Several changes to one file: one apply_patch (all-or-nothing) instead of one replace_text per change."))
+    fs["expected_occurrences"]["description"] = _cut(fs["expected_occurrences"]["description"], (
+        "default 1.", "default 1. To replace every occurrence pass the exact count (count it with search first), "
+                      "or use apply_patch."))
     timeout = schemas["execute"]["properties"]["timeout"]
     timeout["description"] = _cut(timeout["description"], ("Seconds to wait, not", "Seconds, not"))
     process["action"]["description"] = ("start, read, write, status, list, restart, or stop. start needs command; "
@@ -397,14 +401,21 @@ def _switch_off_surface():
     process["wait_ms"]["description"] = "Milliseconds read blocks for new output, max 60000, default 0."
     descriptions = {name: text for name, text in DESCRIPTIONS.items() if name not in SWITCHED_TOOLS}
     descriptions["filesystem"] = _cut(descriptions["filesystem"],
-                                      ("multi_edit for several exact replacements per file (all-or-nothing), ", ""),
+                                      ("multi_edit for several exact replacements per file (all-or-nothing), ",
+                                       "apply_patch for several changes in one all-or-nothing step, "),
                                       ("replace_text, multi_edit, and apply_patch.", "replace_text, and apply_patch."))
     descriptions["search"] = _cut(descriptions["search"], (
-        " Several searches: use multi_search (or batch) in one call, not one search per turn.", ""))
+        " Several searches: use multi_search (or batch) in one call, not one search per turn.",
+        " Several patterns: one regex with | and fixed_string false (e.g. \"foo|bar\"), or several searches sent "
+        "in the same turn."))
+    descriptions["git"] += (" diff shows tracked changes only; for new files run status (untracked files are "
+                            "'? path' lines) and read them with filesystem read.")
     descriptions["execute"] = _cut(descriptions["execute"], ("Run a command and wait for it,", "Run a command until it ends,"))
     descriptions["process"] = _cut(descriptions["process"], (
         " wait blocks until a process exits or prints a line matching pattern (up to 60 s per call), "
-        "so a build or test run needs no read polling.", ""))
+        "so a build or test run needs no read polling.",
+        " To follow a build, test or line: read with wait_ms (max 60000) and after=next_after, repeated until "
+        "state is exited or the line shows in stdout/stderr."))
     return schemas, descriptions
 
 SWITCH_OFF_SCHEMAS, SWITCH_OFF_DESCRIPTIONS = _switch_off_surface()

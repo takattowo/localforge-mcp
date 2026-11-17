@@ -3891,6 +3891,36 @@ def test_switch_off_tools_list(tmp_path):
     assert props["filesystem"]["action"]["enum"] == [action for action in full["filesystem"]["inputSchema"]["properties"]["action"]["enum"] if action != "multi_edit"]
 
 
+def test_switch_off_tools_list_names_plain_routes(tmp_path):
+    # Each step the switch takes away is described the plain way instead.
+    tools = {tool["name"]: tool for tool in make(tmp_path, advanced_features=False).tools()}
+    fs = tools["filesystem"]["inputSchema"]["properties"]
+    routes = (
+        (tools["search"]["description"],
+         'one regex with | and fixed_string false (e.g. "foo|bar"), or several searches sent in the same turn'),
+        (tools["process"]["description"],
+         "read with wait_ms (max 60000) and after=next_after, repeated until state is exited or the line shows"),
+        (tools["git"]["description"],
+         "diff shows tracked changes only; for new files run status (untracked files are '? path' lines) "
+         "and read them with filesystem read."),
+        (tools["filesystem"]["description"], "apply_patch for several changes in one all-or-nothing step, "),
+        (fs["action"]["description"],
+         "Several changes to one file: one apply_patch (all-or-nothing) instead of one replace_text per change."),
+        (fs["expected_occurrences"]["description"],
+         "To replace every occurrence pass the exact count (count it with search first), or use apply_patch."),
+    )
+    full = json.dumps(make(tmp_path).tools(), ensure_ascii=False)
+    for text, route in routes:
+        assert route in text
+        assert json.dumps(route, ensure_ascii=False)[1:-1] not in full
+    if shutil.which("git"):
+        # The status preset shows a new file as a '? path' line.
+        subprocess.run(["git", "init", "-q", str(tmp_path)], check=True)
+        (tmp_path / "new.txt").write_text("x\n")
+        out = make(tmp_path, advanced_features=False).call("git", {"action": "status"})["stdout"]
+        assert "? new.txt" in out.splitlines()
+
+
 def test_switch_off_calls_match_unknown_names(tmp_path):
     server = make(tmp_path, advanced_features=False)
     (tmp_path / "a.txt").write_text("one one\n")
