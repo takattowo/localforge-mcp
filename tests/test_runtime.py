@@ -3670,6 +3670,24 @@ def test_multi_edit_refuses_line_numbers_after_the_line_count_changed(tmp_path):
     assert path.read_text() == "A\nc\nd\n)\n}\nb\n};\n"
 
 
+def test_multi_edit_refuses_numbered_looking_old_text_after_a_line_shift(tmp_path):
+    server = make(tmp_path)
+    path = tmp_path / "n.txt"
+    path.write_text("z\nfoo\n2\tfoo\n")
+    # replace_text refuses it: line 2 is "foo" and line 3 is "2<TAB>foo".
+    with pytest.raises(RuntimeFault) as exc:
+        server.cap.filesystem("replace_text", "n.txt", old_text="2\tfoo", new_text="2\tFOO")
+    assert exc.value.code == "content_mismatch"
+    # After an edit adds a line above, line 2 of the edited text is "y",
+    # so a check against it used to let the exact match (line 3) through.
+    with pytest.raises(RuntimeFault) as exc:
+        server.cap.filesystem("multi_edit", "n.txt", edits=[
+            {"old_text": "z", "new_text": "z\ny"}, {"old_text": "2\tfoo", "new_text": "2\tFOO"}])
+    assert exc.value.code == "content_mismatch" and "edits[1]" in exc.value.message
+    assert "line count" in exc.value.message
+    assert path.read_text() == "z\nfoo\n2\tfoo\n"
+
+
 def test_edit_refuses_old_text_that_reads_as_text_and_as_numbered_lines(tmp_path):
     server = make(tmp_path)
     path = tmp_path / "n.txt"

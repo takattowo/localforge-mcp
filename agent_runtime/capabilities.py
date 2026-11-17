@@ -1618,12 +1618,14 @@ class Capabilities:
         view, exact = _lf(original), original
         counts, tiers = [], []
         # Line numbers in old_text come from a read taken before the
-        # call: once an edit changes the line count, they are refused.
+        # call: once an edit changes the line count, an old_text that
+        # reads as numbered lines is refused, whatever it would match
+        # (checking it against the edited text could pick another line).
         shifted = False
         for index, (old, new, expected) in enumerate(edits):
-            spans, tier, tried = _find_spans(view, old, new, expected)
-            if tier == "line_numbers" and shifted:
+            if shifted and expected == 1 and _split_numbered(old) is not None:
                 raise mismatch(index, expected, 0, NUMBERED_SHIFT_HINT)
+            spans, tier, tried = _find_spans(view, old, new, expected)
             if tier == "numbered_clash":
                 raise mismatch(index, expected, *_clash_miss(view, spans[0], tried[0][1]))
             if tier is None:
