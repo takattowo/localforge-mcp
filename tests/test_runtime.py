@@ -473,11 +473,14 @@ def test_git_diff_untracked_skips_what_it_cannot_add(tmp_path, monkeypatch):
         bare = server.call("git", {"action": "diff", "include_untracked": True, "args": extra})
         assert bare["untracked_files"] == 0 and "+two" in bare["stdout"] and "+fresh" not in bare["stdout"], (extra, bare)
     # Colour codes would hide the headers new files are counted and cut at.
-    for extra in (["--color"], ["--color=always"], ["--color-words"], ["--word-diff=color"]):
+    for extra in (["--color"], ["--color=always"], ["--color-words"], ["--word-diff=color"],
+                  ["--no-color", "--color"], ["--color-words", "--no-color"]):
         with pytest.raises(RuntimeFault) as exc:
             server.call("git", {"action": "diff", "include_untracked": True, "args": extra})
-        assert exc.value.code == "invalid_arguments" and extra[0] in exc.value.message, extra
-    for extra in (["--color=never"], ["--no-color"]):
+        named = [a for a in extra if a != "--no-color"][-1]
+        assert exc.value.code == "invalid_arguments" and named in exc.value.message, extra
+    # The last --color/--no-color wins, and auto never colours a pipe.
+    for extra in (["--color=never"], ["--no-color"], ["--color=auto"], ["--color", "--no-color"]):
         assert server.call("git", {"action": "diff", "include_untracked": True, "args": extra})["untracked_files"] == 1, extra
     # A failed add keeps the plain diff and says why.
     import agent_runtime.capabilities as caps

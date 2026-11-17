@@ -1914,8 +1914,11 @@ class Capabilities:
             skip_next = a in values and not skip_next
         revs = run(["rev-parse", "--revs-only", "--no-flags", *kept])
         # Colour codes hide the "diff --git" headers new files are counted and cut at.
-        color = next((a for a in args if a == "--color" or a.startswith("--color-words") or a == "--word-diff=color"
-                      or (a.startswith("--color=") and a != "--color=never")), None)
+        # The last --color/--no-color wins; --color=auto never colours a pipe.
+        color = next((a for a in args if a.startswith("--color-words") or a == "--word-diff=color"), None)
+        last = next((a for a in reversed(args) if a in ("--color", "--no-color") or a.startswith("--color=")), None)
+        if color is None and last not in (None, "--no-color") and last.partition("=")[2].lower() not in ("never", "auto"):
+            color = last
         if color:
             raise RuntimeFault("invalid_arguments",
                                f"include_untracked counts and cuts new files in plain diff output, so it cannot be "
