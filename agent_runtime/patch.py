@@ -203,9 +203,11 @@ def _matches(view, old, cursor, last):
 
 
 def _stated(hunk):
-    # A zero-length old range (-N,0) inserts after line N, so it
-    # starts at index N; any other range starts at line N.
-    return hunk.old_start if hunk.old_len == 0 else max(hunk.old_start - 1, 0)
+    # A hunk whose body only adds lines inserts after line N (as a
+    # zero-length old range -N,0 states), so it starts at index N; any
+    # other hunk starts at line N. The body decides, as in _place.
+    pure_insert = all(op == "+" for op in hunk.ops)
+    return hunk.old_start if pure_insert else max(hunk.old_start - 1, 0)
 
 
 def _place(lines, hunk, cursor, rel, view=None):

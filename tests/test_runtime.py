@@ -2186,6 +2186,12 @@ def test_apply_patch_reports_where_a_zero_length_hunk_with_context_landed(tmp_pa
     out = server.cap.filesystem("apply_patch", ".", patch=patch)["files"][0]
     assert out["hunks"] == [{"stated": 1, "placed": 4}]
     assert (tmp_path / "f.txt").read_text() == "1\n2\n3\n4\nX\n5\n"
+    # "-3,0" with a context line that is line 3: it landed as stated.
+    (tmp_path / "g.txt").write_text("a\nb\nc\nd\n")
+    patch = "--- a/g.txt\n+++ b/g.txt\n@@ -3,0 +3,2 @@\n c\n+X\n"
+    out = server.cap.filesystem("apply_patch", ".", patch=patch)["files"][0]
+    assert "hunks" not in out
+    assert (tmp_path / "g.txt").read_text() == "a\nb\nc\nX\nd\n"
 
 
 @pytest.mark.parametrize("engine", ["ripgrep", "python"])
