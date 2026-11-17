@@ -202,6 +202,12 @@ def _matches(view, old, cursor, last):
     return found
 
 
+def _stated(hunk):
+    # A zero-length old range (-N,0) inserts after line N, so it
+    # starts at index N; any other range starts at line N.
+    return hunk.old_start if hunk.old_len == 0 else max(hunk.old_start - 1, 0)
+
+
 def _place(lines, hunk, cursor, rel, view=None):
     """Index where a hunk's old lines start, found by content.
 
@@ -211,9 +217,7 @@ def _place(lines, hunk, cursor, rel, view=None):
     refused, naming both lines. view is _view(lines), when known.
     """
     old = [text for op, text in zip(hunk.ops, hunk.texts) if op != "+"]
-    # A zero-length old range (-N,0) inserts after line N, so it
-    # starts at index N; any other range starts at line N.
-    stated = hunk.old_start if hunk.old_len == 0 else max(hunk.old_start - 1, 0)
+    stated = _stated(hunk)
     if not old:
         if stated < cursor or stated > len(lines):
             raise RuntimeFault("content_mismatch",
@@ -257,11 +261,13 @@ def _drop_bom(hunk):
             hunk.texts[first] = hunk.texts[first][1:]
 
 
-def build_new(original, filepatch, rel, eol=None, bom=False):
+def build_new(original, filepatch, rel, eol=None, bom=False, moved=None):
     # Untouched lines keep their exact bytes; added lines take the
     # file's dominant line ending (eol), LF when it has none. parse
     # LF-normalizes patch text, so lines compare without endings.
     # bom: the file had a byte order mark, removed from original.
+    # moved: a list that gets {stated, placed} (header line numbers)
+    # for each hunk placed away from the line its header states.
     newline = eol or "\n"
     lines = _split_lines(original)
     out = []
@@ -280,6 +286,8 @@ def build_new(original, filepatch, rel, eol=None, bom=False):
     view = _view(lines)
     for hunk in filepatch.hunks:
         start = _place(lines, hunk, cursor, rel, view)
+        if moved is not None and start != _stated(hunk):
+            moved.append({"stated": hunk.old_start, "placed": start + (hunk.old_len != 0)})
         for line in lines[cursor:start]:
             emit(line)
         cursor = start

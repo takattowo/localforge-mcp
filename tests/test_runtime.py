@@ -2077,6 +2077,30 @@ def test_apply_patch_places_hunks_by_content(tmp_path):
     assert (tmp_path / "sql2.txt").read_text() == "++ A\nkeep\n"
 
 
+def test_apply_patch_reports_diff_counts_and_moved_hunks(tmp_path):
+    server = make(tmp_path)
+    body = "".join(f"line {n}\n" for n in range(1, 21))
+    (tmp_path / "f.txt").write_text(body)
+    # Stated at 5 and 10, they land on lines 7 and 15.
+    moved = ("--- a/f.txt\n+++ b/f.txt\n@@ -5,3 +5,3 @@\n line 7\n-line 8\n+LINE 8\n line 9\n"
+             "@@ -10,3 +10,4 @@\n line 15\n-line 16\n+LINE 16\n+extra\n line 17\n")
+    out = server.cap.filesystem("apply_patch", ".", patch=moved)["files"][0]
+    assert out["hunks"] == [{"stated": 5, "placed": 7}, {"stated": 10, "placed": 15}]
+    assert out["added"] == 3 and out["removed"] == 2
+    assert out["diff"].startswith("@@ ") and "-line 8\n+LINE 8\n" in out["diff"] and "+extra\n" in out["diff"]
+    # Hunks that land as stated leave the key out.
+    exact = "--- a/f.txt\n+++ b/f.txt\n@@ -1,2 +1,2 @@\n-line 1\n+LINE 1\n line 2\n@@ -20,0 +21 @@\n+end\n"
+    out = server.cap.filesystem("apply_patch", ".", patch=exact)["files"][0]
+    assert "hunks" not in out and out["added"] == 2 and out["removed"] == 1
+    assert "-line 1\n+LINE 1\n" in out["diff"] and "+end\n" in out["diff"]
+    # A created file has counts but no diff, like write; the diff cap applies.
+    out = server.cap.filesystem("apply_patch", ".", patch="--- /dev/null\n+++ b/n.txt\n@@ -0,0 +1,2 @@\n+a\n+b\n")
+    assert out["files"][0]["created"] and out["files"][0]["added"] == 2 and "diff" not in out["files"][0]
+    quiet = make(tmp_path, edit_diff_max_bytes=0)
+    out = quiet.cap.filesystem("apply_patch", ".", patch="--- a/n.txt\n+++ b/n.txt\n@@ -1 +1 @@\n-a\n+A\n")["files"][0]
+    assert "diff" not in out and out["added"] == 1 and out["removed"] == 1
+
+
 def test_apply_patch_refuses_ambiguous_places_and_renames(tmp_path):
     server = make(tmp_path)
     (tmp_path / "amb.txt").write_text("x\nb\nm\nm\nx\nb\n")

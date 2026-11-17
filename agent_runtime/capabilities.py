@@ -1201,9 +1201,16 @@ class Capabilities:
                             raise RuntimeFault("binary_file", "Binary file patch is not supported")
                         original, bom = _split_bom(raw.decode(encoding, "replace"))
                         eol = _detect_eol(original)
-                    planned.append((dest, build_patched(original, fp, rel, eol, bom), creating, bom))
-                results = []
-                for dest, updated, creating, bom in planned:
+                    moved = []
+                    updated = build_patched(original, fp, rel, eol, bom, moved)
+                    ops = [op for hunk in fp.hunks for op in hunk.ops]
+                    info = {"added": ops.count("+"), "removed": ops.count("-")}
+                    if moved:
+                        # Only hunks placed away from their stated line.
+                        info["hunks"] = moved
+                    planned.append((dest, updated, creating, bom, original, info))
+                results, diffs = [], []
+                for dest, updated, creating, bom, original, info in planned:
                     try:
                         dest.parent.mkdir(parents=True, exist_ok=True)
                         # build_new keeps untouched lines byte-exact,
@@ -1211,8 +1218,12 @@ class Capabilities:
                         written = self._atomic_write(dest, updated, encoding, bom=bom)
                     except OSError as e:
                         _fs_error("apply_patch", dest, e)
-                    results.append({"path": str(dest), "created": creating, "bytes": written})
-            for entry in results:
+                    results.append({"path": str(dest), "created": creating, "bytes": written, **info})
+                    # Like write: a new file's diff would only repeat it.
+                    diffs.append(None if creating else (original, updated))
+            for entry, change in zip(results, diffs):
+                if change:
+                    self._add_diff(entry, *change)
                 self._add_check(entry, Path(entry["path"]))
             return {"base": str(target), "files": results}
         if action == "mkdir":
