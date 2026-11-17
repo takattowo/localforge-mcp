@@ -3113,6 +3113,23 @@ def test_diff_skipped_for_large_or_binary_files(tmp_path):
     assert "diff_skipped" not in off.cap.filesystem("write", "big.txt", "small\n")
 
 
+def test_utf16_text_reads_and_patches_with_its_encoding(tmp_path):
+    server = make(tmp_path)
+    (tmp_path / "u16.txt").write_bytes("one\r\ntwo\r\n".encode("utf-16"))
+    with pytest.raises(RuntimeFault, match="utf-16"):
+        server.cap.filesystem("read", "u16.txt")
+    assert server.cap.filesystem("read", "u16.txt", encoding="utf-16")["content"] == "one\r\ntwo\r\n"
+    lines = server.cap.filesystem("read", "u16.txt", encoding="utf-16", line_start=2, line_end=2)
+    assert lines["content"] == "2\ttwo"
+    patch = "--- a/u16.txt\n+++ b/u16.txt\n@@ -1,2 +1,2 @@\n one\n-two\n+TWO\n"
+    server.cap.filesystem("apply_patch", patch=patch, encoding="utf-16")
+    assert (tmp_path / "u16.txt").read_bytes().decode("utf-16") == "one\r\nTWO\r\n"
+    (tmp_path / "bin.dat").write_bytes(b"a\x00b\n")
+    with pytest.raises(RuntimeFault) as fault:
+        server.cap.filesystem("read", "bin.dat")
+    assert "Binary file read" in str(fault.value) and "utf-16" not in str(fault.value)
+
+
 def test_project_instructions_cut_keeps_bad_bytes_visible(tmp_path):
     server = make(tmp_path, max_project_instruction_bytes=7)
     (tmp_path / "AGENTS.md").write_bytes(b"x\xffyz\xc3\xa9\xc3\xa9")

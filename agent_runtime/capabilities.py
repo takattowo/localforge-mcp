@@ -87,6 +87,25 @@ def _split_bom(text: str):
     return (text[1:], True) if text.startswith(BOM) else (text, False)
 
 
+# UTF-32 LE starts with the UTF-16 LE mark, so this covers it too.
+_WIDE_BOMS = (codecs.BOM_UTF16_LE, codecs.BOM_UTF16_BE, codecs.BOM_UTF32_BE)
+
+
+def _refuse_binary(head: bytes, encoding: str, what: str):
+    """Fail with binary_file when head holds a NUL byte, unless the
+    encoding is UTF-16 or UTF-32, whose ASCII characters hold zero bytes.
+    A UTF-16/32 byte order mark gets a hint to pass that encoding."""
+    try:
+        if codecs.lookup(encoding).name.startswith(("utf-16", "utf-32")):
+            return
+    except LookupError:
+        pass  # the decode that follows reports the unknown encoding
+    if b"\x00" in head:
+        hint = (": it starts with a UTF-16/32 byte order mark, so pass encoding utf-16 (or utf-32)"
+                if head.startswith(_WIDE_BOMS) else "")
+        raise RuntimeFault("binary_file", f"Binary file {what} is not supported{hint}")
+
+
 def _detect_eol(text: str):
     """Return the dominant line ending of decoded text; LF on a tie.
 
@@ -1104,8 +1123,7 @@ class Capabilities:
                 data = handle.read(cap + 1)
             truncated = len(data) > cap
             data = data[:cap]
-            if b"\x00" in data:
-                raise RuntimeFault("binary_file", "Binary file read is not supported")
+            _refuse_binary(data, encoding, "read")
             content = data.decode(encoding, "replace")
             if offset == 0:
                 content, _ = _split_bom(content)
@@ -1288,8 +1306,7 @@ class Capabilities:
                             raw = dest.read_bytes()
                         except OSError as e:
                             _fs_error("apply_patch", dest, e)
-                        if b"\x00" in raw[:8192]:
-                            raise RuntimeFault("binary_file", "Binary file patch is not supported")
+                        _refuse_binary(raw[:8192], encoding, "patch")
                         original, bom = _split_bom(raw.decode(encoding, "replace"))
                         eol = _detect_eol(original)
                     moved = []
@@ -1521,8 +1538,7 @@ class Capabilities:
         budget = int(self.cfg.max_read_chars)
         try:
             with target.open("rb") as handle:
-                if b"\x00" in handle.read(8192):
-                    raise RuntimeFault("binary_file", "Binary file read is not supported")
+                _refuse_binary(handle.read(8192), encoding, "read")
             out, used, n, end, more = [], 0, 0, start - 1, False
             # The lines skipped before start, in case it is past the end.
             skipped = deque(maxlen=tail or PAST_END_LINES)
