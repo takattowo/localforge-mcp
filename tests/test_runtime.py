@@ -3984,3 +3984,12 @@ def test_switch_off_messages(tmp_path):
                         "params": {"name": "filesystem", "arguments": {"action": "read", "path": "big.txt"}}})
     text = reply["result"]["content"][0]["text"]
     assert "result_too_large" in text and _words_in(text) == []
+
+
+def test_replace_text_miss_message_has_no_count_tip(tmp_path):
+    (tmp_path / "a.txt").write_text("one one\n")
+    for on in (True, False):
+        code, message = _fault(make(tmp_path, advanced_features=on), "filesystem",
+                               {"action": "replace_text", "path": "a.txt", "old_text": "zebra", "new_text": "two"})
+        assert code == "content_mismatch" and message.startswith("Expected 1 occurrence(s), found 0.")
+        assert "expected_occurrences" not in message and "replace all of them" not in message
