@@ -3627,6 +3627,37 @@ def test_multi_edit_refuses_line_numbers_after_the_line_count_changed(tmp_path):
     assert path.read_text() == "A\nc\nd\n)\n}\nb\n};\n"
 
 
+def test_edit_refuses_old_text_that_reads_as_text_and_as_numbered_lines(tmp_path):
+    server = make(tmp_path)
+    path = tmp_path / "n.txt"
+    # (file, the exact match's line, the numbered reading's line or None)
+    for body, exact_line, numbered_line in (("a\nb\n12\tb\n", 3, 2),  # inside line 3, and line 2 is "b"
+                                            ("2\tb\nb\n", 1, 2),      # starts line 1, and line 2 is "b"
+                                            ("x\ny\n12\tb\n", 3, None)):  # inside line 3 only
+        path.write_text(body)
+        with pytest.raises(RuntimeFault) as exc:
+            server.cap.filesystem("replace_text", "n.txt", old_text="2\tb", new_text="2\tB")
+        message = exc.value.message
+        assert exc.value.code == "content_mismatch" and "prefixes" in message, body
+        assert f"line {exact_line}" in message and (numbered_line is None or f"line {numbered_line}" in message), body
+        assert path.read_text() == body
+    # Numbered data (TSV) stays editable: the match starts a line and
+    # the numbered reading does not match.
+    path.write_text("1\tx\n2\ty\n")
+    out = server.cap.filesystem("replace_text", "n.txt", old_text="2\ty", new_text="2\tz")
+    assert "match" not in out and path.read_text() == "1\tx\n2\tz\n"
+
+
+def test_edit_by_line_numbers_refuses_new_text_partly_prefixed(tmp_path):
+    server = make(tmp_path)
+    path = tmp_path / "n.txt"
+    path.write_text("a\nb\nc\n")
+    with pytest.raises(RuntimeFault) as exc:
+        server.cap.filesystem("replace_text", "n.txt", old_text="2\tb\n3\tc", new_text="2\tB\nC")
+    assert exc.value.code == "invalid_arguments" and "prefix" in exc.value.message
+    assert path.read_text() == "a\nb\nc\n"
+
+
 def test_edit_refuses_empty_old_text(tmp_path):
     server = make(tmp_path)
     (tmp_path / "e.txt").write_text("")

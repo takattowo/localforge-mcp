@@ -451,7 +451,9 @@ def _find_spans(view, old, new, expected):
     with exactly expected matches, none overlapping; otherwise the next
     one is tried. Returns (spans, tier, tried); tier None is a mismatch,
     spans then being the exact matches. tried lists (tier, spans) for
-    each fallback tier that did not count.
+    each fallback tier that did not count. Tier "numbered_clash" refuses
+    the one exact match of an old that also reads as line-numbered lines
+    (see _numbered_clash); tried then holds that reading's spans.
     """
     exact = _occurrences(view, old)
     if expected is None:
@@ -459,6 +461,10 @@ def _find_spans(view, old, new, expected):
         # wrong would be repeated at every match, unseen.
         return exact, "exact" if exact else None, []
     if exact or "\r" in old or "\r" in new or not old.strip():
+        if len(exact) == expected == 1:
+            clash = _numbered_clash(view, old, exact[0])
+            if clash is not None:
+                return exact, "numbered_clash", [("line_numbers", clash)]
         return exact, "exact" if len(exact) == expected else None, []
     tried = []
     for tier, find in (("typography", lambda: _occurrences(_typography(view), _typography(old), step=1)),
@@ -479,6 +485,8 @@ NUMBERED_HINT = (" old_text lines start with line numbers (N<TAB>) that do not m
 NUMBERED_SHIFT_HINT = (" old_text lines start with line numbers (N<TAB>), but an earlier edit in this call"
                        " changed the line count, so they may point at other lines than the ones read;"
                        " put line-numbered edits first, or leave the prefixes out.")
+NUMBERED_CLASH_HINT = (" old_text also reads as lines copied with line-number prefixes (N<TAB>), so the edit"
+                       " is unclear: leave the prefixes out to edit those lines, or include more context.")
 
 
 def _split_numbered(text, consecutive=True):
@@ -522,11 +530,36 @@ def _numbered_span(view, old):
     return start, end
 
 
+def _numbered_clash(view, old, exact):
+    """For old that also reads as line-numbered lines, whose one exact
+    match starts inside a line or whose numbered lines match too: the
+    numbered reading's spans ([] or one). None when the match is clear."""
+    if _split_numbered(old) is None:
+        return None
+    numbered = _numbered_span(view, old)
+    if numbered is None and (exact[0] == 0 or view[exact[0] - 1] == "\n"):
+        return None
+    return [numbered] if numbered else []
+
+
+def _clash_miss(view, exact, numbered):
+    """(found, hint) for a _numbered_clash: where each reading starts."""
+    start = exact[0]
+    inside = start > 0 and view[start - 1] != "\n"
+    found = "1 exact" + (" inside a line" if inside else "")
+    hint = f" The exact match starts {'inside' if inside else 'at'} line {view.count(chr(10), 0, start) + 1}"
+    if numbered:
+        found += ", 1 by line numbers"
+        hint += f"; read by its line numbers, old_text is at line {view.count(chr(10), 0, numbered[0][0]) + 1}"
+    return found, hint + "." + NUMBERED_CLASH_HINT
+
+
 def _strip_numbers(new):
-    """new without 'N<TAB>' prefixes when every line has one."""
+    """new without 'N<TAB>' prefixes when every line has one, as given
+    when none has; None when only some lines have one."""
     numbered = _split_numbered(new, consecutive=False)
     if numbered is None:
-        return new
+        return None if any(_LINE_NUMBER.match(line) for line in new.split("\n")) else new
     _, lines, trailing = numbered
     return "\n".join(lines) + ("\n" if trailing else "")
 
@@ -1583,6 +1616,8 @@ class Capabilities:
             spans, tier, tried = _find_spans(view, old, new, expected)
             if tier == "line_numbers" and shifted:
                 raise mismatch(index, expected, 0, NUMBERED_SHIFT_HINT)
+            if tier == "numbered_clash":
+                raise mismatch(index, expected, *_clash_miss(view, spans[0], tried[0][1]))
             if tier is None:
                 found = len(spans)
                 if any(matches for _, matches in tried):
@@ -1593,7 +1628,12 @@ class Capabilities:
                     hint = NUMBERED_HINT + hint
                 raise mismatch(index, expected, found, hint)
             if tier == "line_numbers":
-                new = _strip_numbers(new)
+                stripped = _strip_numbers(new)
+                if stripped is None:
+                    raise RuntimeFault("invalid_arguments", ("" if len(edits) == 1 else f"edits[{index}]: ") +
+                                       "old_text matched by its line numbers, so new_text lines must all have "
+                                       "the N<TAB> line-number prefix or none")
+                new = stripped
             if exact is not None:
                 written = new.replace("\n", "\r\n") if eol == "\r\n" else new
                 exact = _replace_spans(exact, _source_spans(exact, spans), written)
