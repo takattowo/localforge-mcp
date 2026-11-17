@@ -57,7 +57,15 @@ def _remove_read_only(func, path, exc):
     if not read_only:
         raise exc
     os.chmod(path, stat.S_IWRITE)
-    func(path)
+    try:
+        func(path)
+    except OSError:
+        # Still there: leave it read-only, as it was.
+        try:
+            os.chmod(path, stat.S_IREAD)
+        except OSError:
+            pass
+        raise
 
 _RMTREE_HOOK = "onexc" if sys.version_info >= (3, 12) else "onerror"
 
@@ -159,7 +167,7 @@ def _spread_page(matches, maximum, total, exact=True):
             left -= min(left, len(active))
             active = [i for i in active if taken[i] < len(files[i])]
         page["results"] = [m for kept, n in zip(files, taken) for m in kept[:n]]
-        if len(files) > 1:
+        if len({m["path"] for m in page["results"]}) > 1:
             page["spread"] = True
     if page["truncated"]:
         page["total_matches" if exact else "total_matches_at_least"] = total
@@ -479,7 +487,7 @@ def _find_spans(view, old, new, expected):
     return [], None, tried
 
 
-_LINE_NUMBER = re.compile(r"(\d{1,9})\t")
+_LINE_NUMBER = re.compile(r"([0-9]{1,9})\t")
 NUMBERED_HINT = (" old_text lines start with line numbers (N<TAB>) that do not match the file there;"
                  " leave the line-number prefixes out.")
 NUMBERED_SHIFT_HINT = (" old_text lines start with line numbers (N<TAB>), but an earlier edit in this call"
@@ -1961,8 +1969,9 @@ class Capabilities:
         # One combined regex: one match per path instead of one per exclude.
         exclude_re = re.compile("|".join(f"(?:{r.pattern})" for r in excluded)) if excluded else None
         # Content: up to maximum per file, SEARCH_SPREAD_FACTOR times that
-        # in all (see _spread_page), every match counted. Files: one extra
-        # marks a cut page.
+        # in all (see _spread_page), every match counted until one would
+        # go past that bound (stopped: the total is then a lower bound).
+        # Files: one extra marks a cut page.
         limit = maximum + 1 if files_only else maximum * SEARCH_SPREAD_FACTOR
         counted, stopped = 0, False
         # root is a file for a single-file search: read only that file.
@@ -1988,6 +1997,8 @@ class Capabilities:
                 continue
             if files_only:
                 results.append({"path": str(item)})
+                if len(results) >= limit:
+                    break
             elif query is not None:
                 try:
                     with item.open("rb") as handle:
@@ -2014,6 +2025,10 @@ class Capabilities:
                             counted += 1
                             if kept >= maximum:
                                 continue
+                            # Stopped early only when a match is left out.
+                            if len(results) >= limit:
+                                stopped = True
+                                break
                             kept += 1
                             entry = {"path": str(item), "line": number, "text": _cap_line(line)}
                             if context > 0:
@@ -2022,9 +2037,8 @@ class Capabilities:
                             results.append(entry)
                 except OSError:
                     pass
-            if len(results) >= limit:
-                stopped = True
-                break
+                if stopped:
+                    break
         if not files_only:
             return {"engine": "python", **_spread_page(results, maximum, counted, not stopped),
                     "applied_excludes": excludes}

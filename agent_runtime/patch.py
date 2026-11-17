@@ -287,7 +287,7 @@ def build_new(original, filepatch, rel, eol=None, bom=False, moved=None):
     for hunk in filepatch.hunks:
         start = _place(lines, hunk, cursor, rel, view)
         if moved is not None and start != _stated(hunk):
-            moved.append({"stated": hunk.old_start, "placed": start + (hunk.old_len != 0)})
+            moved.append({"stated": hunk.old_start, "placed": start + any(op != "+" for op in hunk.ops)})
         for line in lines[cursor:start]:
             emit(line)
         cursor = start

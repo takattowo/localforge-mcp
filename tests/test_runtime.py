@@ -957,6 +957,23 @@ def test_delete_leaves_a_hard_linked_read_only_file_alone(tmp_path):
     finally:
         os.chmod(outside, stat.S_IWRITE)
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows read-only attribute and sharing")
+def test_delete_restores_read_only_when_the_retry_fails(tmp_path):
+    import stat
+    server = make(tmp_path)
+    path = tmp_path / "ro.txt"
+    path.write_text("x")
+    os.chmod(path, stat.S_IREAD)
+    try:
+        # Held open without delete sharing, so the retry fails too.
+        with open(path):
+            with pytest.raises(RuntimeFault) as exc:
+                server.cap.filesystem("delete", "ro.txt")
+            assert exc.value.code == "permission_denied"
+        assert path.exists() and not os.stat(path).st_mode & stat.S_IWRITE
+    finally:
+        os.chmod(path, stat.S_IWRITE)
+
 def test_bad_argument_types_are_reported_together(tmp_path):
     server = make(tmp_path)
     with pytest.raises(RuntimeFault) as exc:
@@ -2161,6 +2178,16 @@ def test_apply_patch_refuses_a_file_named_in_two_sections(tmp_path):
     assert (tmp_path / "f.txt").read_text() == "a\nb\nc\n"
 
 
+def test_apply_patch_reports_where_a_zero_length_hunk_with_context_landed(tmp_path):
+    server = make(tmp_path)
+    (tmp_path / "f.txt").write_text("1\n2\n3\n4\n5\n")
+    # "-1,0" claims an insert, but the body has a context line: line 4.
+    patch = "--- a/f.txt\n+++ b/f.txt\n@@ -1,0 +2,1 @@\n 4\n+X\n"
+    out = server.cap.filesystem("apply_patch", ".", patch=patch)["files"][0]
+    assert out["hunks"] == [{"stated": 1, "placed": 4}]
+    assert (tmp_path / "f.txt").read_text() == "1\n2\n3\n4\nX\n5\n"
+
+
 @pytest.mark.parametrize("engine", ["ripgrep", "python"])
 def test_search_folder_glob_and_exact_truncation(tmp_path, monkeypatch, engine):
     if engine == "ripgrep" and not shutil.which("rg"):
@@ -2213,6 +2240,22 @@ def test_search_spreads_capped_matches_across_files(tmp_path, monkeypatch, engin
     whole = server.cap.search("hit", max_results=900)
     assert whole["match_count"] == 900 and whole["truncated"] is False
     assert "spread" not in whole and "total_matches" not in whole
+    # A page that holds one file's matches is not spread.
+    one = server.cap.search("hit", max_results=1)
+    assert one["match_count"] == 1 and one["truncated"] is True and "spread" not in one
+
+
+def test_python_search_total_is_exact_unless_it_stopped_early(tmp_path, monkeypatch):
+    monkeypatch.setattr(shutil, "which", lambda name: None)
+    server = make(tmp_path)
+    # max_results 1 collects at most 5: five files fill it exactly.
+    for n in range(5):
+        (tmp_path / f"f{n}.txt").write_text("hit\n")
+    out = server.cap.search("hit", max_results=1)
+    assert out["engine"] == "python" and out["total_matches"] == 5 and "total_matches_at_least" not in out
+    (tmp_path / "f5.txt").write_text("hit\n")
+    out = server.cap.search("hit", max_results=1)
+    assert out["total_matches_at_least"] == 6 and "total_matches" not in out
 
 
 @pytest.mark.parametrize("engine", ["ripgrep", "python"])
@@ -3656,6 +3699,17 @@ def test_edit_by_line_numbers_refuses_new_text_partly_prefixed(tmp_path):
         server.cap.filesystem("replace_text", "n.txt", old_text="2\tb\n3\tc", new_text="2\tB\nC")
     assert exc.value.code == "invalid_arguments" and "prefix" in exc.value.message
     assert path.read_text() == "a\nb\nc\n"
+
+
+def test_line_number_prefixes_are_ascii_digits(tmp_path):
+    server = make(tmp_path)
+    path = tmp_path / "n.txt"
+    path.write_text("a\nb\n")
+    # U+0662 (Arabic-Indic two) is a \d digit, not a line number.
+    with pytest.raises(RuntimeFault) as exc:
+        server.cap.filesystem("replace_text", "n.txt", old_text="\u0662\tb", new_text="x")
+    assert exc.value.code == "content_mismatch" and "line-number" not in exc.value.message
+    assert path.read_text() == "a\nb\n"
 
 
 def test_edit_refuses_empty_old_text(tmp_path):
