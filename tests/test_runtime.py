@@ -3137,7 +3137,9 @@ def test_wide_byte_reads_page_by_whole_code_units(tmp_path):
     (tmp_path / "le.txt").write_bytes(codecs.BOM_UTF16_LE + text.encode("utf-16-le"))
     (tmp_path / "be.txt").write_bytes(codecs.BOM_UTF16_BE + text.encode("utf-16-be"))
     (tmp_path / "u32.txt").write_bytes(codecs.BOM_UTF32_LE + text.encode("utf-32-le"))
-    for name, encoding, size in (("le.txt", "utf-16", 5), ("be.txt", "utf-16", 5), ("u32.txt", "utf-32", 7)):
+    (tmp_path / "u32be.txt").write_bytes(codecs.BOM_UTF32_BE + text.encode("utf-32-be"))
+    for name, encoding, size in (("le.txt", "utf-16", 5), ("be.txt", "utf-16", 5), ("u32.txt", "utf-32", 7),
+                                 ("u32be.txt", "utf-32", 7)):
         parts, offset = [], 0
         while True:
             page = server.cap.filesystem("read", name, encoding=encoding, offset=offset, max_bytes=size)
@@ -3160,13 +3162,25 @@ def test_wide_file_with_another_encoding_names_the_codec(tmp_path):
         server.cap.filesystem("read", "u16.txt", line_start=1)
     with pytest.raises(RuntimeFault, match="pass encoding utf-16"):
         server.cap.filesystem("apply_patch", patch="--- a/u16.txt\n+++ b/u16.txt\n@@ -1,1 +1,1 @@\n-a\n+b\n")
-    with pytest.raises(RuntimeFault, match="pass encoding utf-16"):
-        server.cap.filesystem("replace_text", "u16.txt", old_text="a", new_text="b")
-    with pytest.raises(RuntimeFault, match="pass encoding utf-16"):
-        server.cap.filesystem("multi_edit", "u16.txt", edits=[{"old_text": "a", "new_text": "b"}])
-    with pytest.raises(RuntimeFault, match="Unknown encoding") as fault:
-        server.cap.filesystem("read", "u16.txt", encoding="bogus")
-    assert fault.value.code == "invalid_arguments"
+    for action, args in (("replace_text", {"old_text": "a", "new_text": "b"}),
+                         ("multi_edit", {"edits": [{"old_text": "a", "new_text": "b"}]})):
+        with pytest.raises(RuntimeFault, match="pass encoding utf-16") as fault:
+            server.cap.filesystem(action, "u16.txt", **args)
+        assert fault.value.code == "binary_file"
+    created = "--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1,1 @@\n+a\n"
+    for call in (lambda: server.cap.filesystem("read", "u16.txt", encoding="bogus"),
+                 lambda: server.cap.filesystem("write", "new.txt", "a\n", encoding="bogus"),
+                 lambda: server.cap.filesystem("replace_text", "u16.txt", old_text="a", new_text="b", encoding="bogus"),
+                 lambda: server.cap.filesystem("apply_patch", patch=created, encoding="bogus")):
+        with pytest.raises(RuntimeFault, match="Unknown encoding") as fault:
+            call()
+        assert fault.value.code == "invalid_arguments"
+    assert not (tmp_path / "new.txt").exists()
+    # Already the codec the mark names: the file itself is bad, no hint.
+    (tmp_path / "bad.txt").write_bytes(codecs.BOM_UTF16_LE + b"\x00\xd8" + "a".encode("utf-16-le"))
+    with pytest.raises(RuntimeFault, match="not valid utf-16") as fault:
+        server.cap.filesystem("replace_text", "bad.txt", old_text="a", new_text="b", encoding="utf-16")
+    assert "pass encoding" not in str(fault.value)
 
 
 def test_wide_edits_keep_the_byte_order_mark(tmp_path):
@@ -3177,6 +3191,8 @@ def test_wide_edits_keep_the_byte_order_mark(tmp_path):
         "bare.txt": (b"", "utf-16-le", "utf-16"),
         "le.txt": (codecs.BOM_UTF16_LE, "utf-16-le", "utf-16-le"),
         "u32.txt": (codecs.BOM_UTF32_LE, "utf-32-le", "utf-32"),
+        "be16.txt": (codecs.BOM_UTF16_BE, "utf-16-be", "utf-16-be"),
+        "u32be.txt": (codecs.BOM_UTF32_BE, "utf-32-be", "utf-32"),
     }
     for name, (mark, codec, encoding) in files.items():
         path = tmp_path / name
@@ -3189,6 +3205,23 @@ def test_wide_edits_keep_the_byte_order_mark(tmp_path):
         assert path.read_bytes() == mark + "1\n2\n".encode(codec), name
         server.cap.filesystem("write", name, "x\ny\n", encoding=encoding)
         assert path.read_bytes() == mark + "x\ny\n".encode(codec), name
+
+
+def test_wide_write_converts_with_one_mark(tmp_path):
+    server = make(tmp_path)
+    mark = codecs.BOM_UTF16_LE
+    (tmp_path / "utf8.txt").write_bytes(b"abc\n")
+    (tmp_path / "utf8bom.txt").write_bytes(codecs.BOM_UTF8 + b"abc\n")
+    (tmp_path / "empty.txt").write_bytes(b"")
+    for name in ("utf8.txt", "utf8bom.txt", "empty.txt", "new.txt"):
+        server.cap.filesystem("write", name, "hi\n", encoding="utf-16")
+        assert (tmp_path / name).read_bytes() == mark + "hi\n".encode("utf-16-le"), name
+    # Content that starts with its own mark still gets only one.
+    server.cap.filesystem("write", "own.txt", "\ufeffhi\n", encoding="utf-16")
+    assert (tmp_path / "own.txt").read_bytes() == mark + "hi\n".encode("utf-16-le")
+    created = "--- /dev/null\n+++ b/made.txt\n@@ -0,0 +1,1 @@\n+\ufeffhi\n"
+    server.cap.filesystem("apply_patch", patch=created, encoding="utf-16")
+    assert (tmp_path / "made.txt").read_bytes() == mark + "hi\n".encode("utf-16-le")
 
 
 def test_project_instructions_cut_keeps_bad_bytes_visible(tmp_path):

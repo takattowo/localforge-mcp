@@ -111,9 +111,13 @@ def _file_codec(encoding: str, head):
     the mark as a character for _split_bom, so a read past it decodes
     right and an edit writes it back as it was, instead of a fresh
     little-endian one. head is the file's first bytes, None for a new
-    file, which keeps the plain codec (it writes a mark)."""
+    file. A new, empty, or not yet wide file (no wide mark, no NUL, as
+    ASCII-range UTF-16/32 always has one) keeps the plain codec, so
+    converting it writes a mark."""
     name = _codec_name(encoding)
-    if head is None or name not in ("utf-16", "utf-32"):
+    if not head or name not in ("utf-16", "utf-32"):
+        return encoding
+    if not any(head.startswith(mark) for mark, _ in _WIDE_BOMS) and b"\x00" not in head:
         return encoding
     big = codecs.BOM_UTF32_BE if name == "utf-32" else codecs.BOM_UTF16_BE
     return f"{name}-be" if head.startswith(big) else f"{name}-le"
@@ -1195,7 +1199,11 @@ class Capabilities:
                     try:
                         with target.open("rb") as handle:
                             codec = _file_codec(encoding, handle.read(4))
-                        with target.open("r", encoding=codec, errors="replace", newline="") as handle:
+                        # Converting a file to plain utf-16/32: read the old
+                        # text as UTF-8, the default, for its line endings and
+                        # diff, as that codec's stream decoder needs a mark.
+                        reading = "utf-8" if _codec_name(codec) in ("utf-16", "utf-32") else codec
+                        with target.open("r", encoding=reading, errors="replace", newline="") as handle:
                             existed = True
                             head, bom = _split_bom(handle.read(65536))
                             eol = _detect_eol(head)
@@ -1339,7 +1347,7 @@ class Capabilities:
                     if creating:
                         if dest.exists():
                             raise RuntimeFault("invalid_arguments", f"Patch creates existing file: {dest}")
-                        original, eol, bom, codec = "", None, False, encoding
+                        original, eol, bom, codec = "", None, False, _file_codec(encoding, None)
                     else:
                         if not dest.exists():
                             raise RuntimeFault("path_not_found", f"Path not found: {dest}")
@@ -1662,10 +1670,14 @@ class Capabilities:
         codec = _file_codec(encoding, raw[:4])
         try:
             text, bom = _split_bom(raw.decode(codec))
-        except UnicodeDecodeError:
+        except UnicodeDecodeError as e:
             hint = _wide_hint(raw[:4])
             if not hint:
                 raise
+            if hint.endswith(_codec_name(encoding)[:6]):
+                # Already the codec the mark names: the file itself is bad.
+                raise RuntimeFault("binary_file", f"File is not valid {encoding}, so it cannot be edited: "
+                                                  f"{e.reason} at byte {e.start}") from None
             raise RuntimeFault("binary_file", f"Binary file edit is not supported{hint}") from None
         return text, _detect_eol(text), bom, codec
 
@@ -1758,6 +1770,10 @@ class Capabilities:
                 data = data.replace("\n", "\r\n")
         if bom:
             data = BOM + data
+        name = _codec_name(encoding)
+        if name in ("utf-16", "utf-32") and data.startswith(BOM):
+            # The plain codec adds a mark of its own; -le writes this one only.
+            encoding = f"{name}-le"
         raw = data.encode(encoding)
         fd, temp = tempfile.mkstemp(prefix=".localforge-", dir=target.parent)
         os.close(fd)
