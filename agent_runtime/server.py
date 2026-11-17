@@ -37,7 +37,7 @@ INSTRUCTIONS = (
     "Long runs (builds, tests): process start + read with wait_ms, not a long execute timeout. "
     "Stage explicit files only; git add -A/./--all is blocked."
 )
-BASIC_INSTRUCTIONS = (
+SWITCH_OFF_INSTRUCTIONS = (
     "LocalForge rules: "
     "Edit files only with filesystem write/replace_text/apply_patch, "
     "never via execute, process, or any script. "
@@ -364,9 +364,9 @@ SHELL_NOTES = {
 }
 
 # Tools, actions and arguments that only exist with advanced_features.
-ADVANCED_TOOLS = ("multi_search", "batch")
-ADVANCED_ACTIONS = {"filesystem": ("multi_edit",), "process": ("wait",)}
-ADVANCED_ARGS = {"filesystem": ("edits", "replace_all"), "process": ("pattern", "tail_lines"),
+SWITCHED_TOOLS = ("multi_search", "batch")
+SWITCHED_ACTIONS = {"filesystem": ("multi_edit",), "process": ("wait",)}
+SWITCHED_ARGS = {"filesystem": ("edits", "replace_all"), "process": ("pattern", "tail_lines"),
                  "git": ("include_untracked",)}
 
 def _cut(text, *pairs):
@@ -377,13 +377,13 @@ def _cut(text, *pairs):
         text = text.replace(old, new)
     return text
 
-def _basic_surface():
-    """Schemas and descriptions without the advanced tools, actions and arguments."""
-    schemas = {name: copy.deepcopy(schema) for name, schema in SCHEMAS.items() if name not in ADVANCED_TOOLS}
-    for name, keys in ADVANCED_ARGS.items():
+def _switch_off_surface():
+    """Schemas and descriptions: the tool surface when advanced_features is off."""
+    schemas = {name: copy.deepcopy(schema) for name, schema in SCHEMAS.items() if name not in SWITCHED_TOOLS}
+    for name, keys in SWITCHED_ARGS.items():
         for key in keys:
             del schemas[name]["properties"][key]
-    for name, actions in ADVANCED_ACTIONS.items():
+    for name, actions in SWITCHED_ACTIONS.items():
         action = schemas[name]["properties"]["action"]
         action["enum"] = [item for item in action["enum"] if item not in actions]
     fs, process = schemas["filesystem"]["properties"], schemas["process"]["properties"]
@@ -395,7 +395,7 @@ def _basic_surface():
                                          "the others except list need process_id.")
     process["after"]["description"] = "Log cursor from previous next_after for incremental reads (default 0: all kept output)."
     process["wait_ms"]["description"] = "Milliseconds read blocks for new output, max 60000, default 0."
-    descriptions = {name: text for name, text in DESCRIPTIONS.items() if name not in ADVANCED_TOOLS}
+    descriptions = {name: text for name, text in DESCRIPTIONS.items() if name not in SWITCHED_TOOLS}
     descriptions["filesystem"] = _cut(descriptions["filesystem"],
                                       ("multi_edit for several exact replacements per file (all-or-nothing), ", ""),
                                       ("replace_text, multi_edit, and apply_patch.", "replace_text, and apply_patch."))
@@ -407,15 +407,15 @@ def _basic_surface():
         "so a build or test run needs no read polling.", ""))
     return schemas, descriptions
 
-BASIC_SCHEMAS, BASIC_DESCRIPTIONS = _basic_surface()
+SWITCH_OFF_SCHEMAS, SWITCH_OFF_DESCRIPTIONS = _switch_off_surface()
 
 class Server:
     def __init__(self, cfg):
         self.cfg = cfg
         advanced = cfg.advanced_features
-        self.schemas = SCHEMAS if advanced else BASIC_SCHEMAS
-        self.descriptions = DESCRIPTIONS if advanced else BASIC_DESCRIPTIONS
-        self.instructions = INSTRUCTIONS if advanced else BASIC_INSTRUCTIONS
+        self.schemas = SCHEMAS if advanced else SWITCH_OFF_SCHEMAS
+        self.descriptions = DESCRIPTIONS if advanced else SWITCH_OFF_DESCRIPTIONS
+        self.instructions = INSTRUCTIONS if advanced else SWITCH_OFF_INSTRUCTIONS
         self.paths = PathPolicy(cfg)
         self.policy = Policy(cfg, self.paths)
         self.processes = ProcessManager(cfg, self.paths, self.policy)
@@ -495,7 +495,7 @@ class Server:
         keys = self.ARG_KEYS[name]
         if self.cfg.advanced_features:
             return keys
-        return tuple(key for key in keys if key not in ADVANCED_ARGS.get(name, ()))
+        return tuple(key for key in keys if key not in SWITCHED_ARGS.get(name, ()))
 
     def _unknown_argument(self, name, unknown):
         valid = self._arg_keys(name)
@@ -511,7 +511,7 @@ class Server:
             raise exc
         return self._unknown_argument(name, match.group(1))
 
-    def _refuse_advanced_args(self, name, args):
+    def _refuse_switched_args(self, name, args):
         # Python names the first argument a function does not take; these
         # are taken by the capability, so name them the same way here.
         if self.cfg.advanced_features or name not in ("filesystem", "git"):
@@ -519,7 +519,7 @@ class Server:
         valid = self._arg_keys(name)
         for key in args:
             if key not in valid:
-                if key in ADVANCED_ARGS[name]:
+                if key in SWITCHED_ARGS[name]:
                     raise self._unknown_argument(name, key)
                 return
 
@@ -560,7 +560,7 @@ class Server:
         args = _coerce_fields(properties, args, "", errors)
         if errors:
             raise RuntimeFault("invalid_arguments", "Invalid argument value(s): " + "; ".join(errors) + ".")
-        self._refuse_advanced_args(name, args)
+        self._refuse_switched_args(name, args)
         if name == "workspace": return self.cap.workspace(**args)
         if name == "filesystem": return self.cap.filesystem(**args)
         if name == "search": return self.cap.search(**args)

@@ -3839,11 +3839,11 @@ def test_edit_miss_hint_skips_very_common_lines(tmp_path):
     assert "151\tdef target():" in exc.value.message
 
 
-ADVANCED_WORDS = ("batch", "multi_search", "multi_edit", "edits", "sequential", "wait", "tail_lines",
+SWITCHED_WORDS = ("batch", "multi_search", "multi_edit", "edits", "sequential", "wait", "tail_lines",
                   "replace_all", "include_untracked", "untracked_skipped", "advanced_features")
 
 
-def _words_in(text, words=ADVANCED_WORDS):
+def _words_in(text, words=SWITCHED_WORDS):
     return [word for word in words if re.search(rf"\b{word}\b", text)]
 
 
@@ -3867,7 +3867,7 @@ def test_advanced_features_default_off_and_loaded_from_config(tmp_path):
     assert "bogus_key" in str(exc.value) and "advanced" not in str(exc.value)
 
 
-def test_basic_tool_list_has_only_the_basic_surface(tmp_path):
+def test_switch_off_tools_list(tmp_path):
     server = make(tmp_path, advanced_features=False)
     init = server.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})["result"]
     tools = server.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})["result"]["tools"]
@@ -3891,7 +3891,7 @@ def test_basic_tool_list_has_only_the_basic_surface(tmp_path):
     assert props["filesystem"]["action"]["enum"] == [action for action in full["filesystem"]["inputSchema"]["properties"]["action"]["enum"] if action != "multi_edit"]
 
 
-def test_basic_server_treats_advanced_calls_as_unknown(tmp_path):
+def test_switch_off_calls_match_unknown_names(tmp_path):
     server = make(tmp_path, advanced_features=False)
     (tmp_path / "a.txt").write_text("one one\n")
 
@@ -3923,7 +3923,7 @@ def test_basic_server_treats_advanced_calls_as_unknown(tmp_path):
     assert (tmp_path / "a.txt").read_text() == "one one\n"
 
 
-def test_basic_messages_do_not_name_advanced_features(tmp_path):
+def test_switch_off_messages(tmp_path):
     server = make(tmp_path, advanced_features=False)
     (tmp_path / "a.txt").write_text("one one\n")
     code, message = _fault(server, "filesystem", {"action": "replace_text", "path": "a.txt", "old_text": "one", "new_text": "two"})
@@ -3931,7 +3931,7 @@ def test_basic_messages_do_not_name_advanced_features(tmp_path):
     code, message = _fault(server, "filesystem", {"action": "read", "path": "a.txt", "bogus": 1})
     assert message.startswith("Unknown argument 'bogus'.") and _words_in(message) == []
     code, message = _fault(server, "process", {"action": "read", "process_id": "p1", "tail": 1})
-    assert message.startswith("Unknown argument 'tail'.") and _words_in(message, ADVANCED_WORDS + ("pattern",)) == []
+    assert message.startswith("Unknown argument 'tail'.") and _words_in(message, SWITCHED_WORDS + ("pattern",)) == []
     _, message = _fault(server, "git", {"action": "diff", "untracked": True})
     assert _words_in(message) == []
     full = make(tmp_path)
