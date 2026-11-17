@@ -1236,8 +1236,9 @@ class Capabilities:
                                              "Edits apply in order, so earlier edits may have changed the text."
                                              if want is None else
                                              f"edits[{index}]: expected {want} occurrence(s), found {found}. Edits "
-                                             "apply in order, so earlier edits may have changed the text; pass "
-                                             "expected_occurrences (or replace_all) when it repeats.") + hint))
+                                             "apply in order, so earlier edits may have changed the text"
+                                             + ("; pass expected_occurrences (or replace_all) when it repeats."
+                                                if found else ".")) + hint))
                 try:
                     written = self._atomic_write(target, content, encoding, write_eol, bom)
                 except OSError as e:

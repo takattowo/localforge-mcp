@@ -3996,6 +3996,18 @@ def test_replace_text_miss_message_has_no_count_tip(tmp_path):
         assert "expected_occurrences" not in message and "replace all of them" not in message
 
 
+def test_multi_edit_miss_message_has_no_count_tip(tmp_path):
+    server = make(tmp_path)
+    (tmp_path / "a.txt").write_text("one one\n")
+    code, message = _fault(server, "filesystem", {"action": "multi_edit", "path": "a.txt",
+                                                  "edits": [{"old_text": "zebra", "new_text": "two"}]})
+    assert code == "content_mismatch" and message.startswith("edits[0]: expected 1 occurrence(s), found 0.")
+    assert "expected_occurrences" not in message and "replace_all" not in message
+    _, message = _fault(server, "filesystem", {"action": "multi_edit", "path": "a.txt",
+                                               "edits": [{"old_text": "one", "new_text": "two"}]})
+    assert "pass expected_occurrences (or replace_all) when it repeats." in message
+
+
 def test_missing_program_is_a_clear_fault(tmp_path):
     server = make(tmp_path)
     name = "lf-no-such-program-4821"
