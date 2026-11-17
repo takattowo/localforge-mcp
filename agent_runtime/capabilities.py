@@ -490,9 +490,9 @@ def _find_spans(view, old, new, expected):
 _LINE_NUMBER = re.compile(r"([0-9]{1,9})\t")
 NUMBERED_HINT = (" old_text lines start with line numbers (N<TAB>) that do not match the file there;"
                  " leave the line-number prefixes out.")
-NUMBERED_SHIFT_HINT = (" old_text lines start with line numbers (N<TAB>), but an earlier edit in this call"
-                       " changed the line count, so they may point at other lines than the ones read;"
-                       " put line-numbered edits first, or leave the prefixes out.")
+NUMBERED_SHIFT_HINT = ("old_text lines start with line numbers (N<TAB>), but an earlier edit in this call"
+                       " changed the line count from line {line} on, so they may point at other lines than"
+                       " the ones read; put line-numbered edits first, ordered bottom to top, or drop the prefixes.")
 NUMBERED_CLASH_HINT = (" old_text also reads as lines copied with line-number prefixes (N<TAB>), so the edit"
                        " is unclear: leave the prefixes out to edit those lines, or include more context.")
 
@@ -1618,13 +1618,16 @@ class Capabilities:
         view, exact = _lf(original), original
         counts, tiers = [], []
         # Line numbers in old_text come from a read taken before the
-        # call: once an edit changes the line count, an old_text that
-        # reads as numbered lines is refused, whatever it would match
-        # (checking it against the edited text could pick another line).
-        shifted = False
+        # call. An edit that changes the line count shifts the lines
+        # from where it starts on; lines above it stay as read. So an
+        # old_text that reads as numbered lines reaching the first
+        # shifted line is refused, whatever it would match (checking it
+        # against the edited text could pick another line).
+        shifted = None
         for index, (old, new, expected) in enumerate(edits):
-            if shifted and expected == 1 and _split_numbered(old) is not None:
-                raise mismatch(index, expected, 0, NUMBERED_SHIFT_HINT)
+            numbered = _split_numbered(old) if shifted is not None and expected == 1 else None
+            if numbered is not None and numbered[0] + len(numbered[1]) - 1 >= shifted:
+                raise RuntimeFault("content_mismatch", f"edits[{index}]: " + NUMBERED_SHIFT_HINT.format(line=shifted))
             spans, tier, tried = _find_spans(view, old, new, expected)
             if tier == "numbered_clash":
                 raise mismatch(index, expected, *_clash_miss(view, spans[0], tried[0][1]))
@@ -1647,9 +1650,11 @@ class Capabilities:
             if exact is not None:
                 written = new.replace("\n", "\r\n") if eol == "\r\n" else new
                 exact = _replace_spans(exact, _source_spans(exact, spans), written)
-            lines = view.count("\n")
+            before = view
             view = _replace_spans(view, spans, new)
-            shifted = shifted or view.count("\n") != lines
+            if view.count("\n") != before.count("\n"):
+                line = before.count("\n", 0, spans[0][0]) + 1
+                shifted = line if shifted is None else min(shifted, line)
             if exact is not None and _lf(exact) != view:
                 exact = None
             counts.append(len(spans))

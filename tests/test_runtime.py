@@ -3688,6 +3688,35 @@ def test_multi_edit_refuses_numbered_looking_old_text_after_a_line_shift(tmp_pat
     assert path.read_text() == "z\nfoo\n2\tfoo\n"
 
 
+def test_multi_edit_allows_line_numbers_above_an_earlier_line_shift(tmp_path):
+    server = make(tmp_path)
+    path = tmp_path / "n.txt"
+    # A change below the numbered lines leaves them where they were read.
+    path.write_text("a\nb\nc\nd\n")
+    out = server.cap.filesystem("multi_edit", "n.txt", edits=[
+        {"old_text": "d", "new_text": "d\ne"}, {"old_text": "2\tb", "new_text": "2\tB"}])
+    assert [entry.get("match") for entry in out["edits"]] == [None, "line_numbers"]
+    assert path.read_text() == "a\nB\nc\nd\ne\n"
+    # Numbered edits ordered bottom to top apply, even when one changes
+    # the line count.
+    path.write_text("a\nb\nc\nd\n")
+    out = server.cap.filesystem("multi_edit", "n.txt", edits=[
+        {"old_text": "4\td", "new_text": "d\ne"}, {"old_text": "2\tb", "new_text": "2\tB"}])
+    assert [entry.get("match") for entry in out["edits"]] == ["line_numbers", "line_numbers"]
+    assert path.read_text() == "a\nB\nc\nd\ne\n"
+    # A change above or at the numbered lines is refused, with a hint
+    # that can be followed and no expected_occurrences advice.
+    path.write_text("a\nb\nc\nd\n")
+    for first in ({"old_text": "a", "new_text": "a\nx"}, {"old_text": "2\tb", "new_text": "b\nx"},
+                  {"old_text": "c", "new_text": "c\nx"}):
+        with pytest.raises(RuntimeFault) as exc:
+            server.cap.filesystem("multi_edit", "n.txt", edits=[first, {"old_text": "3\tc", "new_text": "3\tC"}])
+        message = exc.value.message
+        assert exc.value.code == "content_mismatch" and message.startswith("edits[1]: "), first
+        assert "bottom to top" in message and "expected_occurrences" not in message, first
+    assert path.read_text() == "a\nb\nc\nd\n"
+
+
 def test_edit_refuses_old_text_that_reads_as_text_and_as_numbered_lines(tmp_path):
     server = make(tmp_path)
     path = tmp_path / "n.txt"
