@@ -1182,7 +1182,8 @@ class Capabilities:
                     lambda index, want, found, hint: RuntimeFault(
                         "content_mismatch", ("replace_all found no exact occurrence of old_text." if want is None else
                                              f"Expected {want} occurrence(s), found {found}. Pass expected_occurrences "
-                                             "(or replace_all: true) to replace all of them at once.") + hint))
+                                             + ("(or replace_all: true) " if self.cfg.advanced_features else "")
+                                             + "to replace all of them at once.") + hint))
                 try:
                     written = self._atomic_write(target, updated, encoding, write_eol, bom)
                 except OSError as e:
@@ -1194,7 +1195,7 @@ class Capabilities:
             self._add_diff(result, original, updated)
             self._add_check(result, target)
             return result
-        if action == "multi_edit":
+        if action == "multi_edit" and self.cfg.advanced_features:
             if not isinstance(edits, list) or not edits:
                 raise RuntimeFault("invalid_arguments",
                                    "multi_edit requires a non-empty edits array, "

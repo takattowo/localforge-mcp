@@ -1,5 +1,6 @@
 from __future__ import annotations
 import atexit
+import copy
 import difflib
 import json
 import os
@@ -32,6 +33,13 @@ INSTRUCTIONS = (
     "Put independent reads/searches in ONE batch call (max 16, match results by index/label); "
     "fan out searches with multi_search. "
     "Edit files only with filesystem write/replace_text/multi_edit/apply_patch, "
+    "never via execute, process, or any script. "
+    "Long runs (builds, tests): process start + read with wait_ms, not a long execute timeout. "
+    "Stage explicit files only; git add -A/./--all is blocked."
+)
+BASIC_INSTRUCTIONS = (
+    "LocalForge rules: "
+    "Edit files only with filesystem write/replace_text/apply_patch, "
     "never via execute, process, or any script. "
     "Long runs (builds, tests): process start + read with wait_ms, not a long execute timeout. "
     "Stage explicit files only; git add -A/./--all is blocked."
@@ -355,9 +363,59 @@ SHELL_NOTES = {
     "sh": "String commands run in /bin/sh. ",
 }
 
+# Tools, actions and arguments that only exist with advanced_features.
+ADVANCED_TOOLS = ("multi_search", "batch")
+ADVANCED_ACTIONS = {"filesystem": ("multi_edit",), "process": ("wait",)}
+ADVANCED_ARGS = {"filesystem": ("edits", "replace_all"), "process": ("pattern", "tail_lines"),
+                 "git": ("include_untracked",)}
+
+def _cut(text, *pairs):
+    """text with each (old, new) pair replaced; every old must be in it."""
+    for old, new in pairs:
+        if old not in text:
+            raise ValueError(f"not in text: {old!r}")
+        text = text.replace(old, new)
+    return text
+
+def _basic_surface():
+    """Schemas and descriptions without the advanced tools, actions and arguments."""
+    schemas = {name: copy.deepcopy(schema) for name, schema in SCHEMAS.items() if name not in ADVANCED_TOOLS}
+    for name, keys in ADVANCED_ARGS.items():
+        for key in keys:
+            del schemas[name]["properties"][key]
+    for name, actions in ADVANCED_ACTIONS.items():
+        action = schemas[name]["properties"]["action"]
+        action["enum"] = [item for item in action["enum"] if item not in actions]
+    fs, process = schemas["filesystem"]["properties"], schemas["process"]["properties"]
+    fs["action"]["description"] = _cut(fs["action"]["description"], (
+        " multi_edit applies several exact replacements to one file, validated end-to-end and written once.", ""))
+    timeout = schemas["execute"]["properties"]["timeout"]
+    timeout["description"] = _cut(timeout["description"], ("Seconds to wait, not", "Seconds, not"))
+    process["action"]["description"] = ("start, read, write, status, list, restart, or stop. start needs command; "
+                                         "the others except list need process_id.")
+    process["after"]["description"] = "Log cursor from previous next_after for incremental reads (default 0: all kept output)."
+    process["wait_ms"]["description"] = "Milliseconds read blocks for new output, max 60000, default 0."
+    descriptions = {name: text for name, text in DESCRIPTIONS.items() if name not in ADVANCED_TOOLS}
+    descriptions["filesystem"] = _cut(descriptions["filesystem"],
+                                      ("multi_edit for several exact replacements per file (all-or-nothing), ", ""),
+                                      ("replace_text, multi_edit, and apply_patch.", "replace_text, and apply_patch."))
+    descriptions["search"] = _cut(descriptions["search"], (
+        " Several searches: use multi_search (or batch) in one call, not one search per turn.", ""))
+    descriptions["execute"] = _cut(descriptions["execute"], ("Run a command and wait for it,", "Run a command until it ends,"))
+    descriptions["process"] = _cut(descriptions["process"], (
+        " wait blocks until a process exits or prints a line matching pattern (up to 60 s per call), "
+        "so a build or test run needs no read polling.", ""))
+    return schemas, descriptions
+
+BASIC_SCHEMAS, BASIC_DESCRIPTIONS = _basic_surface()
+
 class Server:
     def __init__(self, cfg):
         self.cfg = cfg
+        advanced = cfg.advanced_features
+        self.schemas = SCHEMAS if advanced else BASIC_SCHEMAS
+        self.descriptions = DESCRIPTIONS if advanced else BASIC_DESCRIPTIONS
+        self.instructions = INSTRUCTIONS if advanced else BASIC_INSTRUCTIONS
         self.paths = PathPolicy(cfg)
         self.policy = Policy(cfg, self.paths)
         self.processes = ProcessManager(cfg, self.paths, self.policy)
@@ -381,8 +439,8 @@ class Server:
 
     def tools(self):
         shell_note = SHELL_NOTES.get(str(self.cfg.default_shell).lower(), "")
-        return [{"name": name, "description": DESCRIPTIONS[name].replace("{shell_note}", shell_note),
-                 "inputSchema": SCHEMAS[name]} for name in DESCRIPTIONS]
+        return [{"name": name, "description": text.replace("{shell_note}", shell_note),
+                 "inputSchema": self.schemas[name]} for name, text in self.descriptions.items()]
 
     ARG_KEYS = {
         "workspace": ("action", "path", "dir"),
@@ -433,18 +491,37 @@ class Server:
                 renamed[canonical] = renamed.pop(alias)
         return renamed
 
-    @classmethod
-    def _unknown_arg_fault(cls, name, exc):
-        match = re.search(r"unexpected keyword argument '([^']+)'", str(exc))
-        if not match or name not in cls.ARG_KEYS:
-            raise exc
-        unknown = match.group(1)
-        valid = cls.ARG_KEYS[name]
+    def _arg_keys(self, name):
+        keys = self.ARG_KEYS[name]
+        if self.cfg.advanced_features:
+            return keys
+        return tuple(key for key in keys if key not in ADVANCED_ARGS.get(name, ()))
+
+    def _unknown_argument(self, name, unknown):
+        valid = self._arg_keys(name)
         hints = difflib.get_close_matches(unknown, valid, n=2, cutoff=0.6)
         message = f"Unknown argument '{unknown}'. Valid arguments: {', '.join(valid)}."
         if hints:
             message += f" Did you mean '{hints[0]}'?"
         return RuntimeFault("invalid_arguments", message)
+
+    def _unknown_arg_fault(self, name, exc):
+        match = re.search(r"unexpected keyword argument '([^']+)'", str(exc))
+        if not match or name not in self.ARG_KEYS:
+            raise exc
+        return self._unknown_argument(name, match.group(1))
+
+    def _refuse_advanced_args(self, name, args):
+        # Python names the first argument a function does not take; these
+        # are taken by the capability, so name them the same way here.
+        if self.cfg.advanced_features or name not in ("filesystem", "git"):
+            return
+        valid = self._arg_keys(name)
+        for key in args:
+            if key not in valid:
+                if key in ADVANCED_ARGS[name]:
+                    raise self._unknown_argument(name, key)
+                return
 
     def call(self, name, arguments):
         start = time.monotonic()
@@ -466,16 +543,16 @@ class Server:
                 self._log_to_client("info", f"tool={name} ms={elapsed} {fault}")
 
     def _dispatch(self, name, arguments):
-        if name not in SCHEMAS:
+        if name not in self.schemas:
             raise RuntimeFault("tool_not_found", f"Unknown tool: {name}")
         if not isinstance(arguments, dict):
             raise RuntimeFault("invalid_arguments", "Tool arguments must be an object")
         args = self._apply_aliases(name, arguments)
-        missing = [key for key in SCHEMAS[name].get("required", []) if key not in args]
+        missing = [key for key in self.schemas[name].get("required", []) if key not in args]
         if missing:
             raise RuntimeFault("invalid_arguments", f"Missing required argument(s): {', '.join(missing)}")
         errors = []
-        properties = SCHEMAS[name]["properties"]
+        properties = self.schemas[name]["properties"]
         if name == "multi_search":
             # Entries are fixed one by one below, so a bad one fails only itself.
             properties = {**properties, "searches": {key: item for key, item in properties["searches"].items()
@@ -483,6 +560,7 @@ class Server:
         args = _coerce_fields(properties, args, "", errors)
         if errors:
             raise RuntimeFault("invalid_arguments", "Invalid argument value(s): " + "; ".join(errors) + ".")
+        self._refuse_advanced_args(name, args)
         if name == "workspace": return self.cap.workspace(**args)
         if name == "filesystem": return self.cap.filesystem(**args)
         if name == "search": return self.cap.search(**args)
@@ -510,6 +588,8 @@ class Server:
             "start": ["command"], "read": ["process_id"], "wait": ["process_id"], "write": ["process_id", "text"],
             "status": ["process_id"], "restart": ["process_id"], "stop": ["process_id"], "list": [],
         }
+        if not self.cfg.advanced_features:
+            del required_by_action["wait"]
         if action not in required_by_action:
             raise RuntimeFault("invalid_action", f"Unknown process action: {action}")
         missing = [key for key in required_by_action[action] if key not in args]
@@ -669,7 +749,8 @@ class Server:
                                   json.dumps(value, ensure_ascii=False, indent=1), ".json")
         except OSError:
             path = None
-        narrow = "narrow the call (max_results, line ranges, fewer batch entries)."
+        narrow = ("narrow the call (max_results, line ranges, fewer batch entries)." if self.cfg.advanced_features
+                  else "narrow the call (max_results, line ranges).")
         meta = {"result_too_large": True, "bytes": size, "result_path": path,
                 "hint": ("Read result_path with filesystem read line_start/line_end or search it, or " + narrow)
                         if path else "Saving the full result failed; " + narrow}
@@ -721,7 +802,7 @@ class Server:
             result = {"protocolVersion": PROTOCOL,
                       "capabilities": {"tools": {}, "logging": {}},
                       "serverInfo": {"name": "localforge-mcp", "version": __version__},
-                      "instructions": INSTRUCTIONS}
+                      "instructions": self.instructions}
         elif method == "tools/list":
             result = {"tools": self.tools()}
         elif method == "tools/call":

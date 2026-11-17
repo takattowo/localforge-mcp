@@ -59,6 +59,9 @@ class Config:
     load_project_instructions: bool = True
     project_instruction_files: list[str] = field(default_factory=lambda: ["AGENTS.md", "CLAUDE.md"])
     max_project_instruction_bytes: int = 8_000
+    # Turns on the batch and multi_search tools and the extra edit,
+    # wait and diff options.
+    advanced_features: bool = False
 
     def __post_init__(self):
         # Resolved once, so the rest of the server only sees real shells.
@@ -98,6 +101,8 @@ class Config:
             raise ValueError("edit_diff_max_bytes must be 0 (off) or positive")
         if not isinstance(cfg.load_project_instructions, bool):
             raise ValueError("load_project_instructions must be true or false")
+        if not isinstance(cfg.advanced_features, bool):
+            raise ValueError("advanced_features must be true or false")
         if not isinstance(cfg.edit_checks, dict) or not all(
                 isinstance(argv, list) and argv and all(isinstance(part, str) for part in argv)
                 for argv in cfg.edit_checks.values()):

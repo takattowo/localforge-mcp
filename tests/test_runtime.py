@@ -1,5 +1,6 @@
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -13,6 +14,7 @@ from agent_runtime.errors import RuntimeFault
 def make(tmp, mode="DEVELOPMENT", network="unrestricted", **kwargs):
     # Keep saved output out of the real %TEMP% folder and out of tmp.
     kwargs.setdefault("spill_dir", str(Path(tmp).parent / (Path(tmp).name + "-spill")))
+    kwargs.setdefault("advanced_features", True)
     cfg = Config(str(tmp), mode=mode, allowed_read_roots=[str(tmp)], allowed_write_roots=[str(tmp)],
                  network=network, inherit_environment=["PATH"], default_shell="cmd" if os.name == "nt" else "sh", **kwargs)
     return Server(cfg)
@@ -3835,3 +3837,109 @@ def test_edit_miss_hint_skips_very_common_lines(tmp_path):
     with pytest.raises(RuntimeFault) as exc:
         server.cap.filesystem("replace_text", "c.txt", old_text="def target():\n    return 2\nend", new_text="x")
     assert "151\tdef target():" in exc.value.message
+
+
+ADVANCED_WORDS = ("batch", "multi_search", "multi_edit", "edits", "sequential", "wait", "tail_lines",
+                  "replace_all", "include_untracked", "untracked_skipped", "advanced_features")
+
+
+def _words_in(text, words=ADVANCED_WORDS):
+    return [word for word in words if re.search(rf"\b{word}\b", text)]
+
+
+def _fault(server, name, args):
+    with pytest.raises(RuntimeFault) as exc:
+        server.call(name, args)
+    return exc.value.code, exc.value.message
+
+
+def test_advanced_features_default_off_and_loaded_from_config(tmp_path):
+    assert Config(str(tmp_path)).advanced_features is False
+    path = tmp_path / "lf.json"
+    path.write_text(json.dumps({"workspace_root": str(tmp_path), "advanced_features": True}))
+    assert Config.load(str(path)).advanced_features is True
+    path.write_text(json.dumps({"workspace_root": str(tmp_path), "advanced_features": "yes"}))
+    with pytest.raises(ValueError):
+        Config.load(str(path))
+    path.write_text(json.dumps({"workspace_root": str(tmp_path), "bogus_key": 1}))
+    with pytest.raises(Exception) as exc:
+        Config.load(str(path))
+    assert "bogus_key" in str(exc.value) and "advanced" not in str(exc.value)
+
+
+def test_basic_tool_list_has_only_the_basic_surface(tmp_path):
+    server = make(tmp_path, advanced_features=False)
+    init = server.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})["result"]
+    tools = server.handle({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})["result"]["tools"]
+    by_name = {tool["name"]: tool for tool in tools}
+    assert set(by_name) == {"workspace", "filesystem", "search", "git", "execute", "process", "todo"}
+    props = {name: tool["inputSchema"]["properties"] for name, tool in by_name.items()}
+    assert "multi_edit" not in props["filesystem"]["action"]["enum"]
+    assert "wait" not in props["process"]["action"]["enum"]
+    assert not {"edits", "replace_all"} & set(props["filesystem"])
+    assert not {"pattern", "tail_lines"} & set(props["process"])
+    assert "include_untracked" not in props["git"]
+    # "For file edits, prefer ..." is plain English, not the edits argument.
+    assert _words_in(json.dumps(tools).replace("For file edits,", "")) == []
+    assert _words_in(json.dumps(by_name["process"]), ("pattern",)) == []
+    assert init["instructions"].startswith("LocalForge rules:") and _words_in(init["instructions"]) == []
+    assert _words_in(json.dumps(server.call("workspace", {"action": "get"}))) == []
+    # The rest of the surface is the same as with advanced_features.
+    full = {tool["name"]: tool for tool in make(tmp_path).tools()}
+    for name in ("workspace", "todo"):
+        assert by_name[name] == full[name]
+    assert props["filesystem"]["action"]["enum"] == [action for action in full["filesystem"]["inputSchema"]["properties"]["action"]["enum"] if action != "multi_edit"]
+
+
+def test_basic_server_treats_advanced_calls_as_unknown(tmp_path):
+    server = make(tmp_path, advanced_features=False)
+    (tmp_path / "a.txt").write_text("one one\n")
+
+    def same(name, args, word):
+        # The same call with word swapped for a name that never existed.
+        fake = "zz" + word
+        fake_args = json.loads(json.dumps(args).replace(f'"{word}"', f'"{fake}"'))
+        code, message = _fault(server, name, args)
+        other_code, other_message = _fault(server, fake if name == word else name, fake_args)
+        assert code == other_code
+        # Did-you-mean hints follow the name given, so compare up to them.
+        assert message.split(" Did you mean")[0] == other_message.split(" Did you mean")[0].replace(fake, word)
+        assert _words_in(message.replace(word, "")) == []
+
+    same("batch", {"calls": [{"tool": "todo", "arguments": {"action": "get"}}], "sequential": True}, "batch")
+    same("multi_search", {"searches": [{"query": "one"}]}, "multi_search")
+    same("filesystem", {"action": "multi_edit", "path": "a.txt"}, "multi_edit")
+    same("filesystem", {"action": "multi_edit", "path": "a.txt", "edits": [{"old_text": "one", "new_text": "two"}]}, "edits")
+    same("filesystem", {"action": "replace_text", "path": "a.txt", "old_text": "one", "new_text": "two", "replace_all": True},
+         "replace_all")
+    # Not coerced either: a bad value reads as an unknown argument too.
+    same("filesystem", {"action": "replace_text", "path": "a.txt", "old_text": "one", "new_text": "two",
+                        "replace_all": "maybe"}, "replace_all")
+    same("git", {"action": "diff", "include_untracked": True}, "include_untracked")
+    same("process", {"action": "wait", "process_id": "p1"}, "wait")
+    for key, value in (("pattern", "x"), ("tail_lines", 5)):
+        same("process", {"action": "read", "process_id": "p1", key: value}, key)
+        assert server.call("process", {"action": "list", key: value}) == server.call("process", {"action": "list", "zz": value})
+    assert (tmp_path / "a.txt").read_text() == "one one\n"
+
+
+def test_basic_messages_do_not_name_advanced_features(tmp_path):
+    server = make(tmp_path, advanced_features=False)
+    (tmp_path / "a.txt").write_text("one one\n")
+    code, message = _fault(server, "filesystem", {"action": "replace_text", "path": "a.txt", "old_text": "one", "new_text": "two"})
+    assert code == "content_mismatch" and "expected_occurrences" in message and _words_in(message) == []
+    code, message = _fault(server, "filesystem", {"action": "read", "path": "a.txt", "bogus": 1})
+    assert message.startswith("Unknown argument 'bogus'.") and _words_in(message) == []
+    code, message = _fault(server, "process", {"action": "read", "process_id": "p1", "tail": 1})
+    assert message.startswith("Unknown argument 'tail'.") and _words_in(message, ADVANCED_WORDS + ("pattern",)) == []
+    _, message = _fault(server, "git", {"action": "diff", "untracked": True})
+    assert _words_in(message) == []
+    full = make(tmp_path)
+    _, message = _fault(full, "filesystem", {"action": "replace_text", "path": "a.txt", "old_text": "one", "new_text": "two"})
+    assert "replace_all" in message
+    big = make(tmp_path, advanced_features=False, max_result_bytes=1024)
+    (tmp_path / "big.txt").write_text("x" * 5000)
+    reply = big.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/call",
+                        "params": {"name": "filesystem", "arguments": {"action": "read", "path": "big.txt"}}})
+    text = reply["result"]["content"][0]["text"]
+    assert "result_too_large" in text and _words_in(text) == []
