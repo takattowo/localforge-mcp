@@ -1203,6 +1203,18 @@ def test_default_env_inherits_programdata(tmp_path):
     assert "ProgramData" in cfg.inherit_environment
 
 
+def test_default_env_inherits_systemdrive(tmp_path, monkeypatch):
+    # Without it Windows resolves ProgramData to "%SystemDrive%\ProgramData"
+    # under the child's cwd, and shell caches land in the workspace.
+    import agent_runtime.security as sec
+    cfg = Config(str(tmp_path))
+    assert "SystemDrive" in cfg.inherit_environment
+    if os.name == "nt":
+        monkeypatch.setenv("SystemDrive", "C:")
+        env = {key.upper(): value for key, value in sec.spawn_environment(cfg, False).items()}
+        assert env["SYSTEMDRIVE"] == "C:"
+
+
 def test_gh_counts_as_network(tmp_path):
     server = make(tmp_path)
     ok = server.policy.authorize_command(["gh", "pr", "list"], str(tmp_path))
