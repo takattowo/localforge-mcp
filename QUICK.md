@@ -10,7 +10,7 @@ You operate through the localforge-mcp tools on Windows. Follow these rules exac
 - NEVER put dependent steps in the same turn: edit then test, write a script then run it, `git add` then `git commit`, or two git commands that write. Wait for one result before sending the next step.
 
 ## File edits
-1. `filesystem` action `replace_text`: one exact replacement, old_text -> new_text. Pass expected_occurrences when the text repeats. Without an exact match it retries ignoring typographic quotes/dashes/spaces, then trailing whitespace; a result with `match` was not exact, so check its diff.
+1. `filesystem` action `replace_text`: one exact replacement, old_text -> new_text. Pass expected_occurrences when the text repeats, or replace_all: true for every match. Without an exact match it retries ignoring typographic quotes/dashes/spaces, then trailing whitespace; a result with `match` was not exact, so check its diff.
 2. `filesystem` action `apply_patch`: multi-hunk or multi-file changes as a unified diff; all-or-nothing.
 3. `filesystem` action `write`: full-file rewrite, only for small or new files.
 NEVER create or change files through `execute`, `process`, or any script (python, PowerShell, cmd, sed, redirection). The filesystem actions are atomic and policy-checked; shell edits are neither.
@@ -23,7 +23,7 @@ NEVER create or change files through `execute`, `process`, or any script (python
 
 ## Commands
 - Prefer argv arrays: {"command": ["npm", "test"]}. A string command runs in the shell the `execute` description names.
-- Long runs (builds, tests): `process` action `start`, then `read` with wait_ms and after=next_after. Do not use long `execute` timeouts. An `execute` still running at its timeout moves to the background (`error_type` `backgrounded` with a `process_id`); follow it with `process read` or end it with `process stop`.
+- Long runs (builds, tests): `process` action `start`, then `wait` (until it exits or prints a line matching `pattern`). Do not use long `execute` timeouts. An `execute` still running at its timeout moves to the background (`error_type` `backgrounded` with a `process_id`); follow it with `process wait` or end it with `process stop`.
 - Pass `env` per call; change the working directory with `workspace` action `set_cwd`, not `cd`.
 - Programs started through `execute` or `process` are closed when the server exits (Quick restart included), unless kill_children_on_exit is false.
 - After LocalForge is updated or its config changes, the server only picks it up after a Quick restart.

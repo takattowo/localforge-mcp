@@ -4008,6 +4008,11 @@ def test_replace_text_miss_message_has_no_count_tip(tmp_path):
         assert "expected_occurrences" not in message and "replace all of them" not in message
 
 
+def test_example_config_leaves_out_advanced_features():
+    text = (Path(__file__).resolve().parent.parent / "localforge.example.json").read_text(encoding="utf-8")
+    assert "advanced_features" not in text
+
+
 def test_multi_edit_miss_message_has_no_count_tip(tmp_path):
     server = make(tmp_path)
     (tmp_path / "a.txt").write_text("one one\n")

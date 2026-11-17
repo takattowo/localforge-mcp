@@ -49,12 +49,25 @@ Minimal `localforge.json`:
 ## Tools
 
 - `workspace`: roots, cwd, and Git root; `get` also returns the project's AGENTS.md/CLAUDE.md.
-- `filesystem`: read, list, stat, write, replace_text, apply_patch, mkdir, delete, move, copy.
+- `filesystem`: read, list, stat, write, replace_text (`replace_all` for every match), apply_patch, multi_edit\*, mkdir, delete, move, copy.
 - `search`: text or filename search (ripgrep, with a Python fallback).
-- `git`: status, diff, log, show, branch, root, or any git arguments via `run`.
+- `multi_search`\*: up to 16 searches in one call.
+- `batch`\*: up to 16 tool calls in one call, in parallel or `sequential`.
+- `git`: status, diff (`include_untracked` adds new files), log, show, branch, root, or any git arguments via `run`.
 - `execute`: run a command and get structured output; long runs move to the background.
-- `process`: start, read, write, status, list, restart, and stop long-running processes.
+- `process`: start, read, wait (for exit or a `pattern` line), write, status, list, restart, and stop long-running processes.
 - `todo`: persistent task list.
+
+\* Off unless `localforge.json` has `"advanced_features": true` (default false):
+
+```json
+{
+  "workspace_root": "C:\\src\\my-app",
+  "advanced_features": true
+}
+```
+
+**Warning:** These features can cause Quick agents to have issues: responses often get interrupted for various reasons, and sub-agents especially can get stuck. The cause hasn't been found and it happens often. Use at your own risk.
 
 ## Safety notes
 
