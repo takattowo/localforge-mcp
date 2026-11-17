@@ -495,7 +495,7 @@ NUMBERED_SHIFT_HINT = ("old_text lines start with line numbers (N<TAB>), but an 
                        " the ones read; put line-numbered edits first, ordered bottom to top, or drop the prefixes.")
 NUMBERED_CHANGED_HINT = ("old_text lines start with line numbers (N<TAB>), but an earlier edit in this call"
                          " changed those lines, so they no longer match what was read; put line-numbered edits"
-                         " first or drop the prefixes.")
+                         " first, or fold this change into the earlier edit.")
 NUMBERED_CLASH_HINT = (" old_text also reads as lines copied with line-number prefixes (N<TAB>), so the edit"
                        " is unclear: leave the prefixes out to edit those lines, or include more context.")
 

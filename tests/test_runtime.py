@@ -3736,6 +3736,8 @@ def test_multi_edit_refuses_line_numbers_an_earlier_entry_changed(tmp_path):
     message = exc.value.message
     assert exc.value.code == "content_mismatch" and message.startswith("edits[1]: ")
     assert "changed those lines" in message and "expected_occurrences" not in message
+    # Dropping the prefixes would edit an unrelated copy; the hint must not suggest it.
+    assert "drop the prefixes" not in message and "fold this change into the earlier edit" in message
     assert path.read_text() == body
     # Without a literal copy, the same hint, not "numbers do not match".
     path.write_text("a\nb\nc\n")
