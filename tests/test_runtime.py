@@ -4013,6 +4013,18 @@ def test_example_config_leaves_out_advanced_features():
     assert "advanced_features" not in text
 
 
+def test_example_config_inherits_systemdrive():
+    # A config list replaces the default one, so the example needs it too.
+    text = (Path(__file__).resolve().parent.parent / "localforge.example.json").read_text(encoding="utf-8")
+    assert "SystemDrive" in json.loads(text)["inherit_environment"]
+
+
+def test_switch_off_instructions_name_process_wait():
+    from agent_runtime import server as srv
+    assert "process start, then wait" in srv.SWITCH_OFF_INSTRUCTIONS
+    assert "read with wait_ms" not in srv.SWITCH_OFF_INSTRUCTIONS
+
+
 def test_multi_edit_miss_message_has_no_count_tip(tmp_path):
     server = make(tmp_path)
     (tmp_path / "a.txt").write_text("one one\n")

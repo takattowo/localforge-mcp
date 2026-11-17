@@ -41,7 +41,7 @@ SWITCH_OFF_INSTRUCTIONS = (
     "LocalForge rules: "
     "Edit files only with filesystem write/replace_text/apply_patch, "
     "never via execute, process, or any script. "
-    "Long runs (builds, tests): process start + read with wait_ms, not a long execute timeout. "
+    "Long runs (builds, tests): process start, then wait, not a long execute timeout. "
     "Stage explicit files only; git add -A/./--all is blocked."
 )
 
