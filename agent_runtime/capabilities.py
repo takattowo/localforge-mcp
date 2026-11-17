@@ -42,12 +42,16 @@ def _fs_error(action, target, exc):
 def _remove_read_only(func, path, exc):
     """Delete error hook (rmtree onexc/onerror): Windows refuses to delete
     read-only entries, such as Git object files. Clear the attribute and
-    retry once. Links are never touched; other systems are unchanged."""
+    retry once. Links are never changed: not a symbolic link or junction,
+    nor a file with other hard links (git clone --local links objects),
+    which share the attribute; their error is raised. Other systems are
+    unchanged."""
     exc = exc[1] if isinstance(exc, tuple) else exc
     try:
         read_only = (os.name == "nt" and isinstance(exc, PermissionError) and not os.path.islink(path)
                      and not getattr(os.path, "isjunction", lambda _: False)(path)
-                     and not os.stat(path).st_mode & stat.S_IWRITE)
+                     and not os.stat(path).st_mode & stat.S_IWRITE
+                     and os.stat(path, follow_symlinks=False).st_nlink == 1)
     except OSError:
         read_only = False
     if not read_only:

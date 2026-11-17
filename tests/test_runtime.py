@@ -937,6 +937,26 @@ def test_delete_removes_read_only_files(tmp_path):
     server.call("filesystem", {"action": "delete", "path": "repo", "recursive": True})
     assert not (tmp_path / "repo").exists()
 
+@pytest.mark.skipif(os.name != "nt", reason="Windows read-only attribute")
+def test_delete_leaves_a_hard_linked_read_only_file_alone(tmp_path):
+    import stat
+    server = make(tmp_path)
+    (tmp_path / "d").mkdir()
+    inner, outside = tmp_path / "d" / "ro.txt", tmp_path / "outside.txt"
+    inner.write_text("x")
+    # Hard links share the attribute (git clone --local links .git/objects):
+    # clearing it would make the file outside the tree writable too.
+    os.link(inner, outside)
+    os.chmod(inner, stat.S_IREAD)
+    try:
+        for args in (("d/ro.txt",), ("d",)):
+            with pytest.raises(RuntimeFault) as exc:
+                server.cap.filesystem("delete", *args, recursive=args == ("d",))
+            assert exc.value.code == "permission_denied", args
+        assert inner.exists() and not os.stat(outside).st_mode & stat.S_IWRITE
+    finally:
+        os.chmod(outside, stat.S_IWRITE)
+
 def test_bad_argument_types_are_reported_together(tmp_path):
     server = make(tmp_path)
     with pytest.raises(RuntimeFault) as exc:
