@@ -3723,6 +3723,54 @@ def test_multi_edit_allows_line_numbers_above_an_earlier_line_shift(tmp_path):
     assert path.read_text() == "a\nb\nc\nd\n"
 
 
+def test_multi_edit_refuses_line_numbers_an_earlier_entry_changed(tmp_path):
+    server = make(tmp_path)
+    path = tmp_path / "n.txt"
+    body = "foo\nb\nc\n1\tfoo\n"
+    path.write_text(body)
+    # Line 1 was read as "foo"; the first entry changes it but keeps the
+    # line count, so "1<TAB>foo" now only matches line 4 literally.
+    with pytest.raises(RuntimeFault) as exc:
+        server.cap.filesystem("multi_edit", "n.txt", edits=[
+            {"old_text": "foo\nb", "new_text": "bar\nb"}, {"old_text": "1\tfoo", "new_text": "1\tFOO"}])
+    message = exc.value.message
+    assert exc.value.code == "content_mismatch" and message.startswith("edits[1]: ")
+    assert "changed those lines" in message and "expected_occurrences" not in message
+    assert path.read_text() == body
+    # Without a literal copy, the same hint, not "numbers do not match".
+    path.write_text("a\nb\nc\n")
+    with pytest.raises(RuntimeFault) as exc:
+        server.cap.filesystem("multi_edit", "n.txt", edits=[
+            {"old_text": "b", "new_text": "B"}, {"old_text": "2\tb", "new_text": "2\tX"}])
+    assert exc.value.code == "content_mismatch" and "changed those lines" in exc.value.message
+    assert path.read_text() == "a\nb\nc\n"
+    # Numbered lines the earlier entry left alone apply.
+    out = server.cap.filesystem("multi_edit", "n.txt", edits=[
+        {"old_text": "b", "new_text": "B"}, {"old_text": "3\tc", "new_text": "3\tC"}])
+    assert [entry.get("match") for entry in out["edits"]] == [None, "line_numbers"]
+    assert path.read_text() == "a\nB\nC\n"
+
+
+def test_numbered_clash_refusal_has_no_expected_occurrences_advice(tmp_path):
+    server = make(tmp_path)
+    path = tmp_path / "n.txt"
+    path.write_text("q\nr\n1\tq\n")
+    # After the shift below line 1, "1<TAB>q" is both line 1 by its
+    # number and line 4 exactly.
+    with pytest.raises(RuntimeFault) as exc:
+        server.cap.filesystem("multi_edit", "n.txt", edits=[
+            {"old_text": "r", "new_text": "r\nt"}, {"old_text": "1\tq", "new_text": "1\tQ"}])
+    message = exc.value.message
+    assert exc.value.code == "content_mismatch" and message.startswith("edits[1]: ")
+    assert "prefixes" in message and "line 4" in message and "line 1" in message
+    assert "expected_occurrences" not in message
+    assert path.read_text() == "q\nr\n1\tq\n"
+    with pytest.raises(RuntimeFault) as exc:
+        server.cap.filesystem("replace_text", "n.txt", old_text="1\tq", new_text="1\tQ")
+    assert exc.value.code == "content_mismatch" and "expected_occurrences" not in exc.value.message
+    assert path.read_text() == "q\nr\n1\tq\n"
+
+
 def test_edit_refuses_old_text_that_reads_as_text_and_as_numbered_lines(tmp_path):
     server = make(tmp_path)
     path = tmp_path / "n.txt"

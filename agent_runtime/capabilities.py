@@ -493,6 +493,9 @@ NUMBERED_HINT = (" old_text lines start with line numbers (N<TAB>) that do not m
 NUMBERED_SHIFT_HINT = ("old_text lines start with line numbers (N<TAB>), but an earlier edit in this call"
                        " changed the line count from line {line} on, so they may point at other lines than"
                        " the ones read; put line-numbered edits first, ordered bottom to top, or drop the prefixes.")
+NUMBERED_CHANGED_HINT = ("old_text lines start with line numbers (N<TAB>), but an earlier edit in this call"
+                         " changed those lines, so they no longer match what was read; put line-numbered edits"
+                         " first or drop the prefixes.")
 NUMBERED_CLASH_HINT = (" old_text also reads as lines copied with line-number prefixes (N<TAB>), so the edit"
                        " is unclear: leave the prefixes out to edit those lines, or include more context.")
 
@@ -1622,15 +1625,21 @@ class Capabilities:
         # from where it starts on; lines above it stay as read. So an
         # old_text that reads as numbered lines reaching the first
         # shifted line is refused, whatever it would match (checking it
-        # against the edited text could pick another line).
-        shifted = None
+        # against the edited text could pick another line). Above it, one
+        # whose numbered lines matched the file at the start of the call
+        # but no longer do (an earlier edit changed them) is refused too.
+        start, shifted = view, None
         for index, (old, new, expected) in enumerate(edits):
-            numbered = _split_numbered(old) if shifted is not None and expected == 1 else None
-            if numbered is not None and numbered[0] + len(numbered[1]) - 1 >= shifted:
+            numbered = _split_numbered(old) if expected == 1 else None
+            if numbered is not None and shifted is not None and numbered[0] + len(numbered[1]) - 1 >= shifted:
                 raise RuntimeFault("content_mismatch", f"edits[{index}]: " + NUMBERED_SHIFT_HINT.format(line=shifted))
+            if numbered is not None and index and _numbered_span(start, old) and not _numbered_span(view, old):
+                raise RuntimeFault("content_mismatch", f"edits[{index}]: " + NUMBERED_CHANGED_HINT)
             spans, tier, tried = _find_spans(view, old, new, expected)
             if tier == "numbered_clash":
-                raise mismatch(index, expected, *_clash_miss(view, spans[0], tried[0][1]))
+                found, hint = _clash_miss(view, spans[0], tried[0][1])
+                raise RuntimeFault("content_mismatch", ("" if len(edits) == 1 else f"edits[{index}]: ") +
+                                   f"old_text matched {found}." + hint)
             if tier is None:
                 found = len(spans)
                 if any(matches for _, matches in tried):
