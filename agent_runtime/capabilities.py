@@ -1162,7 +1162,12 @@ class Capabilities:
                         # it was, go through a temporary name.
                         renamed = dest.with_name(wanted)
                         target.replace(renamed)
-                        if wanted not in os.listdir(target.parent):
+                        names = os.listdir(target.parent)
+                        if wanted in names and target.name in names:
+                            # Hard links to one file on a case-sensitive file system:
+                            # rename leaves both names, so drop the old one.
+                            target.unlink()
+                        elif wanted not in names:
                             temp = target.with_name(f".localforge-{uuid.uuid4().hex[:8]}-{target.name}")
                             target.replace(temp)
                             try:
@@ -1898,8 +1903,20 @@ class Capabilities:
         # The value of -S, -G, -O or --diff-filter may come as its own
         # argument (-S HEAD); it is not a revision.
         values = ("-S", "-G", "-O", "--diff-filter")
-        revs = run(["rev-parse", "--revs-only", "--no-flags",
-                    *(a for i, a in enumerate(args) if not (i and args[i - 1] in values))])
+        # An option given as another's value (-S in -O -S HEAD) takes no value itself.
+        kept, skip_next = [], False
+        for a in args:
+            if not skip_next:
+                kept.append(a)
+            skip_next = a in values and not skip_next
+        revs = run(["rev-parse", "--revs-only", "--no-flags", *kept])
+        # Colour codes hide the "diff --git" headers new files are counted and cut at.
+        color = next((a for a in args if a == "--color" or a.startswith("--color-words") or a == "--word-diff=color"
+                      or (a.startswith("--color=") and a != "--color=never")), None)
+        if color:
+            raise RuntimeFault("invalid_arguments",
+                               f"include_untracked counts and cuts new files in plain diff output, so it cannot be "
+                               f"combined with {color}; drop it (git diff without include_untracked takes it).")
         if staged or (revs.returncode == 0 and revs.stdout.strip()):
             raise RuntimeFault("invalid_arguments",
                                f"include_untracked diffs new files against the working tree, so it cannot be "

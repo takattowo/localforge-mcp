@@ -403,7 +403,7 @@ def test_git_diff_can_include_untracked_files(tmp_path):
     assert "?? sub/new.txt" in status and "?? big.txt" in status
     # The new files are diffed against the working tree only: a staged
     # view or a revision would show every tracked file as deleted.
-    for extra in (["--cached"], ["--staged"], ["HEAD"], ["--stat", "HEAD~0..HEAD"]):
+    for extra in (["--cached"], ["--staged"], ["HEAD"], ["--stat", "HEAD~0..HEAD"], ["-O", "-S", "HEAD"]):
         with pytest.raises(RuntimeFault) as exc:
             server.call("git", {"action": "diff", "include_untracked": True, "args": extra})
         assert exc.value.code == "invalid_arguments" and "include_untracked" in exc.value.message, extra
@@ -453,6 +453,13 @@ def test_git_diff_untracked_skips_what_it_cannot_add(tmp_path, monkeypatch):
     for extra in (["tracked.txt"], ["--diff-filter=M"]):
         bare = server.call("git", {"action": "diff", "include_untracked": True, "args": extra})
         assert bare["untracked_files"] == 0 and "+two" in bare["stdout"] and "+fresh" not in bare["stdout"], (extra, bare)
+    # Colour codes would hide the headers new files are counted and cut at.
+    for extra in (["--color"], ["--color=always"], ["--color-words"], ["--word-diff=color"]):
+        with pytest.raises(RuntimeFault) as exc:
+            server.call("git", {"action": "diff", "include_untracked": True, "args": extra})
+        assert exc.value.code == "invalid_arguments" and extra[0] in exc.value.message, extra
+    for extra in (["--color=never"], ["--no-color"]):
+        assert server.call("git", {"action": "diff", "include_untracked": True, "args": extra})["untracked_files"] == 1, extra
     # A failed add keeps the plain diff and says why.
     import agent_runtime.capabilities as caps
     real = caps.subprocess.run
@@ -924,6 +931,31 @@ def test_move_renames_a_file_whose_name_changes_only_in_case(tmp_path):
     (tmp_path / "Case.txt").write_text("x")
     if not (tmp_path / "case.txt").exists():
         pytest.skip("case-sensitive file system")
+    server = make(tmp_path)
+    out = server.call("filesystem", {"action": "move", "path": "Case.txt", "destination": "case.txt"})
+    assert [p.name for p in tmp_path.iterdir()] == ["case.txt"] and (tmp_path / "case.txt").read_text() == "x", out
+
+def test_move_onto_a_hard_link_whose_name_differs_only_in_case(tmp_path, monkeypatch):
+    if os.name == "nt":
+        # Two names differing only in case need a case-sensitive folder.
+        subprocess.run(["fsutil", "file", "setCaseSensitiveInfo", str(tmp_path), "enable"], capture_output=True)
+    (tmp_path / "Case.txt").write_text("x")
+    if (tmp_path / "case.txt").exists():
+        pytest.skip("case-insensitive file system")
+    try:
+        os.link(tmp_path / "Case.txt", tmp_path / "case.txt")
+    except OSError:
+        pytest.skip("no hard links")
+    if os.name == "nt":
+        # Windows replaces one link with the other; POSIX rename does nothing.
+        real = Path.replace
+
+        def posix(self, other):
+            if os.path.exists(other) and os.path.samefile(self, other):
+                return Path(other)
+            return real(self, other)
+
+        monkeypatch.setattr(Path, "replace", posix)
     server = make(tmp_path)
     out = server.call("filesystem", {"action": "move", "path": "Case.txt", "destination": "case.txt"})
     assert [p.name for p in tmp_path.iterdir()] == ["case.txt"] and (tmp_path / "case.txt").read_text() == "x", out
