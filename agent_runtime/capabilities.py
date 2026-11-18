@@ -1578,17 +1578,15 @@ class Capabilities:
 
     @staticmethod
     def _expected(replace_all, expected_occurrences, old, where):
-        """Match count an edit needs: None for replace_all (every exact
-        match, at least one), else expected_occurrences or 1."""
+        """Match count an edit needs: None for replace_all alone (every exact
+        match, at least one), else expected_occurrences or 1. replace_all with
+        expected_occurrences means every match, and exactly that many."""
         if not old:
             raise RuntimeFault("invalid_arguments", f"{where}old_text is empty; pass the text to replace "
                                                     "(write replaces a whole file)")
-        if not replace_all:
-            return 1 if expected_occurrences is None else int(expected_occurrences)
         if expected_occurrences is not None:
-            raise RuntimeFault("invalid_arguments",
-                               f"{where}replace_all replaces every occurrence; do not pass expected_occurrences with it")
-        return None
+            return int(expected_occurrences)
+        return None if replace_all else 1
 
     @staticmethod
     def _list_dir(target, limit, offset, glob, include_hidden):
@@ -1887,8 +1885,10 @@ class Capabilities:
         if int(max_file_size_bytes) <= 0:
             raise RuntimeFault("invalid_arguments", "max_file_size_bytes must be positive")
         context = max(0, min(int(context_lines or 0), 5))
-        if files_only and query is not None:
-            raise RuntimeFault("invalid_arguments", "files_only search takes no query")
+        # files_only with a query: the files whose content matches, like rg -l.
+        by_content = bool(files_only) and query is not None
+        if by_content:
+            files_only = False
         applied = list(dict.fromkeys([*(exclude or []), *DEFAULT_EXCLUDES]))
         # Read the cwd once: a parallel set_cwd must not change the
         # base between resolving the root and shortening result paths.
@@ -1909,6 +1909,11 @@ class Capabilities:
             out = self._search_python(root, query, glob or [], applied, case_sensitive, maximum, files_only, fixed_string, context, int(max_file_size_bytes), bool(include_hidden))
         if not files_only:
             self._group_by_file(out)
+        if by_content:
+            for entry in out["results"]:
+                entry.pop("matches", None)
+            out = self._noted(out, "files_only with a query lists the files whose content matches; "
+                                   "max_results still counts matches.")
         # With require_absolute_paths, edits must name absolute paths; absolute hits keep them the file that was read.
         if not self.cfg.require_absolute_paths:
             out = self._short_paths(base, out)
@@ -2251,10 +2256,10 @@ class Capabilities:
 
     def git(self, action, args=None, cwd=None, include_untracked=False):
         work = self.paths.resolve(cwd or ".", cwd=self.cwd, access="read", must_exist=True)
-        if include_untracked:
-            if action != "diff":
-                raise RuntimeFault("invalid_arguments", "include_untracked works with action diff only")
+        if include_untracked and action == "diff":
             return self._diff_untracked(work, list(args or []))
+        ignored = (f"include_untracked only changes diff, so it was ignored for {action}"
+                   + (" (status lists untracked files anyway)." if action == "status" else ".")) if include_untracked else None
         presets = {
             "status": ["status", "--porcelain=v2", "--branch"], "diff": ["diff"],
             "log": ["log", "--oneline", "-n", "20"], "show": ["show"],
@@ -2278,8 +2283,8 @@ class Capabilities:
         # octal escapes like "f\303\251.txt".
         # kill_on_timeout: a git command must not linger in the background.
         # The presets only read: no optional locks for them.
-        return self.execute([_git_program(), "-c", "core.quotepath=false", "-C", str(work)] + subcommand + ([] if action == "run" else list(args or [])), cwd=str(work),
-                            env=git_environment(self.cfg, action != "run"), kill_on_timeout=True)
+        return self._noted(self.execute([_git_program(), "-c", "core.quotepath=false", "-C", str(work)] + subcommand + ([] if action == "run" else list(args or [])), cwd=str(work),
+                                        env=git_environment(self.cfg, action != "run"), kill_on_timeout=True), ignored)
 
     def _diff_untracked(self, work, args):
         """git diff that also shows untracked files as added.

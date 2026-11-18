@@ -409,9 +409,12 @@ def test_replace_all_replaces_every_exact_match(tmp_path):
     with pytest.raises(RuntimeFault) as exc:
         server.cap.filesystem("replace_text", "r.txt", old_text="missing", new_text="x", replace_all=True)
     assert exc.value.code == "content_mismatch" and "replace_all" in exc.value.message
+    # Both together: every match, and there must be exactly that many.
+    out = server.cap.filesystem("replace_text", "r.txt", old_text="new", new_text="neu", replace_all=True, expected_occurrences=3)
+    assert out["replacements"] == 3 and path.read_text() == "a = neu\nb = neu\nc = neu()\n"
     with pytest.raises(RuntimeFault) as exc:
-        server.cap.filesystem("replace_text", "r.txt", old_text="new", new_text="x", replace_all=True, expected_occurrences=3)
-    assert exc.value.code == "invalid_arguments"
+        server.cap.filesystem("replace_text", "r.txt", old_text="neu", new_text="x", replace_all=True, expected_occurrences=2)
+    assert exc.value.code == "content_mismatch" and path.read_text() == "a = neu\nb = neu\nc = neu()\n"
     # Exact matches only: no typography fallback, which every match would repeat.
     path.write_text("say \u201chi\u201d\nsay \u201chi\u201d\n", encoding="utf-8")
     with pytest.raises(RuntimeFault):
@@ -421,10 +424,13 @@ def test_replace_all_replaces_every_exact_match(tmp_path):
         {"old_text": "said", "new_text": "told", "expected_occurrences": 2}])
     assert [entry["replacements"] for entry in out["edits"]] == [2, 2]
     assert path.read_text(encoding="utf-8") == "told \u201chi\u201d\ntold \u201chi\u201d\n"
+    out = server.cap.filesystem("multi_edit", "r.txt", edits=[
+        {"old_text": "told", "new_text": "x", "replace_all": True, "expected_occurrences": 2}])
+    assert out["edits"][0]["replacements"] == 2
     with pytest.raises(RuntimeFault) as exc:
         server.cap.filesystem("multi_edit", "r.txt", edits=[
-            {"old_text": "told", "new_text": "x", "replace_all": True, "expected_occurrences": 2}])
-    assert exc.value.code == "invalid_arguments" and "edits[0]" in exc.value.message
+            {"old_text": "x", "new_text": "y", "replace_all": True, "expected_occurrences": 3}])
+    assert exc.value.code == "content_mismatch"
 
 def test_missing_relative_path_is_retried_from_the_git_root(tmp_path):
     if shutil.which("git") is None:
@@ -508,8 +514,12 @@ def test_git_diff_can_include_untracked_files(tmp_path):
     # An option's value given as its own argument is not taken for a revision.
     pick = server.call("git", {"action": "diff", "include_untracked": True, "args": ["-S", "HEAD", "--", "new.txt"]})
     assert pick["success"] and "deleted" not in pick["stdout"], pick
-    with pytest.raises(RuntimeFault):
-        server.call("git", {"action": "log", "include_untracked": True})
+    # Other actions ignore it, with a note: status lists untracked files anyway.
+    logged = server.call("git", {"action": "log", "include_untracked": True})
+    assert logged["success"] and "include_untracked" in logged["note"], logged
+    status = server.call("git", {"action": "status", "include_untracked": True})
+    # git status shows the untracked sub folder itself as "? ./" from inside it.
+    assert status["success"] and "\n? " in status["stdout"] and "include_untracked" in status["note"], status
     # A new repository has no index file yet.
     other = tmp_path.parent / (tmp_path.name + "-fresh")
     other.mkdir()
@@ -717,8 +727,9 @@ def test_search_defaults_and_guards(tmp_path, no_rg):
     assert hit["line"] == 2
     assert hit["before"] == ["1\tline one"]
     assert hit["after"] == ["3\tline three"]
-    with pytest.raises(RuntimeFault):
-        server.cap.search("UserService", files_only=True)
+    # files_only with a query lists the files whose content matches (the Python engine here).
+    listed = server.cap.search("UserService", files_only=True)
+    assert [r["path"] for r in listed["results"]] == [os.path.join("src", "hit.py")] and "note" in listed
 
 
 def test_list_pagination_and_read_lines(tmp_path):
@@ -4727,3 +4738,23 @@ def test_per_call_cwd_reaches_every_change_and_keeps_the_path_policy(tmp_path):
     props = {t["name"]: t["inputSchema"]["properties"]
              for t in off.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})["result"]["tools"]}
     assert "cwd" in props["filesystem"] and "cwd" in props["search"]
+
+
+@pytest.mark.parametrize("python_engine", [False, True])
+def test_files_only_with_a_query_lists_the_files_that_match(tmp_path, monkeypatch, python_engine):
+    if python_engine:
+        monkeypatch.setattr("agent_runtime.capabilities.find_program", lambda name: None)
+    (tmp_path / "a.py").write_text("x = 1\nTODO one\nTODO two\n")
+    (tmp_path / "b.py").write_text("nothing here\n")
+    (tmp_path / "c.txt").write_text("TODO three\n")
+    server = make(tmp_path)
+    out = server.call("search", {"query": "TODO", "files_only": True, "path": "."})
+    # Like rg -l: one entry per file whose content matches, no match lines.
+    assert sorted(r["path"] for r in out["results"]) == ["a.py", "c.txt"], out
+    assert all(set(r) == {"path"} for r in out["results"]) and "content matches" in out["note"]
+    # The multi_search example in the tool description does exactly this.
+    multi = server.call("multi_search", {"searches": [{"query": "TODO", "files_only": True, "glob": ["*.py"]}]})
+    assert [r["path"] for r in multi["results"][0]["results"]] == ["a.py"], multi
+    # Without a query it still lists files by name.
+    names = server.call("search", {"files_only": True, "path": ".", "glob": ["*.py"]})
+    assert sorted(r["path"] for r in names["results"]) == ["a.py", "b.py"] and "note" not in names
