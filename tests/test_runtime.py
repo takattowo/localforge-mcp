@@ -676,16 +676,43 @@ def test_pcre2_retry_is_kept_despite_per_file_errors(tmp_path, monkeypatch):
     replies["pcre2"] = subprocess.CompletedProcess([], 2, "{}\n", "rg: ./big.txt: PCRE2: error matching: match limit exceeded\n")
     notes = []
     assert server.cap._run_rg_regex(["rg", "-e", "foo(?=bar)", "."], notes) is replies["pcre2"] and "--pcre2" in notes[0]
-    # A pattern PCRE2 cannot compile either: refused with the first error.
+    # A pattern PCRE2 cannot compile either: refused with PCRE2's own error, which names the real cause.
     replies["pcre2"] = subprocess.CompletedProcess([], 2, "", "rg: PCRE2: error compiling pattern at offset 9: missing closing parenthesis\n")
     with pytest.raises(RuntimeFault) as bad:
         server.cap._run_rg_regex(["rg", "-e", "foo(?=bar)", "."], [])
-    assert bad.value.code == "invalid_arguments" and "look-around" in bad.value.message
+    assert bad.value.code == "invalid_arguments" and "missing closing parenthesis" in bad.value.message
+    assert "tried --pcre2" in bad.value.message and "look-around" not in bad.value.message
     # A ripgrep built without PCRE2: refused, and the message keeps the note.
     replies["pcre2"] = subprocess.CompletedProcess([], 2, "", "PCRE2 is not available in this build of ripgrep.\n")
     with pytest.raises(RuntimeFault) as bad:
         server.cap._run_rg_regex(["rg", "-e", "foo(?=bar)", "."], [])
     assert bad.value.code == "invalid_arguments" and "PCRE2 unavailable" in bad.value.message
+
+def test_regex_too_big_is_refused_and_output_means_it_ran(tmp_path, monkeypatch):
+    server = make(tmp_path)
+    run = {}
+    monkeypatch.setattr(server.cap, "_run_rg", lambda command, cwd=None: run["result"])
+    # ripgrep's own text for a pattern over its size limit: nothing ran, so refuse.
+    run["result"] = subprocess.CompletedProcess([], 2, "", "rg: compiled regex exceeds size limit of 104857600\n")
+    with pytest.raises(RuntimeFault) as bad:
+        server.cap._run_rg_regex(["rg", "-e", "(?:\\w{100}){1000}", "."], [])
+    assert bad.value.code == "invalid_arguments" and "size limit" in bad.value.message
+    # Output means the search ran (a file's contents can hold the same words): keep the result.
+    run["result"] = subprocess.CompletedProcess([], 2, '{"type":"summary"}\n', "rg: ./x.txt: regex parse error in a file name\n")
+    assert server.cap._run_rg_regex(["rg", "-e", "x", "."], []) is run["result"]
+
+
+def test_max_results_over_the_cap_says_what_was_kept(tmp_path):
+    server = make(tmp_path)
+    (tmp_path / "a.log").write_text("".join(f"10:{n:04d} ok\n" for n in range(5100)))
+    out = server.call("search", {"query": "ok", "path": "a.log", "max_results": 20000})
+    assert len(out["results"][0]["matches"]) == 5000 and out["truncated"], out["truncated"]
+    # The note names the cap, that the first matches in file order were kept, and how to get the rest.
+    assert "5000" in out["note"] and "20000" in out["note"] and "file order" in out["note"], out["note"]
+    # Under the cap, or over it with nothing cut: no note.
+    assert "note" not in server.call("search", {"query": "ok", "path": "a.log", "max_results": 100})
+    (tmp_path / "b.log").write_text("ok\n")
+    assert "note" not in server.call("search", {"query": "ok", "path": "b.log", "max_results": 20000})
 
 def test_search_python_fallback(tmp_path, no_rg):
     server = make(tmp_path)

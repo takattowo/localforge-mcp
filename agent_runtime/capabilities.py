@@ -445,8 +445,16 @@ PATH_LOCK_STRIPES = 256
 SPILL_KEEP = 100
 # Every spill file starts with this; pruning touches nothing else.
 SPILL_PREFIX = "lf-"
-# ripgrep's stderr when a pattern does not compile (default engine, PCRE2).
-RG_REGEX_ERRORS = ("regex parse error", "error compiling pattern")
+# ripgrep's stderr when a pattern does not compile (default engine, PCRE2, or over its size limit).
+RG_REGEX_ERRORS = ("regex parse error", "error compiling pattern", "exceeds size limit")
+# Most matches (or files) one search returns.
+MAX_SEARCH_RESULTS = 5000
+
+def _compile_failed(result):
+    """True when ripgrep could not compile the pattern, so nothing ran. Exit 2 alone also means some files could not
+    be read, and any output means the search ran."""
+    return (result.returncode == 2 and not (result.stdout or "").strip()
+            and any(mark in (result.stderr or "") for mark in RG_REGEX_ERRORS))
 # difflib grows worse than quadratically on big repetitive files,
 # so edits above this many characters (before + after) skip the diff.
 EDIT_DIFF_MAX_INPUT = 128_000
@@ -1902,7 +1910,7 @@ class Capabilities:
         # base between resolving the root and shortening result paths.
         base = self._call_cwd(cwd)
         root, note = self._resolve_existing(path, "read", retry=True, cwd=base)
-        maximum = max(1, min(int(max_results), 5000))
+        maximum = max(1, min(int(max_results), MAX_SEARCH_RESULTS))
         rg = find_program("rg")
         if root.is_file():
             if rg:
@@ -1921,6 +1929,10 @@ class Capabilities:
                                       context, int(max_file_size_bytes), bool(include_hidden), first_only=by_content)
         if not names_only:
             self._group_by_file(out)
+        if int(max_results) > MAX_SEARCH_RESULTS and out.get("truncated"):
+            out = self._noted(out, f"max_results {int(max_results)} is over the cap of {MAX_SEARCH_RESULTS}, so this page "
+                                   f"holds {MAX_SEARCH_RESULTS}: the first ones in file order (spread across files when "
+                                   "several match). Split the search by path, glob or time range for the rest.")
         if by_content:
             for entry in out["results"]:
                 entry.pop("matches", None)
@@ -2037,11 +2049,13 @@ class Capabilities:
                 out_note.append("The regex needs look-around or backreferences, but this ripgrep build has no "
                                 "PCRE2 (PCRE2 unavailable); rewrite it without them.")
             # Exit 2 without a compile error: the search ran, some files could not be read or matched.
-            elif retry.returncode in (0, 1) or not any(mark in err for mark in RG_REGEX_ERRORS):
+            elif not _compile_failed(retry):
                 out_note.append("The regex needs look-around or backreferences, so it ran with ripgrep's --pcre2.")
                 return retry
-        # Exit 2 alone also means some files could not be read; only a compile error means nothing ran.
-        if result.returncode == 2 and any(mark in (result.stderr or "") for mark in RG_REGEX_ERRORS):
+            else:
+                # PCRE2 failed too: its error names the real cause, not the first engine's "use --pcre2".
+                raise RuntimeFault("invalid_arguments", f"Invalid regex: {self._rg_error(retry)} (also tried --pcre2)")
+        if _compile_failed(result):
             raise RuntimeFault("invalid_arguments", " ".join([f"Invalid regex: {self._rg_error(result)}", *out_note]))
         return result
 
