@@ -169,20 +169,19 @@ def find_program(name):
 
     Never the current folder: for a bare name, Windows CreateProcess
     (and shutil.which) look there before PATH, so a planted git.exe
-    would run. Empty, "." and relative entries are skipped too; on
-    Windows each PATHEXT extension is tried in order. Cached; restart
-    the server to pick up a new install.
+    would run. Empty, "." and relative entries are skipped too. On
+    Windows only name.exe counts, like a bare name in CreateProcess:
+    Python runs a .cmd/.bat through cmd.exe, which treats & and | in
+    the arguments as commands. Cached; restart the server to pick up a
+    new install.
     """
-    exts = [""]
-    if os.name == "nt":
-        exts = [e for e in os.environ.get("PATHEXT", ".COM;.EXE;.BAT;.CMD").split(os.pathsep) if e]
+    file_name = name + ".exe" if os.name == "nt" else name
     for folder in os.environ.get("PATH", "").split(os.pathsep):
         if not os.path.isabs(folder):
             continue
-        for ext in exts:
-            candidate = os.path.join(folder, name + ext)
-            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
-                return candidate
+        candidate = os.path.join(folder, file_name)
+        if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+            return candidate
     return None
 
 

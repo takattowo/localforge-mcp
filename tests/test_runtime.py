@@ -3020,7 +3020,6 @@ def test_find_program_looks_in_path_only(tmp_path, monkeypatch):
     fake(tmp_path / "rel")
     on_path = fake(tmp_path / "bin")
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setenv("PATHEXT", ".COM;.EXE")
     try:
         monkeypatch.setenv("PATH", os.pathsep.join(["", ".", "rel", str(tmp_path / "bin")]))
         sec.find_program.cache_clear()
@@ -3032,22 +3031,49 @@ def test_find_program_looks_in_path_only(tmp_path, monkeypatch):
         sec.find_program.cache_clear()
 
 
-@pytest.mark.skipif(os.name != "nt", reason="PATHEXT is Windows only")
-def test_find_program_tries_pathext_in_order(tmp_path, monkeypatch):
+@pytest.mark.skipif(os.name != "nt", reason="Windows only")
+def test_find_program_takes_only_exe_on_windows(tmp_path, monkeypatch):
     import agent_runtime.security as sec
-    for name in ("lf-tool.CMD", "lf-tool.EXE", "lf-only.ps1"):
-        (tmp_path / name).write_text("")
-    monkeypatch.setenv("PATH", str(tmp_path))
+    # Python runs a .cmd/.bat through cmd.exe, which treats & and | in the
+    # arguments as commands; a bare name in CreateProcess only adds .exe.
+    early, late = tmp_path / "early", tmp_path / "late"
+    early.mkdir()
+    late.mkdir()
+    for name in ("lf-tool.cmd", "lf-tool.bat", "lf-tool.com", "lf-only.CMD"):
+        (early / name).write_text("")
+    (late / "lf-tool.EXE").write_text("")
+    monkeypatch.setenv("PATH", os.pathsep.join([str(early), str(late)]))
+    monkeypatch.setenv("PATHEXT", ".COM; .BAT;.CMD; .EXE")
     try:
-        for pathext, want in ((".CMD;.EXE", "lf-tool.CMD"), (".EXE;.CMD", "lf-tool.EXE")):
-            monkeypatch.setenv("PATHEXT", pathext)
-            sec.find_program.cache_clear()
-            assert os.path.normcase(sec.find_program("lf-tool")) == os.path.normcase(str(tmp_path / want))
-        # An extension PATHEXT does not list is not a program.
+        sec.find_program.cache_clear()
+        assert sec.find_program("lf-tool") == str(late / "lf-tool.exe")
         sec.find_program.cache_clear()
         assert sec.find_program("lf-only") is None
     finally:
         sec.find_program.cache_clear()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="cmd.exe runs .cmd files on Windows only")
+def test_read_only_git_root_never_runs_a_cmd_shim(tmp_path, monkeypatch):
+    if shutil.which("git") is None:
+        pytest.skip("git unavailable")
+    import agent_runtime.security as sec
+    # With a git.cmd first on PATH, cmd.exe ran it and split a root named
+    # "r&echo" at the &: a READ_ONLY server ran echo, and rev-parse
+    # "returned" its own arguments.
+    root, shims = tmp_path / "r&echo", tmp_path / "shims"
+    root.mkdir()
+    shims.mkdir()
+    _git_repo(root, ["one"])
+    (shims / "git.cmd").write_text("@exit /b 0\n")
+    monkeypatch.setenv("PATH", os.pathsep.join([str(shims), os.environ["PATH"]]))
+    monkeypatch.setenv("PATHEXT", ".COM;.EXE;.BAT;.CMD")
+    try:
+        sec.find_program.cache_clear()
+        found = make(root, mode="READ_ONLY").cap.workspace("get")["repository_root"]
+    finally:
+        sec.find_program.cache_clear()
+    assert found and Path(found).resolve() == root.resolve(), found
 
 
 @pytest.mark.skipif(os.name != "nt", reason="Windows only")
