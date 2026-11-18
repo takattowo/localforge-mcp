@@ -524,7 +524,7 @@ def _line_occurrences(view, old):
     return spans
 
 
-def _find_spans(view, old, new, expected):
+def _find_spans(view, old, new, expected, exact_only=False):
     """Matches of old in the LF view, the tier that found them, and the
     fallback tiers tried.
 
@@ -542,10 +542,12 @@ def _find_spans(view, old, new, expected):
     (see _numbered_clash); tried then holds that reading's spans.
     """
     exact = _occurrences(view, old)
-    if expected is None:
+    if expected is None or exact_only:
         # replace_all: exact matches only. A fallback match that is
-        # wrong would be repeated at every match, unseen.
-        return exact, "exact" if exact else None, []
+        # wrong would be repeated at every match, unseen. With a count
+        # too (exact_only), exactly that many.
+        found = bool(exact) if expected is None else len(exact) == expected
+        return exact, "exact" if found else None, []
     if exact or "\r" in old or "\r" in new or not old.strip():
         if len(exact) == expected == 1:
             clash = _numbered_clash(view, old, exact[0])
@@ -1336,7 +1338,7 @@ class Capabilities:
                 except OSError as e:
                     _fs_error("replace_text", target, e)
                 updated, counts, tiers, write_eol = self._apply_edits(
-                    original, eol, [(old_text, new_text, expected)],
+                    original, eol, [(old_text, new_text, expected, bool(replace_all))],
                     lambda index, want, found, hint: RuntimeFault(
                         "content_mismatch", ("replace_all found no exact occurrence of old_text." if want is None else
                                              f"Expected {want} occurrence(s), found {found}."
@@ -1377,7 +1379,7 @@ class Capabilities:
                                        f"edits[{index}] old_text and new_text "
                                        "are identical; nothing would change")
                 specs.append((old, new, self._expected(edit.get("replace_all"), edit.get("expected_occurrences"),
-                                                       old, f"edits[{index}]: ")))
+                                                       old, f"edits[{index}]: "), bool(edit.get("replace_all"))))
             with self._locked_paths([target]):
                 try:
                     original, eol, bom, codec = self._read_text(target, encoding)
@@ -1580,7 +1582,7 @@ class Capabilities:
     def _expected(replace_all, expected_occurrences, old, where):
         """Match count an edit needs: None for replace_all alone (every exact
         match, at least one), else expected_occurrences or 1. replace_all with
-        expected_occurrences means every match, and exactly that many."""
+        expected_occurrences means every exact match, and exactly that many."""
         if not old:
             raise RuntimeFault("invalid_arguments", f"{where}old_text is empty; pass the text to replace "
                                                     "(write replaces a whole file)")
@@ -1777,7 +1779,7 @@ class Capabilities:
 
     @staticmethod
     def _apply_edits(original, eol, edits, mismatch):
-        """Apply (old, new, expected) edits in order, all-or-nothing.
+        """Apply (old, new, expected, exact_only) edits in order, all-or-nothing.
 
         Edit strings arrive with LF line breaks. The LF-normalized view
         is what the agent reads, so matches are found there (exactly, or
@@ -1806,13 +1808,13 @@ class Capabilities:
         # whose numbered lines matched the file at the start of the call
         # but no longer do (an earlier edit changed them) is refused too.
         start, shifted = view, None
-        for index, (old, new, expected) in enumerate(edits):
-            numbered = _split_numbered(old) if expected == 1 else None
+        for index, (old, new, expected, exact_only) in enumerate(edits):
+            numbered = _split_numbered(old) if expected == 1 and not exact_only else None
             if numbered is not None and shifted is not None and numbered[0] + len(numbered[1]) - 1 >= shifted:
                 raise RuntimeFault("content_mismatch", f"edits[{index}]: " + NUMBERED_SHIFT_HINT.format(line=shifted))
             if numbered is not None and index and _numbered_span(start, old) and not _numbered_span(view, old):
                 raise RuntimeFault("content_mismatch", f"edits[{index}]: " + NUMBERED_CHANGED_HINT)
-            spans, tier, tried = _find_spans(view, old, new, expected)
+            spans, tier, tried = _find_spans(view, old, new, expected, exact_only)
             if tier == "numbered_clash":
                 found, hint = _clash_miss(view, spans[0], tried[0][1])
                 raise RuntimeFault("content_mismatch", ("" if len(edits) == 1 else f"edits[{index}]: ") +
@@ -1885,10 +1887,14 @@ class Capabilities:
         if int(max_file_size_bytes) <= 0:
             raise RuntimeFault("invalid_arguments", "max_file_size_bytes must be positive")
         context = max(0, min(int(context_lines or 0), 5))
-        # files_only with a query: the files whose content matches, like rg -l.
-        by_content = bool(files_only) and query is not None
+        # files_only with a query lists the files whose content matches, like rg -l: one match per
+        # file, so max_results counts files. An empty query counts as none.
+        by_content = bool(files_only) and bool(query)
+        names_only = bool(files_only) and not by_content
+        if names_only:
+            query = None
         if by_content:
-            files_only = False
+            context = 0
         applied = list(dict.fromkeys([*(exclude or []), *DEFAULT_EXCLUDES]))
         # Read the cwd once: a parallel set_cwd must not change the
         # base between resolving the root and shortening result paths.
@@ -1898,22 +1904,26 @@ class Capabilities:
         rg = find_program("rg")
         if root.is_file():
             if rg:
-                out = self._search_rg_file(rg, root, query, case_sensitive, maximum, files_only, fixed_string, context, applied)
+                out = self._search_rg_file(rg, root, query, case_sensitive, maximum, names_only, fixed_string, context, applied,
+                                           first_only=by_content)
             else:
-                out = self._search_python_file(root, query, case_sensitive, maximum, files_only, fixed_string, context, int(max_file_size_bytes), applied)
+                out = self._search_python_file(root, query, case_sensitive, maximum, names_only, fixed_string, context,
+                                               int(max_file_size_bytes), applied, first_only=by_content)
         elif not root.is_dir():
             raise RuntimeFault("not_directory", f"Not a directory: {root}")
         elif rg:
-            out = self._search_rg(rg, root, query, glob or [], applied, case_sensitive, maximum, files_only, fixed_string, context, bool(include_hidden))
+            out = self._search_rg(rg, root, query, glob or [], applied, case_sensitive, maximum, names_only, fixed_string,
+                                  context, bool(include_hidden), first_only=by_content)
         else:
-            out = self._search_python(root, query, glob or [], applied, case_sensitive, maximum, files_only, fixed_string, context, int(max_file_size_bytes), bool(include_hidden))
-        if not files_only:
+            out = self._search_python(root, query, glob or [], applied, case_sensitive, maximum, names_only, fixed_string,
+                                      context, int(max_file_size_bytes), bool(include_hidden), first_only=by_content)
+        if not names_only:
             self._group_by_file(out)
         if by_content:
             for entry in out["results"]:
                 entry.pop("matches", None)
-            out = self._noted(out, "files_only with a query lists the files whose content matches; "
-                                   "max_results still counts matches.")
+            out = self._noted(out, "files_only with a query lists the files whose content matches, one entry "
+                                   "per file (like rg -l).")
         # With require_absolute_paths, edits must name absolute paths; absolute hits keep them the file that was read.
         if not self.cfg.require_absolute_paths:
             out = self._short_paths(base, out)
@@ -2028,7 +2038,8 @@ class Capabilities:
                 return retry
         return result
 
-    def _search_rg(self, rg, root, query, includes, excludes, case_sensitive, maximum, files_only, fixed_string, context, include_hidden):
+    def _search_rg(self, rg, root, query, includes, excludes, case_sensitive, maximum, files_only, fixed_string, context, include_hidden,
+                   first_only=False):
         command = [rg]
         if include_hidden:
             command.append("--hidden")
@@ -2058,6 +2069,9 @@ class Capabilities:
             command.append("-i")
         if context > 0:
             command += ["-C", str(context)]
+        if first_only:
+            # One match per file: the caller lists files, like rg -l.
+            command += ["-m", "1"]
         # -e: a query starting with - (--verbose, -1) is a pattern, not an option.
         command += ["-e", query, str(root)]
         notes = []
@@ -2115,7 +2129,8 @@ class Capabilities:
             j += step
         return lines[::-1] if step < 0 else lines
 
-    def _search_rg_file(self, rg, target, query, case_sensitive, maximum, files_only, fixed_string, context, applied):
+    def _search_rg_file(self, rg, target, query, case_sensitive, maximum, files_only, fixed_string, context, applied,
+                        first_only=False):
         if files_only:
             return {"engine": "ripgrep", "results": [{"path": str(target)}], "exit_code": 0, "truncated": False, "applied_excludes": applied}
         if query is None:
@@ -2127,6 +2142,9 @@ class Capabilities:
             command.append("-i")
         if context > 0:
             command += ["-C", str(context)]
+        if first_only:
+            # One match per file: the caller lists files, like rg -l.
+            command += ["-m", "1"]
         # -e: a query starting with - (--verbose, -1) is a pattern, not an option.
         command += ["-e", query, str(target)]
         notes = []
@@ -2148,7 +2166,8 @@ class Capabilities:
             out["error"] = err
         return out
 
-    def _search_python_file(self, target, query, case_sensitive, maximum, files_only, fixed_string, context, max_size, applied):
+    def _search_python_file(self, target, query, case_sensitive, maximum, files_only, fixed_string, context, max_size, applied,
+                            first_only=False):
         if files_only:
             return {"engine": "python", "results": [{"path": str(target)}], "truncated": False, "applied_excludes": applied}
         if query is None:
@@ -2158,7 +2177,8 @@ class Capabilities:
                 return {"engine": "python", "results": [], "truncated": False, "applied_excludes": applied}
         except OSError:
             return {"engine": "python", "results": [], "truncated": False, "applied_excludes": applied}
-        return self._search_python(target, query, [], applied, case_sensitive, maximum, False, fixed_string, context, max_size, True)
+        return self._search_python(target, query, [], applied, case_sensitive, maximum, False, fixed_string, context, max_size, True,
+                                   first_only=first_only)
 
     @staticmethod
     def _compile_fallback(query, fixed_string, case_sensitive):
@@ -2170,7 +2190,8 @@ class Capabilities:
             raise RuntimeFault("invalid_arguments", f"Invalid regex: {e}") from e
 
     @staticmethod
-    def _search_python(root, query, includes, excludes, case_sensitive, maximum, files_only, fixed_string, context, max_size, include_hidden):
+    def _search_python(root, query, includes, excludes, case_sensitive, maximum, files_only, fixed_string, context, max_size, include_hidden,
+                       first_only=False):
         results = []
         pattern = Capabilities._compile_fallback(query, fixed_string, case_sensitive) if query is not None else None
         include_res = [r for r in (_glob_regex(p, folders=False) for p in includes) if r is not None]
@@ -2244,6 +2265,8 @@ class Capabilities:
                                 entry["before"] = [f"{n}\t{_cap_line(lines[n - 1])}" for n in range(max(1, number - context), number)]
                                 entry["after"] = [f"{n}\t{_cap_line(lines[n - 1])}" for n in range(number + 1, min(len(lines), number + context) + 1)]
                             results.append(entry)
+                            if first_only:
+                                break
                 except OSError:
                     pass
                 if stopped:
@@ -2258,8 +2281,12 @@ class Capabilities:
         work = self.paths.resolve(cwd or ".", cwd=self.cwd, access="read", must_exist=True)
         if include_untracked and action == "diff":
             return self._diff_untracked(work, list(args or []))
-        ignored = (f"include_untracked only changes diff, so it was ignored for {action}"
-                   + (" (status lists untracked files anyway)." if action == "status" else ".")) if include_untracked else None
+        ignored = None
+        if include_untracked and action == "status":
+            # Every untracked file, even where status.showUntrackedFiles hides them.
+            args = [*(args or []), "--untracked-files=all"]
+        elif include_untracked:
+            ignored = f"include_untracked only changes diff and status, so it was ignored for {action}."
         presets = {
             "status": ["status", "--porcelain=v2", "--branch"], "diff": ["diff"],
             "log": ["log", "--oneline", "-n", "20"], "show": ["show"],
