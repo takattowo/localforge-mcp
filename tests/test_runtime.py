@@ -2944,6 +2944,53 @@ def test_find_pwsh_checks_install_folders(tmp_path, monkeypatch):
         sec.find_pwsh.cache_clear()
 
 
+def test_find_program_looks_in_path_only(tmp_path, monkeypatch):
+    import agent_runtime.security as sec
+    ext = ".EXE" if os.name == "nt" else ""
+
+    def fake(folder):
+        folder.mkdir(exist_ok=True)
+        exe = folder / ("lf-prog" + ext)
+        exe.write_text("")
+        exe.chmod(0o755)
+        return os.path.normcase(str(exe))
+
+    # A copy in the cwd, one in a folder named by a relative PATH entry,
+    # and the real one in an absolute PATH entry.
+    fake(tmp_path)
+    fake(tmp_path / "rel")
+    on_path = fake(tmp_path / "bin")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PATHEXT", ".COM;.EXE")
+    try:
+        monkeypatch.setenv("PATH", os.pathsep.join(["", ".", "rel", str(tmp_path / "bin")]))
+        sec.find_program.cache_clear()
+        assert os.path.normcase(sec.find_program("lf-prog")) == on_path
+        monkeypatch.setenv("PATH", os.pathsep.join(["", ".", "rel"]))
+        sec.find_program.cache_clear()
+        assert sec.find_program("lf-prog") is None
+    finally:
+        sec.find_program.cache_clear()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="PATHEXT is Windows only")
+def test_find_program_tries_pathext_in_order(tmp_path, monkeypatch):
+    import agent_runtime.security as sec
+    for name in ("lf-tool.CMD", "lf-tool.EXE", "lf-only.ps1"):
+        (tmp_path / name).write_text("")
+    monkeypatch.setenv("PATH", str(tmp_path))
+    try:
+        for pathext, want in ((".CMD;.EXE", "lf-tool.CMD"), (".EXE;.CMD", "lf-tool.EXE")):
+            monkeypatch.setenv("PATHEXT", pathext)
+            sec.find_program.cache_clear()
+            assert os.path.normcase(sec.find_program("lf-tool")) == os.path.normcase(str(tmp_path / want))
+        # An extension PATHEXT does not list is not a program.
+        sec.find_program.cache_clear()
+        assert sec.find_program("lf-only") is None
+    finally:
+        sec.find_program.cache_clear()
+
+
 @pytest.mark.skipif(os.name != "nt", reason="Windows only")
 def test_pwsh_string_commands_support_and_and(tmp_path):
     import agent_runtime.security as sec

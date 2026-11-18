@@ -161,6 +161,29 @@ def find_pwsh():
     return next((str(c) for c in candidates if c.exists()), None)
 
 
+@functools.lru_cache(maxsize=None)
+def find_program(name):
+    """Absolute path to program name from the PATH entries only, or None.
+
+    Never the current folder: for a bare name, Windows CreateProcess
+    (and shutil.which) look there before PATH, so a planted git.exe
+    would run. Empty, "." and relative entries are skipped too; on
+    Windows each PATHEXT extension is tried in order. Cached; restart
+    the server to pick up a new install.
+    """
+    exts = [""]
+    if os.name == "nt":
+        exts = [e for e in os.environ.get("PATHEXT", ".COM;.EXE;.BAT;.CMD").split(os.pathsep) if e]
+    for folder in os.environ.get("PATH", "").split(os.pathsep):
+        if not os.path.isabs(folder):
+            continue
+        for ext in exts:
+            candidate = os.path.join(folder, name + ext)
+            if os.path.isfile(candidate) and os.access(candidate, os.X_OK):
+                return candidate
+    return None
+
+
 def resolve_shell(name):
     """Turn default_shell "auto" into a concrete shell; other names pass through.
 
