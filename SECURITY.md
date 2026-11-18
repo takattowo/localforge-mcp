@@ -18,7 +18,7 @@ Git-root retry: a relative path missing from the runtime cwd can be resolved fro
 
 Untracked diff: `git` `diff` with `include_untracked` runs `git ls-files`, `git rev-parse`, `git add --intent-to-add` and both `git diff` runs (against the real index, then the throwaway one) itself, outside `execute`, under the same command policy as a plain `git diff`. The add goes to a fresh throwaway index (`GIT_INDEX_FILE` in the temp folder, deleted afterwards); the real index is never touched.
 
-Internal git and ripgrep: the `git` tool, `workspace get`'s git calls and `search` run git and `rg` by the full path found in the `PATH` entries, never from the current folder (a bare name on Windows would also run a `git.exe` planted there). User commands in `execute` and `process` are resolved as before.
+Internal git and ripgrep: the `git` tool, `workspace get`'s git calls and `search` run git and `rg` by the full path found in the `PATH` entries, never from the current folder (a bare name on Windows would also run a `git.exe` planted there). On Windows only `git.exe`/`rg.exe` count, never a `.cmd`/`.bat`/`.com` earlier on `PATH`: Python runs those through `cmd.exe`, which treats `&` and `|` in the arguments (a folder name, say) as commands. `pwsh` for string commands is found the same way, then in its install folders. User commands in `execute` and `process` are resolved as before, but classified slightly differently for `network`: the program's folder no longer counts toward network detection, and a full-path `git.exe` `push`/`pull`/`fetch` is now treated as network (it used to slip through).
 
 ## Reporting
 
