@@ -78,7 +78,7 @@ class PathPolicy:
         return p
 
 class Policy:
-    NETWORK_TOOLS = {"curl", "curl.exe", "wget", "git", "npm", "npm.cmd", "npx", "npx.cmd", "pnpm", "pnpm.cmd", "yarn", "yarn.cmd", "pip", "pip3", "python", "python.exe", "py", "docker", "docker.exe", "gh", "gh.exe"}
+    NETWORK_TOOLS = {"curl", "curl.exe", "wget", "git", "git.exe", "npm", "npm.cmd", "npx", "npx.cmd", "pnpm", "pnpm.cmd", "yarn", "yarn.cmd", "pip", "pip3", "python", "python.exe", "py", "docker", "docker.exe", "gh", "gh.exe"}
     NETWORK_MARKERS = ("install", "fetch", "pull", "push", "clone", "http://", "https://")
     # gh subcommands almost always hit the GitHub API; only local-only
     # invocations are exempt from network classification.
@@ -107,7 +107,9 @@ class Policy:
         else:
             raise RuntimeFault("invalid_command", "Command must be a non-empty string or string array")
         exe = Path(head.strip('"')).name.lower()
-        lowered = display.lower()
+        # Markers are looked for past the program's folder: a full path to
+        # git under, say, D:\installs is still plain git.
+        lowered = " ".join([exe, *command[1:]]).lower() if isinstance(command, list) else display.lower()
         if exe in {"gh", "gh.exe"}:
             network = not any(marker in lowered for marker in self.GH_LOCAL_ONLY)
         else:

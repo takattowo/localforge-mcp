@@ -24,7 +24,7 @@ from .errors import RuntimeFault
 from .patch import build_new as build_patched
 from .patch import parse as parse_diff
 from .processes import held
-from .security import coerce_command, git_environment, redact, safe_environment
+from .security import coerce_command, find_program, git_environment, redact, safe_environment
 
 def _fs_error(action, target, exc):
     if isinstance(exc, FileNotFoundError):
@@ -846,6 +846,13 @@ def _numbered(number, body, length, budget):
         text = text[:max(0, budget - len(LINE_CUT))] + LINE_CUT
     return text
 
+def _git_program():
+    # From PATH only: a bare "git" would also run a git.exe in the cwd.
+    git = find_program("git")
+    if git is None:
+        raise RuntimeFault("command_not_found", "Program not found: git. Check PATH.")
+    return git
+
 class Capabilities:
     def __init__(self, cfg, paths, policy, processes, store=None):
         self.cfg, self.paths, self.policy, self.processes = cfg, paths, policy, processes
@@ -961,11 +968,11 @@ class Capabilities:
         def git(*args):
             try:
                 result = subprocess.run(
-                    ["git", "-c", "core.quotepath=false", "-c", "core.fsmonitor=false",
+                    [_git_program(), "-c", "core.quotepath=false", "-c", "core.fsmonitor=false",
                      "-c", "log.showSignature=false", "-C", str(cwd), *args],
                     capture_output=True, text=True, encoding="utf-8", errors="replace",
                     timeout=GIT_STATE_TIMEOUT_SECONDS, stdin=subprocess.DEVNULL, env=env)
-            except (OSError, subprocess.TimeoutExpired):
+            except (OSError, subprocess.TimeoutExpired, RuntimeFault):
                 return None
             return redact(result.stdout) if result.returncode == 0 else None
 
@@ -1049,14 +1056,14 @@ class Capabilities:
         root = None
         try:
             result = subprocess.run(
-                ["git", "-C", key, "rev-parse", "--show-toplevel"],
+                [_git_program(), "-C", key, "rev-parse", "--show-toplevel"],
                 capture_output=True, text=True, encoding="utf-8", errors="replace", timeout=5,
                 stdin=subprocess.DEVNULL,
                 env=safe_environment(self.cfg),
             )
             if result.returncode == 0:
                 root = result.stdout.strip() or None
-        except (OSError, subprocess.TimeoutExpired):
+        except (OSError, subprocess.TimeoutExpired, RuntimeFault):
             pass
         with self._git_lock:
             self._git_root_cache = (key, root, time.monotonic())
@@ -1875,7 +1882,7 @@ class Capabilities:
         base = self.cwd
         root, note = self._resolve_existing(path, "read", retry=True, cwd=base)
         maximum = max(1, min(int(max_results), 5000))
-        rg = shutil.which("rg")
+        rg = find_program("rg")
         if root.is_file():
             if rg:
                 out = self._search_rg_file(rg, root, query, case_sensitive, maximum, files_only, fixed_string, context, applied)
@@ -2253,7 +2260,7 @@ class Capabilities:
         # octal escapes like "f\303\251.txt".
         # kill_on_timeout: a git command must not linger in the background.
         # The presets only read: no optional locks for them.
-        return self.execute(["git", "-c", "core.quotepath=false", "-C", str(work)] + subcommand + ([] if action == "run" else list(args or [])), cwd=str(work),
+        return self.execute([_git_program(), "-c", "core.quotepath=false", "-C", str(work)] + subcommand + ([] if action == "run" else list(args or [])), cwd=str(work),
                             env=git_environment(self.cfg, action != "run"), kill_on_timeout=True)
 
     def _diff_untracked(self, work, args):
@@ -2278,7 +2285,7 @@ class Capabilities:
         # color.diff=never (it beats color.ui): colour from git config would
         # hide the "diff --git" headers new files are counted and cut at. A
         # --color flag beats it, so that is refused below.
-        git = ["git", "-c", "core.quotepath=false", "-c", "color.diff=never", "-C", str(work)]
+        git = [_git_program(), "-c", "core.quotepath=false", "-c", "color.diff=never", "-C", str(work)]
         # Every git command here, both diffs included, runs through run()
         # below, outside execute, under the command policy a plain diff gets.
         self.policy.authorize_command(git + ["diff", *args], work, False)

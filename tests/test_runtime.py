@@ -304,7 +304,7 @@ def test_process_wait_from_a_read_cursor_never_repeats_what_read_showed(tmp_path
 @pytest.mark.parametrize("engine", ["ripgrep", "python"])
 def test_long_lines_are_cut_in_reads_and_search(tmp_path, monkeypatch, engine):
     if engine == "python":
-        monkeypatch.setattr(shutil, "which", lambda name: None)
+        monkeypatch.setattr("agent_runtime.capabilities.find_program", lambda name: None)
     elif shutil.which("rg") is None:
         pytest.skip("rg unavailable")
     server = make(tmp_path)
@@ -653,7 +653,7 @@ def test_search_fallback_and_git(tmp_path, monkeypatch):
     server = make(tmp_path)
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "x.py").write_text("# TODO UserService\n")
-    monkeypatch.setattr(shutil, "which", lambda name: None)
+    monkeypatch.setattr("agent_runtime.capabilities.find_program", lambda name: None)
     result = server.cap.search("UserService", glob=["*.py"])
     assert result["results"][0]["matches"][0]["line"] == 1
     files = server.cap.search(path=".", glob=["*.py"], files_only=True)
@@ -696,14 +696,13 @@ def test_call_logs_to_stderr_only(tmp_path, capsys):
     assert captured.out == ""
 
 def test_search_defaults_and_guards(tmp_path, monkeypatch):
-    import shutil
     server = make(tmp_path)
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "hit.py").write_text("line one\nUserService here\nline three\nline four\n")
     (tmp_path / ".venv").mkdir()
     (tmp_path / ".venv" / "skip.py").write_text("UserService vendored\n")
     (tmp_path / "big.py").write_bytes(b"x" * (1_000_000 + 10) + b"UserService\n")
-    monkeypatch.setattr(shutil, "which", lambda name: None)
+    monkeypatch.setattr("agent_runtime.capabilities.find_program", lambda name: None)
     content = server.cap.search("UserService")
     paths = [r["path"] for r in content["results"]]
     assert os.path.join("src", "hit.py") in paths
@@ -1228,12 +1227,38 @@ def test_gh_counts_as_network(tmp_path):
     assert exc.value.code == "network_denied"
 
 
+def test_git_tool_push_counts_as_network(tmp_path):
+    # The git tool runs git by its full path (git.exe on Windows).
+    if shutil.which("git") is None:
+        pytest.skip("git unavailable")
+    offline = make(tmp_path, network="disabled")
+    with pytest.raises(RuntimeFault) as exc:
+        offline.cap.git("run", ["push"])
+    assert exc.value.code == "network_denied"
+
+
+def test_policy_treats_full_path_git_like_git(tmp_path):
+    # Internal calls pass git's full path; folder names like "installs"
+    # must not count as network markers.
+    exe = "git.exe" if os.name == "nt" else "git"
+    full = os.path.join(os.sep, "installs", "pull", "Git", "cmd", exe)
+    server = make(tmp_path)
+    for args in (["status"], ["diff", "--stat"], ["push"], ["fetch", "origin"]):
+        bare = server.policy.authorize_command(["git", *args], str(tmp_path))
+        path = server.policy.authorize_command([full, *args], str(tmp_path))
+        assert path["network_classified"] == bare["network_classified"], args
+    offline = make(tmp_path, network="disabled")
+    offline.policy.authorize_command([full, "status"], str(tmp_path))
+    with pytest.raises(RuntimeFault) as exc:
+        offline.policy.authorize_command([full, "push"], str(tmp_path))
+    assert exc.value.code == "network_denied"
+
+
 def test_python_fallback_honors_regex(tmp_path, monkeypatch):
-    import shutil
     server = make(tmp_path)
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "hit.py").write_text("line one\nUserService here\nline three\n")
-    monkeypatch.setattr(shutil, "which", lambda name: None)
+    monkeypatch.setattr("agent_runtime.capabilities.find_program", lambda name: None)
     found = server.cap.search("User.*here", fixed_string=False)
     assert found["engine"] == "python" and len(found["results"]) == 1
     literal = server.cap.search("User.*here")
@@ -1266,11 +1291,10 @@ def test_replace_text_rejects_identical_and_hints_count(tmp_path):
 
 
 def test_search_surfaces_rg_errors(tmp_path, monkeypatch):
-    import shutil
     import subprocess
     server = make(tmp_path)
     (tmp_path / "a.txt").write_text("hello\n")
-    monkeypatch.setattr(shutil, "which", lambda name: "rg" if name == "rg" else None)
+    monkeypatch.setattr("agent_runtime.capabilities.find_program", lambda name: "rg" if name == "rg" else None)
     real_run = subprocess.run
     def fake_error(*args, **kwargs):
         class R:
@@ -2080,7 +2104,7 @@ def test_search_context_near_matches_and_lone_cr(tmp_path, monkeypatch, engine):
     if engine == "ripgrep" and not shutil.which("rg"):
         pytest.skip("ripgrep unavailable")
     if engine == "python":
-        monkeypatch.setattr(shutil, "which", lambda name: None)
+        monkeypatch.setattr("agent_runtime.capabilities.find_program", lambda name: None)
     server = make(tmp_path)
     (tmp_path / "a.txt").write_bytes(b"x\ry\nhit\nhit\nz\n")
     out = server.cap.search("hit", context_lines=1)
@@ -2237,7 +2261,7 @@ def test_search_folder_glob_and_exact_truncation(tmp_path, monkeypatch, engine):
     if engine == "ripgrep" and not shutil.which("rg"):
         pytest.skip("ripgrep unavailable")
     if engine == "python":
-        monkeypatch.setattr(shutil, "which", lambda name: None)
+        monkeypatch.setattr("agent_runtime.capabilities.find_program", lambda name: None)
     server = make(tmp_path)
     for folder in ("src", "other"):
         (tmp_path / folder).mkdir()
@@ -2269,7 +2293,7 @@ def test_search_spreads_capped_matches_across_files(tmp_path, monkeypatch, engin
     if engine == "ripgrep" and not shutil.which("rg"):
         pytest.skip("ripgrep unavailable")
     if engine == "python":
-        monkeypatch.setattr(shutil, "which", lambda name: None)
+        monkeypatch.setattr("agent_runtime.capabilities.find_program", lambda name: None)
     server = make(tmp_path)
     for name in ("a.txt", "b.txt", "c.txt"):
         (tmp_path / name).write_text("hit\n" * 300)
@@ -2290,7 +2314,7 @@ def test_search_spreads_capped_matches_across_files(tmp_path, monkeypatch, engin
 
 
 def test_python_search_total_is_exact_unless_it_stopped_early(tmp_path, monkeypatch):
-    monkeypatch.setattr(shutil, "which", lambda name: None)
+    monkeypatch.setattr("agent_runtime.capabilities.find_program", lambda name: None)
     server = make(tmp_path)
     # max_results 1 collects at most 5: five files fill it exactly.
     for n in range(5):
@@ -2309,7 +2333,7 @@ def test_search_globs_follow_ripgrep_rules(tmp_path, monkeypatch, engine):
     if engine == "ripgrep" and not shutil.which("rg"):
         pytest.skip("ripgrep unavailable")
     if engine == "python":
-        monkeypatch.setattr(shutil, "which", lambda name: None)
+        monkeypatch.setattr("agent_runtime.capabilities.find_program", lambda name: None)
     server = make(tmp_path)
     for rel in ("src/a.py", "src/deep/a.py", "src/deep/er/y.cs", "a/src/x.py", "scripts/build",
                 "pkg/node_modules/x.js", "pkg/build/out.txt", "pkg/dist/b.js"):
@@ -2369,7 +2393,7 @@ def test_search_globs_follow_ripgrep_rules(tmp_path, monkeypatch, engine):
 
 
 def test_python_glob_fallback_is_bounded(tmp_path, monkeypatch):
-    monkeypatch.setattr(shutil, "which", lambda name: None)
+    monkeypatch.setattr("agent_runtime.capabilities.find_program", lambda name: None)
     server = make(tmp_path)
     (tmp_path / ("a" * 40 + ".txt")).write_text("hit\n")
     deep = tmp_path.joinpath(*["x"] * 30)
@@ -2481,7 +2505,7 @@ def test_search_context_numbered_and_per_file(tmp_path, monkeypatch, engine):
     if engine == "ripgrep" and not shutil.which("rg"):
         pytest.skip("ripgrep unavailable")
     if engine == "python":
-        monkeypatch.setattr(shutil, "which", lambda name: None)
+        monkeypatch.setattr("agent_runtime.capabilities.find_program", lambda name: None)
     server = make(tmp_path)
     (tmp_path / "a.txt").write_text("a1\na2\nhit\n")
     (tmp_path / "b.txt").write_text("hit\nb2\nb3\n")
@@ -2834,6 +2858,41 @@ def test_workspace_info_reads_the_cwd_once(tmp_path, monkeypatch):
     assert info["recent_commits"][0].endswith(" in a")
 
 
+@pytest.mark.skipif(os.name != "nt", reason="CreateProcess looks in the cwd on Windows only")
+def test_internal_git_and_rg_ignore_programs_in_the_cwd(tmp_path, monkeypatch):
+    if shutil.which("git") is None:
+        pytest.skip("git unavailable")
+    repo, plant = tmp_path / "repo", tmp_path / "plant"
+    repo.mkdir()
+    plant.mkdir()
+    _git_repo(repo, ["one"])
+    # Stand-ins that print the user name: if one ran, its output shows.
+    whoami = Path(os.environ.get("SystemRoot", r"C:\Windows")) / "System32" / "whoami.exe"
+    for name in ("git.exe", "rg.exe"):
+        shutil.copy(whoami, plant / name)
+    me = subprocess.run([str(whoami)], capture_output=True, text=True).stdout.strip().lower()
+    monkeypatch.chdir(plant)
+    server = make(repo)
+    info = server.cap.workspace("get")
+    assert info["repository_root"] and Path(info["repository_root"]).resolve() == repo.resolve()
+    assert info["branch"] == "work"
+    version = server.cap.git("run", ["--version"])
+    assert version["stdout"].startswith("git version")
+    assert me not in (version["stdout"] + version["stderr"]).lower()
+    found = server.cap.search("0", path=".")
+    assert "error" not in found and [r["path"] for r in found["results"]] == ["f.txt"]
+
+
+def test_missing_git_gives_no_root_and_a_clear_fault(tmp_path, monkeypatch):
+    monkeypatch.setattr("agent_runtime.capabilities.find_program", lambda name: None)
+    server = make(tmp_path)
+    assert server.cap.workspace("get")["repository_root"] is None
+    for call in (lambda: server.cap.git("status"), lambda: server.cap.git("diff", include_untracked=True)):
+        with pytest.raises(RuntimeFault) as exc:
+            call()
+        assert exc.value.code == "command_not_found" and exc.value.message.startswith("Program not found: git.")
+
+
 def test_project_instructions_follow_the_folder_chain_and_switch(tmp_path, monkeypatch):
     if shutil.which("git") is None:
         pytest.skip("git unavailable")
@@ -3078,7 +3137,7 @@ def test_git_never_waits_on_a_prompt_or_editor(tmp_path, monkeypatch):
     monkeypatch.undo()
     seen, run = [], subprocess.run
     def spy(argv, *a, **kw):
-        if argv[0] == "git":
+        if Path(argv[0]).stem.lower() == "git":
             seen.append(kw.get("env") or {})
         return run(argv, *a, **kw)
     monkeypatch.setattr(caps.subprocess, "run", spy)
@@ -3906,7 +3965,7 @@ def test_search_groups_matches_by_file(tmp_path, monkeypatch, engine):
     if engine == "ripgrep" and not shutil.which("rg"):
         pytest.skip("ripgrep unavailable")
     if engine == "python":
-        monkeypatch.setattr(shutil, "which", lambda name: None)
+        monkeypatch.setattr("agent_runtime.capabilities.find_program", lambda name: None)
     server = make(tmp_path)
     (tmp_path / "a.txt").write_text("hit one\nmiss\nhit two\n")
     (tmp_path / "b.txt").write_text("hit three\n")
