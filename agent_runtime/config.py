@@ -6,6 +6,8 @@ import os
 from .security import resolve_shell
 
 MODES = {"READ_ONLY", "WORKSPACE", "DEVELOPMENT", "FULL_ACCESS"}
+# The repo folder: localforge.json there is used when no variable names a config.
+SERVER_DIR = Path(__file__).resolve().parent.parent
 NETWORK_MODES = {"disabled", "unrestricted"}
 
 @dataclass
@@ -71,7 +73,11 @@ class Config:
 
     @classmethod
     def load(cls, path: str | None = None) -> "Config":
-        path = path or os.environ.get("LOCALFORGE_CONFIG") or os.environ.get("WIN_AGENT_RUNTIME_CONFIG") or "localforge.json"
+        path = path or os.environ.get("LOCALFORGE_CONFIG") or os.environ.get("WIN_AGENT_RUNTIME_CONFIG")
+        if not path:
+            path = "localforge.json"
+            if not Path(path).is_file() and (SERVER_DIR / path).is_file():
+                path = SERVER_DIR / path
         data = json.loads(Path(path).read_text(encoding="utf-8"))
         # Compatibility with 1.0 configuration.
         if "shell" in data and "default_shell" not in data:

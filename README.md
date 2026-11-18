@@ -38,7 +38,7 @@ Create a **Local** MCP connection:
 
 Toggle the connection off and on (or restart Quick) after changing the config: it is read once at startup. Other MCP clients use the same command, arguments and environment (transport is stdio, protocol `2025-06-18`). [`QUICK.md`](QUICK.md) has optional agent rules to paste into the connection's prompt.
 
-Without `LOCALFORGE_CONFIG` the server tries the older `WIN_AGENT_RUNTIME_CONFIG`, then `localforge.json` in its working directory.
+Without `LOCALFORGE_CONFIG` the server tries the older `WIN_AGENT_RUNTIME_CONFIG`, then `localforge.json` in its working directory, then `localforge.json` next to the server (the repo folder), so the variable is optional when the config sits there.
 
 Smoke test: run the same command in a terminal with `$env:LOCALFORGE_CONFIG` set. A blank terminal means it is waiting for newline-delimited JSON-RPC on stdin; `Ctrl+C` stops it.
 

@@ -2428,6 +2428,23 @@ def test_config_rejects_tiny_max_read_chars(tmp_path):
         Config.load(str(path))
 
 
+def test_config_falls_back_to_the_server_folder(tmp_path, monkeypatch):
+    import agent_runtime.config as cfg
+    monkeypatch.delenv("LOCALFORGE_CONFIG", raising=False)
+    monkeypatch.delenv("WIN_AGENT_RUNTIME_CONFIG", raising=False)
+    home = tmp_path / "server"
+    home.mkdir()
+    (home / "localforge.json").write_text(json.dumps({"workspace_root": str(tmp_path), "max_processes": 7}))
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    monkeypatch.setattr(cfg, "SERVER_DIR", home)
+    assert Config.load().max_processes == 7
+    # A localforge.json in the working directory still comes first.
+    (elsewhere / "localforge.json").write_text(json.dumps({"workspace_root": str(tmp_path), "max_processes": 3}))
+    assert Config.load().max_processes == 3
+
+
 def test_execute_clip_keeps_head_and_tail(tmp_path):
     server = make(tmp_path, max_capture_bytes=1000)
     out = server.cap.execute([sys.executable, "-c", "print('HEAD' + 'x' * 5000 + 'TAIL')"])
