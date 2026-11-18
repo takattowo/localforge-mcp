@@ -110,7 +110,7 @@ Several repositories under one parent: use `C:\src` for `workspace_root` and bot
 | `log_to_client` | `false` | MCP log notification per tool call (`LOCALFORGE_LOG=1` writes it to stderr). |
 | `structured_content` | `false` | Add `structuredContent` to tool results. |
 | `advanced_features` | `false` | See [Advanced features](#advanced-features). |
-| `require_absolute_paths` | `true` | File changes, `git`, `execute` and `process start` need an absolute `path`/`destination`/`cwd` (`relative_path` otherwise), since the runtime cwd is shared by every chat and task of the client. Search hits are then absolute. `false` lets them use the cwd. |
+| `require_absolute_paths` | `true` | Every call names its location: `filesystem` and `search` (and each `multi_search` entry) an absolute `path`/`destination` or an absolute `cwd`; `git`, `execute` and `process start` an absolute `cwd`. Otherwise `relative_path`, since the runtime cwd is shared by every chat and task of the client. Search hits are then absolute. `false` lets calls use the runtime cwd. |
 
 `edit_checks` example (keep checks as argv arrays: wrapping one in `cmd /c` or `powershell -Command` lets a crafted file name inject shell syntax):
 
@@ -130,11 +130,13 @@ Argument names are forgiving (`old`/`find` for `old_text`, `new`/`replacement` f
 ### `workspace`
 
 - `get`: workspace root, cwd, Git root, and `project_instructions`: the instruction files in every folder from the Git root (or `workspace_root`) down to the cwd, outermost first, within `max_project_instruction_bytes` (a file past it is listed as `{"path", "skipped": "budget"}`). In a Git repo also `branch` (`(detached at <sha>)` on a detached HEAD), `dirty` (`git status --porcelain` lines, at most 50; `dirty_truncated` and `dirty_count` when cut) and `recent_commits` (the last 5 as `<sha> <subject>`); a field whose git call fails or takes over 5 s is left out. Git state needs a mode that allows running git (`DEVELOPMENT`, `FULL_ACCESS`); `READ_ONLY` and `WORKSPACE` leave it out, since `git status` runs programs named in `.git/config`. Call it once at the start of a task.
-- `set_cwd`: change the cwd inside the read roots; returns the same fields. Use it to switch projects; for a one-off command pass `cwd` instead. `cd` inside a command does not carry over. In `batch` it needs `sequential: true`. The cwd is shared by every chat and task, so with `require_absolute_paths` (default) it only serves reads and searches; changes and commands name their own absolute location. A relative read can still pick up another chat's folder, so edit the absolute `path` a read or search returned, not one you built from the cwd.
+- `set_cwd`: change the cwd inside the read roots; returns the same fields. Use it to switch projects; for a one-off command pass `cwd` instead. `cd` inside a command does not carry over. In `batch` it needs `sequential: true`. The cwd is shared by every chat and task, so with `require_absolute_paths` (default) only `workspace` itself uses it: every other call passes an absolute `cwd` or absolute paths.
 
 ### `filesystem`
 
 Actions: `read`, `list`, `stat`, `write`, `replace_text`, `apply_patch`, `mkdir`, `delete`, `move`, `copy` (and `multi_edit`, see [Advanced features](#advanced-features)).
+
+`path` and `destination` are absolute, or relative to the call's `cwd` argument (an absolute folder). Without `cwd` they use the runtime cwd, which `require_absolute_paths` (default) refuses.
 
 - `read`: byte mode by default (`offset`, `max_bytes`). Pass `line_start`/`line_end` for line mode: numbered `N<TAB>line` text, up to 2000 lines or `max_read_chars`, each line cut to 2000 characters (`...[line cut: N chars]`); continue from `next_line`; `total_lines` when the read reaches the end. A negative `line_start` (`-50`) reads the last lines; one past the end returns the last lines with a `note`. `read` on a directory lists it, with a `note`.
 - `list`: paginated (`limit` default 200, max 1000; `offset`), with `glob` and `include_hidden`.
@@ -148,7 +150,7 @@ Actions: `read`, `list`, `stat`, `write`, `replace_text`, `apply_patch`, `mkdir`
 
 ### `search`
 
-Text or filename search with `glob`/`exclude` (ripgrep rules; `.git`, `.venv`, `node_modules` and similar are always excluded), `case_sensitive`, `fixed_string` (default true; false for regex), `context_lines` (0-5), `files_only`, `include_hidden`, `max_file_size_bytes`. Results are grouped by file: `[{path, matches: [{line, text, before?, after?}]}]` with `match_count`. `max_results` (default 200) counts matches; a cut page is spread round-robin across files (`"spread": true`) and gives `total_matches` (or `total_matches_at_least` from the Python engine). Long lines are cut to 2000 characters. A regex ripgrep's default engine rejects (look-around, backreferences) is retried with `--pcre2` when available, with a `note`. A ripgrep run over 60 s fails with `timeout`.
+Text or filename search under `path` (absolute, or relative to the call's `cwd`, as for `filesystem`; each `multi_search` entry takes its own `cwd`) with `glob`/`exclude` (ripgrep rules; `.git`, `.venv`, `node_modules` and similar are always excluded), `case_sensitive`, `fixed_string` (default true; false for regex), `context_lines` (0-5), `files_only`, `include_hidden`, `max_file_size_bytes`. Results are grouped by file: `[{path, matches: [{line, text, before?, after?}]}]` with `match_count`. `max_results` (default 200) counts matches; a cut page is spread round-robin across files (`"spread": true`) and gives `total_matches` (or `total_matches_at_least` from the Python engine). Long lines are cut to 2000 characters. A regex ripgrep's default engine rejects (look-around, backreferences) is retried with `--pcre2` when available, with a `note`. A ripgrep run over 60 s fails with `timeout`.
 
 ### `git`
 

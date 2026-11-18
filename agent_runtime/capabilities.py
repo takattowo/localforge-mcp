@@ -900,6 +900,16 @@ class Capabilities:
         with self._cwd_lock:
             return self._cwd
 
+    def _call_cwd(self, cwd):
+        """The folder a call's relative paths resolve against: its own cwd
+        argument, else the runtime cwd (which every chat shares)."""
+        if cwd is None:
+            return self.cwd
+        work = self.paths.resolve(cwd, cwd=self.cwd, access="read", must_exist=True)
+        if not work.is_dir():
+            raise RuntimeFault("not_directory", f"Not a directory: {work}")
+        return work
+
     def _path_lock(self, target):
         return self._path_locks[hash(str(target)) % PATH_LOCK_STRIPES]
 
@@ -1105,7 +1115,7 @@ class Capabilities:
                 e.message += (f"\nRelative to the Git root it is {found}; writes, deletes and moves are not "
                               "retried there, so check it is the file you mean before passing that path.")
             else:
-                e.message += self._missing_hint(path)
+                e.message += self._missing_hint(path, cwd)
             e.args = (e.message,)
             raise
 
@@ -1130,7 +1140,7 @@ class Capabilities:
             result["note"] = f"{result['note']} {note}" if result.get("note") else note
         return result
 
-    def _missing_hint(self, path):
+    def _missing_hint(self, path, cwd=None):
         """"Did you mean" text for a missing path, or "".
 
         When the parent folder exists, up to SUGGEST_MAX similar entries
@@ -1161,7 +1171,7 @@ class Capabilities:
             return found
 
         try:
-            target = self.paths._canonical(path or ".", self.cwd)
+            target = self.paths._canonical(path or ".", cwd or self.cwd)
         except RuntimeFault:
             return ""
         child, parent = target, target.parent
@@ -1180,12 +1190,13 @@ class Capabilities:
     def filesystem(self, action, path=".", content=None, destination=None, recursive=False,
                    encoding="utf-8", offset=0, max_bytes=None, expected_occurrences=None,
                    old_text=None, new_text=None, edits=None, line_start=None, line_end=None,
-                   limit=200, glob=None, include_hidden=False, patch=None, overwrite=False, replace_all=False):
+                   limit=200, glob=None, include_hidden=False, patch=None, overwrite=False, replace_all=False, cwd=None):
+        work_dir = self._call_cwd(cwd)
         if action == "copy":
             if not destination:
                 raise RuntimeFault("invalid_arguments", "copy requires destination")
-            src, _ = self._resolve_existing(path, "read")
-            dest = self.paths.resolve(destination, cwd=self.cwd, access="write", must_exist=False)
+            src, _ = self._resolve_existing(path, "read", cwd=work_dir)
+            dest = self.paths.resolve(destination, cwd=work_dir, access="write", must_exist=False)
             self.policy.authorize_path("copy")
             with self._locked_paths([src, dest]):
                 try:
@@ -1209,16 +1220,16 @@ class Capabilities:
         must_exist = action not in {"write", "mkdir"}
         note = None
         if must_exist:
-            target, note = self._resolve_existing(path, access, retry=access == "read")
+            target, note = self._resolve_existing(path, access, retry=access == "read", cwd=work_dir)
         else:
-            target = self.paths.resolve(path, cwd=self.cwd, access=access, must_exist=False)
+            target = self.paths.resolve(path, cwd=work_dir, access=access, must_exist=False)
             if action == "write" and not target.exists() and not str(path).startswith(("./", ".\\")):
                 # read retries such a path from the Git root; writing it here would
                 # make a second file instead of changing the one read.
-                found = self._from_git_root(path, "read", self.cwd)
+                found = self._from_git_root(path, "read", work_dir)
                 if found is not None:
                     raise RuntimeFault("invalid_arguments",
-                                       f"{path} is not in the cwd ({self.cwd}) but exists relative to the Git "
+                                       f"{path} is not in the cwd ({work_dir}) but exists relative to the Git "
                                        f"root: {found}. Writes are not retried there: pass {found} to "
                                        f"overwrite that file, or ./{path} to create a new file in the cwd.")
         self.policy.authorize_path(action)
@@ -1489,7 +1500,7 @@ class Capabilities:
         if action == "move":
             if not destination:
                 raise RuntimeFault("invalid_arguments", "move requires destination")
-            dest = self.paths.resolve(destination, cwd=self.cwd, access="write", must_exist=False)
+            dest = self.paths.resolve(destination, cwd=work_dir, access="write", must_exist=False)
             self.policy.authorize_path("move")
             with self._locked_paths([target, dest]):
                 self._check_destination("move", target, dest, overwrite)
@@ -1872,7 +1883,7 @@ class Capabilities:
 
     def search(self, query=None, path=".", glob=None, exclude=None, case_sensitive=False,
                max_results=200, files_only=False, fixed_string=True, context_lines=0,
-               include_hidden=False, max_file_size_bytes=1_000_000):
+               include_hidden=False, max_file_size_bytes=1_000_000, cwd=None):
         if int(max_file_size_bytes) <= 0:
             raise RuntimeFault("invalid_arguments", "max_file_size_bytes must be positive")
         context = max(0, min(int(context_lines or 0), 5))
@@ -1881,7 +1892,7 @@ class Capabilities:
         applied = list(dict.fromkeys([*(exclude or []), *DEFAULT_EXCLUDES]))
         # Read the cwd once: a parallel set_cwd must not change the
         # base between resolving the root and shortening result paths.
-        base = self.cwd
+        base = self._call_cwd(cwd)
         root, note = self._resolve_existing(path, "read", retry=True, cwd=base)
         maximum = max(1, min(int(max_results), 5000))
         rg = find_program("rg")
@@ -1959,8 +1970,10 @@ class Capabilities:
         def run(index, spec):
             label = spec.pop("label", None)
             if index in (invalid or {}):
-                results[index] = {"index": index, "label": label,
-                                  "error": {"code": "invalid_arguments", "message": invalid[index]}}
+                # A string is an argument error; a dict is a whole fault payload (relative_path, say).
+                error = invalid[index]
+                results[index] = {"index": index, "label": label, "error": error if isinstance(error, dict)
+                                  else {"code": "invalid_arguments", "message": error}}
                 return
             try:
                 results[index] = {"index": index, "label": label, **self.search(**spec)}

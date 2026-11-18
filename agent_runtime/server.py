@@ -49,41 +49,42 @@ SWITCH_OFF_INSTRUCTIONS = (
 )
 
 # Added to the instructions when require_absolute_paths is on.
-ABSOLUTE_RULE = ("File changes, git, execute and process start need an absolute path/cwd: the cwd is shared by "
-                 "every chat. Edit the absolute path a read or search returned. ")
+ABSOLUTE_RULE = ("Name every location with an absolute path/cwd: absolute paths, or relative ones plus an absolute "
+                 "cwd argument (filesystem, search, each multi_search entry, git, execute, process start); the "
+                 "runtime cwd is shared by every chat. ")
 
-# The filesystem actions that change files, and the arguments of each that must be absolute. copy only reads its source.
-WRITE_KEYS = {"write": ("path",), "replace_text": ("path",), "multi_edit": ("path",), "apply_patch": ("path",),
-              "mkdir": ("path",), "delete": ("path",), "move": ("path", "destination"), "copy": ("destination",)}
-
-def _require_absolute(name, args, mode):
-    """Refuse an edit or command that leans on the runtime cwd.
+def _location_fault(name, args, mode, where=None):
+    """The relative_path fault for a call that leans on the runtime cwd, or None.
 
     One server serves every chat and task, and a set_cwd anywhere moves
-    the cwd, so a relative path or a missing cwd could change another
-    chat's repo. Reads and searches may stay relative. A call the mode
+    the cwd, so a relative path or a missing cwd could read or change
+    another chat's repo. A call may name absolute paths, or pass an
+    absolute cwd its relative paths resolve against. A call the mode
     forbids anyway is left to that check, so its error says why.
     """
     action = args.get("action")
-    if mode == "READ_ONLY":
-        return
-    if name == "filesystem" and action in WRITE_KEYS:
-        keys = WRITE_KEYS[action]
-    elif mode != "WORKSPACE" and (name in ("git", "execute") or (name == "process" and action == "start")):
+    if name in ("filesystem", "search"):
+        if name == "filesystem" and mode == "READ_ONLY" and action not in {"read", "list", "stat"}:
+            return None
+        keys = ("cwd",) if args.get("cwd") is not None else (
+            ("path", "destination") if name == "filesystem" and action in ("copy", "move") else ("path",))
+    elif mode not in ("READ_ONLY", "WORKSPACE") and (name in ("git", "execute") or (name == "process" and action == "start")):
         keys = ("cwd",)
     else:
-        return
+        return None
     for key in keys:
         value = args.get(key)
         if value is None and key == "destination":
             continue  # the action names its own missing argument
         # On Windows a rooted path without a drive (\x) follows the current drive, so it is not absolute either.
         if not isinstance(value, str) or not Path(value).is_absolute():
-            where = f"{name} {action}" if action else name
+            where = where or (f"{name} {action}" if action else name)
             got = "none given" if value is None else f"got {value!r}"
-            raise RuntimeFault("relative_path",
-                               f"{where} needs an absolute {key} ({got}): the runtime cwd is shared by every "
-                               "chat and task, so a relative one could land in another repo")
+            need = "an absolute cwd" if key == "cwd" else f"an absolute {key}, or an absolute cwd"
+            return RuntimeFault("relative_path",
+                                f"{where} needs {need} ({got}): the runtime cwd is shared by every chat and "
+                                "task, so a relative one could reach another repo")
+    return None
 
 def _guarded_write(emit, timeout):
     """Run emit() on a helper thread with a timeout.
@@ -283,7 +284,8 @@ SCHEMAS = {
         "path": {"type": "string", "description": "Directory for set_cwd, relative to cwd or absolute, must resolve inside read roots."}}, "required": ["action"]},
     "filesystem": {"type": "object", "properties": {
         "action": {"enum": ["read", "list", "stat", "write", "replace_text", "multi_edit", "apply_patch", "mkdir", "delete", "move", "copy"], "description": "read defaults to byte mode; pass line_start/line_end for line mode, which returns numbered text (one 'N<TAB>line' per line, up to 2000 lines, each cut to 2000 characters; next_line continues). read on a directory lists it like list, with a note. list is paginated. multi_edit applies several exact replacements to one file, validated end-to-end and written once. apply_patch takes a unified diff string. copy duplicates a file (or a directory with recursive=true) without shell quoting issues."},
-        "path": {"type": "string", "description": "Target path, absolute or relative to cwd; changes need an absolute one unless require_absolute_paths is off (the cwd is shared by every chat). Reads need read roots, writes need write roots."},
+        "path": {"type": "string", "description": "Target path: absolute, or relative to cwd. Reads need read roots, writes need write roots."},
+        "cwd": {"type": "string", "description": "Absolute folder a relative path and destination resolve against. Without it they use the runtime cwd, which every chat shares (refused while require_absolute_paths is on, the default)."},
         "content": {"type": "string", "description": "Full replacement content for write; overwrites the file."},
         "destination": {"type": "string", "description": "Destination path for move/copy; move and copy create missing parent dirs. An existing file there is refused unless overwrite is true; an existing directory is never replaced. A folder cannot go into itself, nor a file be copied onto itself."},
         "overwrite": {"type": "boolean", "description": "Let move/copy replace an existing destination file, default false."},
@@ -311,7 +313,8 @@ SCHEMAS = {
         "patch": {"type": "string", "description": "Unified diff for apply_patch (git diff headers are fine): modify or create files, all-or-nothing. Each hunk goes where its context and removed lines match exactly, nearest the stated line; header line counts are not checked. Each file in the reply has diff, added/removed, and hunks [{stated, placed}] for hunks placed elsewhere. Renames and copies are refused (move first), as is a file named in two sections (merge its hunks)."}}, "required": ["action"]},
     "search": {"type": "object", "properties": {
         "query": {"type": "string", "description": "Text or regex to find; omit only with files_only."},
-        "path": {"type": "string", "description": "File or directory to search, relative to cwd or absolute."},
+        "path": {"type": "string", "description": "File or directory to search: absolute, or relative to cwd."},
+        "cwd": {"type": "string", "description": "Absolute folder a relative path resolves against. Without it the runtime cwd, which every chat shares (refused while require_absolute_paths is on, the default)."},
         "glob": {"type": "array", "items": {"type": "string"}, "description": "Include patterns, relative to the search path, with ripgrep (.gitignore-style) rules: no slash matches at any depth, a slash anchors to the search path, ** spans folders, case-sensitive."},
         "exclude": {"type": "array", "items": {"type": "string"}, "description": "Extra excludes, relative to the search path; built-ins (.git, .venv, node_modules, etc.) always apply."},
         "case_sensitive": {"type": "boolean", "description": "Case-sensitive match, default false."},
@@ -361,7 +364,8 @@ SCHEMAS = {
             "items": {"type": "object", "properties": {
                 "label": {"type": "string", "description": "Optional label echoed back to identify this search in the results."},
                 "query": {"type": "string", "description": "Text or regex to find; omit only with files_only."},
-                "path": {"type": "string", "description": "File or directory to search, relative to cwd or absolute."},
+                "path": {"type": "string", "description": "File or directory to search: absolute, or relative to cwd."},
+                "cwd": {"type": "string", "description": "Absolute folder a relative path resolves against. Without it the runtime cwd, which every chat shares (refused while require_absolute_paths is on, the default)."},
                 "glob": {"type": "array", "items": {"type": "string"}, "description": "Include patterns, relative to the search path, with ripgrep (.gitignore-style) rules: no slash matches at any depth, a slash anchors to the search path, ** spans folders, case-sensitive."},
                 "exclude": {"type": "array", "items": {"type": "string"}, "description": "Extra excludes, relative to the search path; built-ins (.git, .venv, node_modules, etc.) always apply."},
                 "case_sensitive": {"type": "boolean", "description": "Case-sensitive match, default false."},
@@ -481,9 +485,9 @@ class Server:
         "workspace": ("action", "path", "dir"),
         "filesystem": ("action", "path", "file", "target", "content", "text", "destination", "dest", "recursive", "encoding", "offset",
                         "max_bytes", "old_text", "old", "find", "new_text", "new", "replacement", "expected_occurrences", "edits",
-                        "line_start", "start", "line_end", "end", "limit", "glob", "include_hidden", "patch", "overwrite", "replace_all"),
+                        "line_start", "start", "line_end", "end", "limit", "glob", "include_hidden", "patch", "overwrite", "replace_all", "cwd"),
         "search": ("query", "pattern", "path", "glob", "exclude", "case_sensitive", "max_results", "files_only",
-                   "fixed_string", "context_lines", "include_hidden", "max_file_size_bytes"),
+                   "fixed_string", "context_lines", "include_hidden", "max_file_size_bytes", "cwd"),
         "git": ("action", "args", "cwd", "include_untracked"),
         "execute": ("command", "cmd", "cwd", "timeout", "shell", "env", "input", "kill_on_timeout"),
         "process": ("action", "process_id", "id", "command", "cmd", "cwd", "shell", "env", "after", "limit_bytes",
@@ -597,7 +601,9 @@ class Server:
             raise RuntimeFault("invalid_arguments", "Invalid argument value(s): " + "; ".join(errors) + ".")
         self._refuse_switched_args(name, args)
         if self.cfg.require_absolute_paths:
-            _require_absolute(name, args, self.cfg.mode)
+            fault = _location_fault(name, args, self.cfg.mode)
+            if fault:
+                raise fault
         if name == "workspace": return self.cap.workspace(**args)
         if name == "filesystem": return self.cap.filesystem(**args)
         if name == "search": return self.cap.search(**args)
@@ -613,6 +619,10 @@ class Server:
                                               f"searches[{index}].", problems)
                         if problems:
                             invalid[index] = "Invalid argument value(s): " + "; ".join(problems) + "."
+                        elif self.cfg.require_absolute_paths:
+                            fault = _location_fault("search", spec, self.cfg.mode, f"multi_search searches[{index}]")
+                            if fault:
+                                invalid[index] = fault.as_dict()
                     fixed.append(spec)
                 args["searches"] = fixed
             return self.cap.multi_search(**args, invalid=invalid)

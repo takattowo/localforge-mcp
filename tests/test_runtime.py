@@ -4565,11 +4565,17 @@ def test_require_absolute_paths_guards_writes_and_commands(tmp_path):
     if os.name == "nt":
         # Rooted but driveless: follows the current drive.
         refused.append(("filesystem", {"action": "write", "path": "\\x.txt", "content": "x"}))
-    # Every change action is guarded: the guard's table must match the schema's actions.
-    from agent_runtime.server import SCHEMAS, WRITE_KEYS
-    changes = [a for a in SCHEMAS["filesystem"]["properties"]["action"]["enum"] if a not in {"read", "list", "stat"}]
-    assert set(changes) == set(WRITE_KEYS)
-    for action in changes:
+    # Reads and searches too: a relative read can pick up another chat's file and feed it to an absolute write.
+    refused += [
+        ("filesystem", {"action": "list"}),
+        ("filesystem", {"action": "read", "path": "a.txt", "cwd": "."}),
+        ("filesystem", {"action": "copy", "path": "a.txt", "destination": str(tmp_path / "c.txt")}),
+        ("search", {"query": "one"}),
+        ("search", {"query": "one", "path": "."}),
+    ]
+    # Every filesystem action is guarded, so a new one can't slip past.
+    from agent_runtime.server import SCHEMAS
+    for action in SCHEMAS["filesystem"]["properties"]["action"]["enum"]:
         refused.append(("filesystem", {"action": action, "path": "a.txt", "destination": "z.txt", "content": "x",
                                        "old_text": "one", "new_text": "two", "patch": "",
                                        "edits": [{"old_text": "one", "new_text": "two"}]}))
@@ -4582,14 +4588,15 @@ def test_require_absolute_paths_guards_writes_and_commands(tmp_path):
     assert not (tmp_path / "z.txt").exists()
     assert not (tmp_path / "c.txt").exists() and not server.processes.items
 
-    # Reads, searches and calls that name absolute locations still work.
-    assert server.call("filesystem", {"action": "read", "path": "a.txt"})["content"] == "one"
-    hits = server.call("search", {"query": "one", "path": "."})
+    # Calls that name absolute locations, or relative ones under an absolute cwd, still work.
+    assert server.call("filesystem", {"action": "read", "path": a})["content"] == "one"
+    assert server.call("filesystem", {"action": "read", "path": "a.txt", "cwd": str(tmp_path)})["content"] == "one"
+    hits = server.call("search", {"query": "one", "path": ".", "cwd": str(tmp_path)})
     # Hits come back absolute, so an edit built from one names the file that was read.
     assert hits["match_count"] == 1 and hits["results"][0]["path"] == a
     assert "exit_code" in server.call("git", {"action": "root", "cwd": str(tmp_path)})
     assert server.call("filesystem", {"action": "replace_text", "path": a, "old_text": "one", "new_text": "two"})
-    assert server.call("filesystem", {"action": "copy", "path": "a.txt", "destination": str(tmp_path / "c.txt")})
+    assert server.call("filesystem", {"action": "copy", "path": "a.txt", "destination": "c.txt", "cwd": str(tmp_path)})
     assert server.call("execute", {"command": [sys.executable, "-c", "print(1)"], "cwd": str(tmp_path)})["exit_code"] == 0
     pid = server.call("process", {"action": "start", "command": [sys.executable, "-c", "print(1)"],
                                   "cwd": str(tmp_path)})["process_id"]
@@ -4612,6 +4619,8 @@ def test_require_absolute_paths_modes_instructions_and_checks(tmp_path):
     # A mode that forbids the call says so, instead of asking for an absolute path first.
     readonly = make(tmp_path, "READ_ONLY", require_absolute_paths=True)
     assert _fault(readonly, "filesystem", {"action": "write", "path": "b.txt", "content": "x"})[0] == "permission_denied"
+    # Reads are allowed there, so they are guarded.
+    assert _fault(readonly, "filesystem", {"action": "read", "path": "b.txt"})[0] == "relative_path"
     workspace = make(tmp_path, "WORKSPACE", require_absolute_paths=True)
     assert _fault(workspace, "git", {"action": "status"})[0] == "execution_denied"
     assert _fault(workspace, "execute", {"command": ["x"]})[0] == "execution_denied"
@@ -4635,3 +4644,43 @@ def test_require_absolute_paths_modes_instructions_and_checks(tmp_path):
     server.call("workspace", {"action": "set_cwd", "path": str(tmp_path / "elsewhere")})
     out = server.call("filesystem", {"action": "write", "path": str(tmp_path / "repo" / "x.chk"), "content": "x"})
     assert out["check"] == {"ok": True}, out
+
+
+def test_per_call_cwd_keeps_each_chat_in_its_own_folder(tmp_path):
+    # Two chats share one server: B's set_cwd must not move where A's relative paths go.
+    a, b = tmp_path / "a", tmp_path / "b"
+    for folder, text in ((a, "alpha"), (b, "beta")):
+        folder.mkdir()
+        (folder / "f.txt").write_text(text)
+    server = make(tmp_path, require_absolute_paths=True)
+    server.call("workspace", {"action": "set_cwd", "path": str(b)})
+    A = str(a)
+    assert server.call("filesystem", {"action": "read", "path": "f.txt", "cwd": A})["content"] == "alpha"
+    server.call("filesystem", {"action": "write", "path": "g.txt", "content": "x", "cwd": A})
+    server.call("filesystem", {"action": "copy", "path": "f.txt", "destination": "h.txt", "cwd": A})
+    server.call("filesystem", {"action": "move", "path": "h.txt", "destination": "i.txt", "cwd": A})
+    assert sorted(p.name for p in a.iterdir()) == ["f.txt", "g.txt", "i.txt"]
+    assert sorted(p.name for p in b.iterdir()) == ["f.txt"]
+    hits = server.call("search", {"query": "alpha", "cwd": A})
+    # i.txt is a copy of f.txt, so both match.
+    assert sorted(h["path"] for h in hits["results"]) == [str(a / "f.txt"), str(a / "i.txt")]
+    multi = server.call("multi_search", {"searches": [{"query": "alpha", "cwd": A, "label": "a"},
+                                                     {"query": "beta", "label": "b"}]})
+    first, second = multi["results"]
+    # Only the entry without a location fails.
+    assert first["match_count"] == 2 and second["error"]["code"] == "relative_path", multi
+    assert "searches[1]" in second["error"]["message"]
+    # A missing name gets suggestions from the call's cwd, not the shared one.
+    code, message = _fault(server, "filesystem", {"action": "read", "path": "f.tx", "cwd": A})
+    assert code == "path_not_found" and "f.txt" in message, message
+    # cwd itself must be an absolute folder.
+    assert _fault(server, "filesystem", {"action": "read", "path": "f.txt", "cwd": "a"})[0] == "relative_path"
+    assert _fault(server, "search", {"query": "x", "cwd": str(a / "f.txt")})[0] == "not_directory"
+    # READ_ONLY guards reads too, and cwd works there.
+    readonly = make(tmp_path, "READ_ONLY", require_absolute_paths=True)
+    assert readonly.call("filesystem", {"action": "read", "path": "f.txt", "cwd": A})["content"] == "alpha"
+
+    # Off, a relative cwd resolves against the runtime cwd, and hits are relative to the call's cwd.
+    loose = make(tmp_path)
+    assert loose.call("filesystem", {"action": "read", "path": "f.txt", "cwd": "a"})["content"] == "alpha"
+    assert loose.call("search", {"query": "alpha", "path": "f.txt", "cwd": A})["results"][0]["path"] == "f.txt"
