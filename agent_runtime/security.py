@@ -5,7 +5,6 @@ import functools
 import json
 import os
 import re
-import shutil
 from .errors import RuntimeFault
 
 def _looks_like_argv(text):
@@ -146,14 +145,13 @@ def _powershell_script(command):
 def find_pwsh():
     """Path to PowerShell 7+ (pwsh.exe), or None when it is not installed.
 
-    Checks PATH, then the MSI and Store/winget install locations: a
-    host started before pwsh was installed still has its old PATH.
-    Cached; restart the server to pick up a new install.
+    Checks the PATH entries (never the current folder), then the MSI
+    and Store/winget install locations: a host started before pwsh was
+    installed still has its old PATH. Cached; restart the server to
+    pick up a new install.
     """
-    found = shutil.which("pwsh")
-    # On Windows, which also matches pwsh.cmd/.bat through PATHEXT
-    # (and looks in the current folder); only a real pwsh.exe counts.
-    if found and (os.name != "nt" or found.lower().endswith(".exe")):
+    found = find_program("pwsh")
+    if found:
         return found
     if os.name != "nt":
         return None

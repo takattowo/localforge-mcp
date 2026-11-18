@@ -2993,25 +2993,42 @@ def test_auto_shell_picks_pwsh_when_installed(tmp_path, monkeypatch):
 @pytest.mark.skipif(os.name != "nt", reason="Windows install locations")
 def test_find_pwsh_checks_install_folders(tmp_path, monkeypatch):
     import agent_runtime.security as sec
-    monkeypatch.setattr(sec.shutil, "which", lambda name: str(tmp_path / "pwsh.cmd"))
+    # Only a pwsh.exe from a PATH entry counts: not a pwsh.cmd there, nor
+    # a pwsh.exe in the current folder.
+    path_dir, cwd = tmp_path / "bin", tmp_path / "cwd"
+    path_dir.mkdir()
+    cwd.mkdir()
+    (path_dir / "pwsh.cmd").write_text("")
+    (cwd / "pwsh.exe").write_text("")
+    monkeypatch.chdir(cwd)
+    monkeypatch.setenv("PATH", str(path_dir))
+    monkeypatch.setenv("PATHEXT", ".COM;.EXE;.BAT;.CMD")
     monkeypatch.setenv("ProgramFiles", str(tmp_path / "pf"))
     monkeypatch.delenv("ProgramW6432", raising=False)
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "local"))
     msi = tmp_path / "pf" / "PowerShell" / "7" / "pwsh.exe"
     store = tmp_path / "local" / "Microsoft" / "WindowsApps" / "pwsh.exe"
-    try:
+
+    def clear():
         sec.find_pwsh.cache_clear()
+        sec.find_program.cache_clear()
+
+    try:
+        clear()
         assert sec.find_pwsh() is None
         for exe in (store, msi):
             exe.parent.mkdir(parents=True)
             exe.write_text("")
-        sec.find_pwsh.cache_clear()
+        clear()
         assert sec.find_pwsh() == str(msi)
         msi.unlink()
-        sec.find_pwsh.cache_clear()
+        clear()
         assert sec.find_pwsh() == str(store)
+        (path_dir / "pwsh.exe").write_text("")
+        clear()
+        assert sec.find_pwsh() == str(path_dir / "pwsh.exe")
     finally:
-        sec.find_pwsh.cache_clear()
+        clear()
 
 
 def test_find_program_looks_in_path_only(tmp_path, monkeypatch):
