@@ -2869,6 +2869,7 @@ def test_workspace_info_reads_the_cwd_once(tmp_path, monkeypatch):
 
 @pytest.mark.skipif(os.name != "nt", reason="CreateProcess looks in the cwd on Windows only")
 def test_internal_git_and_rg_ignore_programs_in_the_cwd(tmp_path, monkeypatch):
+    import agent_runtime.security as sec
     if shutil.which("git") is None:
         pytest.skip("git unavailable")
     repo, plant = tmp_path / "repo", tmp_path / "plant"
@@ -2880,7 +2881,7 @@ def test_internal_git_and_rg_ignore_programs_in_the_cwd(tmp_path, monkeypatch):
     for name in ("git.exe", "rg.exe"):
         shutil.copy(whoami, plant / name)
     me = subprocess.run([str(whoami)], capture_output=True, text=True).stdout.strip().lower()
-    has_rg = shutil.which("rg") is not None
+    has_rg = sec.find_program("rg") is not None
     monkeypatch.chdir(plant)
     server = make(repo)
     info = server.cap.workspace("get")
@@ -3025,6 +3026,11 @@ def test_find_pwsh_checks_install_folders(tmp_path, monkeypatch):
         msi.unlink()
         clear()
         assert sec.find_pwsh() == str(store)
+        # A folder named pwsh.exe in an install location is not the program.
+        msi.mkdir()
+        clear()
+        assert sec.find_pwsh() == str(store)
+        msi.rmdir()
         (path_dir / "pwsh.exe").write_text("")
         clear()
         assert sec.find_pwsh() == str(path_dir / "pwsh.exe")

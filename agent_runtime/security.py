@@ -159,7 +159,7 @@ def find_pwsh():
                   for base in (os.environ.get("ProgramFiles"), os.environ.get("ProgramW6432")) if base]
     if os.environ.get("LOCALAPPDATA"):
         candidates.append(Path(os.environ["LOCALAPPDATA"]) / "Microsoft" / "WindowsApps" / "pwsh.exe")
-    return next((str(c) for c in candidates if c.exists()), None)
+    return next((str(c) for c in candidates if c.is_file()), None)
 
 
 @functools.lru_cache(maxsize=None)
