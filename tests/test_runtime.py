@@ -1542,6 +1542,29 @@ def test_batch_sequential_stops_on_a_raised_error(tmp_path):
     assert nested["results"][1]["skipped"] and nested["stopped_at"] == 0
 
 
+def test_batch_refuses_set_cwd_unless_sequential(tmp_path):
+    server = make(tmp_path)
+    (tmp_path / "sub").mkdir()
+    (tmp_path / "sub" / "a.txt").write_text("in sub\n")
+    (tmp_path / "a.txt").write_text("in root\n")
+    refused = {"code": "invalid_arguments", "message": "set_cwd needs sequential: true in batch"}
+    out = server.call("batch", {"calls": [
+        {"tool": "workspace", "arguments": {"action": "set_cwd", "path": "sub"}},
+        {"tool": "MyHost_localforge_mcp__workspace", "arguments": {"action": "set_cwd", "dir": "sub"}},
+        {"tool": "filesystem", "arguments": {"action": "read", "path": "a.txt", "line_start": 1}},
+    ]})
+    first, prefixed, read = out["results"]
+    assert first["error"] == refused and prefixed["error"] == refused
+    assert read["result"]["content"] == "1\tin root"
+    assert server.cap.workspace("get")["cwd"] == str(tmp_path)
+    # In order, set_cwd works and the next call sees the new folder.
+    out = server.call("batch", {"sequential": True, "calls": [
+        {"tool": "workspace", "arguments": {"action": "set_cwd", "dir": "sub"}},
+        {"tool": "filesystem", "arguments": {"action": "read", "path": "a.txt", "line_start": 1}},
+    ]})
+    assert out["stopped_at"] is None and out["results"][1]["result"]["content"] == "1\tin sub"
+
+
 def test_batch_sequential_only_counts_raised_or_success_false(tmp_path):
     server = make(tmp_path, edit_checks={"*.py": [sys.executable, "-m", "py_compile", "{path}"]})
     out = server.call("batch", {"sequential": True, "calls": [

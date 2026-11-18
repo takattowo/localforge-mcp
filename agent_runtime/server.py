@@ -680,6 +680,13 @@ class Server:
                                   "error": {"code": "invalid_arguments",
                                             "message": "batch cannot nest batch calls"}}
                 return
+            # Parallel calls would race on the cwd a set_cwd changes.
+            if (name == "workspace" and not sequential
+                    and self._apply_aliases(name, arguments).get("action") == "set_cwd"):
+                results[index] = {"index": index, "tool": name, "label": label,
+                                  "error": {"code": "invalid_arguments",
+                                            "message": "set_cwd needs sequential: true in batch"}}
+                return
             try:
                 results[index] = {"index": index, "tool": name, "label": label,
                                   "result": self.call(name, arguments)}
