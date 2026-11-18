@@ -24,7 +24,7 @@ NEVER create or change files through `execute`, `process`, or any script (python
 ## Commands
 - Prefer argv arrays: {"command": ["npm", "test"], "cwd": "C:\\src\\app"}. A string command runs in the shell the `execute` description names.
 - Long runs (builds, tests): `process` action `start`, then `wait` (until it exits or prints a line matching `pattern`). Do not use long `execute` timeouts. An `execute` still running at its timeout moves to the background (`error_type` `backgrounded` with a `process_id`); follow it with `process wait` or end it with `process stop`.
-- Pass `env` per call. Every chat and task shares one runtime cwd, and `workspace` `set_cwd` moves it for all of them, so pass an absolute `cwd` (or absolute paths) on every `filesystem`, `search`, `multi_search` entry, `git`, `execute` and `process start` call. With `require_absolute_paths` (default) a call without one fails with `relative_path`.
+- Pass `env` per call. Every chat and task shares one runtime cwd, and `workspace` `set_cwd` moves it for all of them, so on `filesystem`, `search` and each `multi_search` entry pass an absolute path or an absolute `cwd`, and on `git`, `execute` and `process start` an absolute `cwd`. With `require_absolute_paths` (default) a call without one fails with `relative_path`.
 - Programs started through `execute` or `process` are closed when the server exits (Quick restart included), unless kill_children_on_exit is false.
 - After LocalForge is updated or its config changes, the server only picks it up after a Quick restart.
 

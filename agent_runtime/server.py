@@ -14,7 +14,7 @@ from concurrent.futures import ThreadPoolExecutor
 from . import __version__
 from .config import Config
 from .errors import RuntimeFault
-from .security import PathPolicy, Policy
+from .security import PathPolicy, Policy, READ_ACTIONS
 from .processes import ProcessManager
 from .capabilities import Capabilities, _clip
 from .state import StateStore
@@ -64,7 +64,7 @@ def _location_fault(name, args, mode, where=None):
     """
     action = args.get("action")
     if name in ("filesystem", "search"):
-        if name == "filesystem" and mode == "READ_ONLY" and action not in {"read", "list", "stat"}:
+        if name == "filesystem" and mode == "READ_ONLY" and action not in READ_ACTIONS:
             return None
         keys = ("cwd",) if args.get("cwd") is not None else (
             ("path", "destination") if name == "filesystem" and action in ("copy", "move") else ("path",))
@@ -285,7 +285,7 @@ SCHEMAS = {
     "filesystem": {"type": "object", "properties": {
         "action": {"enum": ["read", "list", "stat", "write", "replace_text", "multi_edit", "apply_patch", "mkdir", "delete", "move", "copy"], "description": "read defaults to byte mode; pass line_start/line_end for line mode, which returns numbered text (one 'N<TAB>line' per line, up to 2000 lines, each cut to 2000 characters; next_line continues). read on a directory lists it like list, with a note. list is paginated. multi_edit applies several exact replacements to one file, validated end-to-end and written once. apply_patch takes a unified diff string. copy duplicates a file (or a directory with recursive=true) without shell quoting issues."},
         "path": {"type": "string", "description": "Target path: absolute, or relative to cwd. Reads need read roots, writes need write roots."},
-        "cwd": {"type": "string", "description": "Absolute folder a relative path and destination resolve against. Without it they use the runtime cwd, which every chat shares (refused while require_absolute_paths is on, the default)."},
+        "cwd": {"type": "string", "description": "Folder a relative path and destination resolve against, else the runtime cwd, which every chat shares. While require_absolute_paths is on (default) it must be absolute, and a relative path without it is refused."},
         "content": {"type": "string", "description": "Full replacement content for write; overwrites the file."},
         "destination": {"type": "string", "description": "Destination path for move/copy; move and copy create missing parent dirs. An existing file there is refused unless overwrite is true; an existing directory is never replaced. A folder cannot go into itself, nor a file be copied onto itself."},
         "overwrite": {"type": "boolean", "description": "Let move/copy replace an existing destination file, default false."},
@@ -314,7 +314,7 @@ SCHEMAS = {
     "search": {"type": "object", "properties": {
         "query": {"type": "string", "description": "Text or regex to find; omit only with files_only."},
         "path": {"type": "string", "description": "File or directory to search: absolute, or relative to cwd."},
-        "cwd": {"type": "string", "description": "Absolute folder a relative path resolves against. Without it the runtime cwd, which every chat shares (refused while require_absolute_paths is on, the default)."},
+        "cwd": {"type": "string", "description": "Folder a relative path resolves against, else the runtime cwd, which every chat shares. While require_absolute_paths is on (default) it must be absolute, and a relative path without it is refused."},
         "glob": {"type": "array", "items": {"type": "string"}, "description": "Include patterns, relative to the search path, with ripgrep (.gitignore-style) rules: no slash matches at any depth, a slash anchors to the search path, ** spans folders, case-sensitive."},
         "exclude": {"type": "array", "items": {"type": "string"}, "description": "Extra excludes, relative to the search path; built-ins (.git, .venv, node_modules, etc.) always apply."},
         "case_sensitive": {"type": "boolean", "description": "Case-sensitive match, default false."},
@@ -365,7 +365,7 @@ SCHEMAS = {
                 "label": {"type": "string", "description": "Optional label echoed back to identify this search in the results."},
                 "query": {"type": "string", "description": "Text or regex to find; omit only with files_only."},
                 "path": {"type": "string", "description": "File or directory to search: absolute, or relative to cwd."},
-                "cwd": {"type": "string", "description": "Absolute folder a relative path resolves against. Without it the runtime cwd, which every chat shares (refused while require_absolute_paths is on, the default)."},
+                "cwd": {"type": "string", "description": "Folder a relative path resolves against, else the runtime cwd, which every chat shares. While require_absolute_paths is on (default) it must be absolute, and a relative path without it is refused."},
                 "glob": {"type": "array", "items": {"type": "string"}, "description": "Include patterns, relative to the search path, with ripgrep (.gitignore-style) rules: no slash matches at any depth, a slash anchors to the search path, ** spans folders, case-sensitive."},
                 "exclude": {"type": "array", "items": {"type": "string"}, "description": "Extra excludes, relative to the search path; built-ins (.git, .venv, node_modules, etc.) always apply."},
                 "case_sensitive": {"type": "boolean", "description": "Case-sensitive match, default false."},
@@ -390,7 +390,7 @@ SCHEMAS = {
 DESCRIPTIONS = {
     "workspace": "Inspect workspace, Git root and repo state (branch, dirty, recent_commits; not in modes that forbid running git), or change runtime current directory. Call get once at the start of a task: it also returns the project's AGENTS.md/CLAUDE.md rules (project_instructions, from the Git root down to the cwd, outermost first), which you must follow; set_cwd returns them for the new folder too.",
     "filesystem": "Policy-checked real filesystem operations: line or byte reads, paginated lists, atomic writes, guarded text replacement, multi_edit for several exact replacements per file (all-or-nothing), policy-checked copy. Edits return a short diff (and a check result when edit_checks is configured), so no re-read is needed to confirm them; a missed old_text gets the closest lines in the error, to retry from, and a missing path gets similar names (a relative one that exists from the Git root is read from there, with a note). Never edit files via execute, process, or scripts; use write, replace_text, multi_edit, and apply_patch.",
-    "search": "Repository text or filename search with glob filters, default ignores, and context lines. Content matches come grouped by file: results [{path, matches: [{line, text, before?, after?}]}] plus match_count; max_results counts matches; a cut page is spread round-robin across files (spread, total_matches). Result paths under the runtime cwd are relative to it, unless require_absolute_paths is on (default): then absolute. Several searches: use multi_search (or batch) in one call, not one search per turn.",
+    "search": "Repository text or filename search with glob filters, default ignores, and context lines. Content matches come grouped by file: results [{path, matches: [{line, text, before?, after?}]}] plus match_count; max_results counts matches; a cut page is spread round-robin across files (spread, total_matches). Result paths under the call's cwd (else the runtime cwd) are relative to it, unless require_absolute_paths is on (default): then absolute. Several searches: use multi_search (or batch) in one call, not one search per turn.",
     "git": "Common structured Git operations plus a generic argument-array action. Anything beyond the presets goes through run, e.g. {\"action\": \"run\", \"args\": [\"commit\", \"-m\", \"fix parser\", \"--\", \"src/parser.py\"]}. Stage explicit files only; git add -A / --all / . is blocked. git never prompts: GIT_EDITOR is true, so commit needs -m.",
     "execute": "Run a command and wait for it, with structured output; argv arrays preferred. {shell_note}Long output is cut to head and tail and saved at stdout_path/stderr_path (up to max_capture_bytes; past process_buffer_bytes the oldest part is dropped and marked). A command still running at its timeout keeps running in the background instead of being killed (so does one that exited while a process it started still holds its output); the result has the output so far, error_type backgrounded, and a process_id for the process tool (read, stop). For long waits or polling, use the process tool instead of a long-timeout execute. Do not edit files with it; prefer the filesystem write, replace_text, or apply_patch actions.",
     "process": "Manage long-running processes with stable IDs, split streams, cursors, stdin, restart, and tree stop. wait blocks until a process exits or prints a line matching pattern (up to 60 s per call), so a build or test run needs no read polling. execute commands that outlive their timeout appear here with exec-* ids. For file edits, prefer the filesystem write, replace_text, or apply_patch actions.",

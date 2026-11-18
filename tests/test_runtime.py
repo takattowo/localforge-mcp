@@ -4684,3 +4684,46 @@ def test_per_call_cwd_keeps_each_chat_in_its_own_folder(tmp_path):
     loose = make(tmp_path)
     assert loose.call("filesystem", {"action": "read", "path": "f.txt", "cwd": "a"})["content"] == "alpha"
     assert loose.call("search", {"query": "alpha", "path": "f.txt", "cwd": A})["results"][0]["path"] == "f.txt"
+
+
+def test_per_call_cwd_reaches_every_change_and_keeps_the_path_policy(tmp_path):
+    a, b = tmp_path / "a", tmp_path / "b"
+    a.mkdir(); b.mkdir()
+    (a / "f.txt").write_text("one\n")
+    server = make(tmp_path, require_absolute_paths=True, denied_paths=[str(tmp_path / "secret")])
+    # The shared cwd points at b; every call below names a.
+    server.call("workspace", {"action": "set_cwd", "path": str(b)})
+    A = str(a)
+    # apply_patch takes its file names from the diff headers: they resolve under the call's cwd.
+    patch = ("--- /dev/null\n+++ b/new.txt\n@@ -0,0 +1 @@\n+fresh\n"
+             "--- a/f.txt\n+++ b/f.txt\n@@ -1 +1 @@\n-one\n+two\n")
+    server.call("filesystem", {"action": "apply_patch", "patch": patch, "cwd": A})
+    server.call("filesystem", {"action": "multi_edit", "path": "f.txt", "cwd": A,
+                               "edits": [{"old_text": "two", "new_text": "three"}]})
+    server.call("filesystem", {"action": "mkdir", "path": "d", "cwd": A})
+    server.call("filesystem", {"action": "write", "path": "d/x.txt", "content": "x", "cwd": A})
+    server.call("filesystem", {"action": "delete", "path": "d", "recursive": True, "cwd": A})
+    assert (a / "new.txt").read_text().strip() == "fresh" and (a / "f.txt").read_text() == "three\n"
+    assert not (a / "d").exists() and sorted(p.name for p in b.iterdir()) == []
+    # The shared cwd did not move.
+    assert server.call("workspace", {"action": "get"})["cwd"] == str(b)
+
+    # cwd passes the same path policy as a path: denied stays denied, read-only roots stay read-only.
+    (tmp_path / "secret").mkdir()
+    (tmp_path / "secret" / "s.txt").write_text("s")
+    assert _fault(server, "filesystem", {"action": "read", "path": "s.txt", "cwd": str(tmp_path / "secret")})[0] == "path_denied"
+    assert _fault(server, "search", {"query": "s", "cwd": str(tmp_path / "secret")})[0] == "path_denied"
+    server.paths.write_roots = [b.resolve()]
+    code, _ = _fault(server, "filesystem", {"action": "write", "path": "y.txt", "content": "y", "cwd": A})
+    assert code == "path_outside_roots" and not (a / "y.txt").exists()
+    assert server.call("filesystem", {"action": "read", "path": "f.txt", "cwd": A})["content"].rstrip() == "three"
+
+    # An entry that is not an object still fails the whole call with a clear error, as before, not a crash.
+    code, message = _fault(server, "multi_search", {"searches": ["oops", {"query": "three", "cwd": A}]})
+    assert code == "invalid_arguments" and "searches[0] must be an object" in message
+
+    # With advanced_features off the tools still take cwd.
+    off = make(tmp_path, advanced_features=False)
+    props = {t["name"]: t["inputSchema"]["properties"]
+             for t in off.handle({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})["result"]["tools"]}
+    assert "cwd" in props["filesystem"] and "cwd" in props["search"]

@@ -76,6 +76,9 @@ class PathPolicy:
                 f"Add it to allowed_{access}_roots in {cfg_path} then restart MCP (toggle connection off/on).")
         return p
 
+# The filesystem actions READ_ONLY mode allows; the absolute-path guard in server.py skips the rest there.
+READ_ACTIONS = frozenset({"read", "list", "stat"})
+
 class Policy:
     NETWORK_TOOLS = {"curl", "curl.exe", "wget", "git", "git.exe", "npm", "npm.cmd", "npx", "npx.cmd", "pnpm", "pnpm.cmd", "yarn", "yarn.cmd", "pip", "pip3", "python", "python.exe", "py", "docker", "docker.exe", "gh", "gh.exe"}
     NETWORK_MARKERS = ("install", "fetch", "pull", "push", "clone", "http://", "https://")
@@ -87,7 +90,7 @@ class Policy:
         self.cfg, self.paths = cfg, paths
 
     def authorize_path(self, action):
-        if self.cfg.mode == "READ_ONLY" and action not in {"read", "list", "stat"}:
+        if self.cfg.mode == "READ_ONLY" and action not in READ_ACTIONS:
             raise RuntimeFault("permission_denied", "Active mode is read-only")
 
     def authorize_command(self, command, cwd, shell=False):
