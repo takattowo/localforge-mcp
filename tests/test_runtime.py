@@ -2816,6 +2816,24 @@ def test_workspace_git_state_does_not_run_the_fsmonitor_hook(tmp_path):
     assert not marker.exists()
 
 
+def test_workspace_info_reads_the_cwd_once(tmp_path, monkeypatch):
+    if shutil.which("git") is None:
+        pytest.skip("git unavailable")
+    for name in ("a", "b"):
+        (tmp_path / name).mkdir()
+        _git_repo(tmp_path / name, [f"in {name}"])
+        (tmp_path / name / "AGENTS.md").write_text(f"{name} rules")
+    server = make(tmp_path)
+    # A parallel set_cwd to b lands right after the first read.
+    reads = iter([tmp_path / "a"] + [tmp_path / "b"] * 10)
+    monkeypatch.setattr(type(server.cap), "cwd", property(lambda self: next(reads).resolve()))
+    info = server.cap.workspace("get")
+    a = (tmp_path / "a").resolve()
+    assert info["cwd"] == str(a) and Path(info["repository_root"]).resolve() == a
+    assert [f["content"] for f in info["project_instructions"]] == ["a rules"]
+    assert info["recent_commits"][0].endswith(" in a")
+
+
 def test_project_instructions_follow_the_folder_chain_and_switch(tmp_path, monkeypatch):
     if shutil.which("git") is None:
         pytest.skip("git unavailable")

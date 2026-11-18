@@ -929,14 +929,16 @@ class Capabilities:
         raise RuntimeFault("invalid_action", "workspace action must be get or set_cwd")
 
     def _workspace_info(self):
-        info = {"workspace_root": str(self.paths.workspace), "cwd": str(self.cwd),
-                "repository_root": self._git_root(self.cwd)}
+        # One read: a parallel set_cwd must not mix two folders.
+        cwd = self.cwd
+        info = {"workspace_root": str(self.paths.workspace), "cwd": str(cwd),
+                "repository_root": self._git_root(cwd)}
         if self.cfg.load_project_instructions:
-            instructions = self._project_instructions(info["repository_root"], self.cwd)
+            instructions = self._project_instructions(info["repository_root"], cwd)
             if instructions:
                 info["project_instructions"] = instructions
-        if info["repository_root"] and self._may_run_git(self.cwd):
-            info.update(self._git_state(self.cwd))
+        if info["repository_root"] and self._may_run_git(cwd):
+            info.update(self._git_state(cwd))
         return info
 
     def _may_run_git(self, cwd):
