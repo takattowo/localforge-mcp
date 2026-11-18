@@ -445,6 +445,8 @@ PATH_LOCK_STRIPES = 256
 SPILL_KEEP = 100
 # Every spill file starts with this; pruning touches nothing else.
 SPILL_PREFIX = "lf-"
+# ripgrep's stderr when a pattern does not compile (default engine, PCRE2).
+RG_REGEX_ERRORS = ("regex parse error", "error compiling pattern")
 # difflib grows worse than quadratically on big repetitive files,
 # so edits above this many characters (before + after) skip the diff.
 EDIT_DIFF_MAX_INPUT = 128_000
@@ -2024,7 +2026,9 @@ class Capabilities:
         """Run a content search; a regex ripgrep's default engine rejects
         but PCRE2 handles (look-around, backreferences: ripgrep then
         suggests --pcre2) is run again with --pcre2, and out_note gets
-        a note saying so. Returns the result to report."""
+        a note saying so. A pattern neither engine compiles is refused
+        with invalid_arguments, as the Python engine does. Returns the
+        result to report."""
         result = self._run_rg(command, cwd=cwd)
         if result.returncode == 2 and "--pcre2" in (result.stderr or "") and "-F" not in command:
             retry = self._run_rg([command[0], "--pcre2", *command[1:]], cwd=cwd)
@@ -2033,9 +2037,12 @@ class Capabilities:
                 out_note.append("The regex needs look-around or backreferences, but this ripgrep build has no "
                                 "PCRE2 (PCRE2 unavailable); rewrite it without them.")
             # Exit 2 without a compile error: the search ran, some files could not be read or matched.
-            elif retry.returncode in (0, 1) or not any(mark in err for mark in ("regex parse error", "error compiling pattern")):
+            elif retry.returncode in (0, 1) or not any(mark in err for mark in RG_REGEX_ERRORS):
                 out_note.append("The regex needs look-around or backreferences, so it ran with ripgrep's --pcre2.")
                 return retry
+        # Exit 2 alone also means some files could not be read; only a compile error means nothing ran.
+        if result.returncode == 2 and any(mark in (result.stderr or "") for mark in RG_REGEX_ERRORS):
+            raise RuntimeFault("invalid_arguments", " ".join([f"Invalid regex: {self._rg_error(result)}", *out_note]))
         return result
 
     def _search_rg(self, rg, root, query, includes, excludes, case_sensitive, maximum, files_only, fixed_string, context, include_hidden,

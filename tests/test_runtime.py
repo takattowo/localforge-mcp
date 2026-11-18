@@ -655,8 +655,13 @@ def test_search_retries_lookaround_with_pcre2(tmp_path):
     for path in (".", "a.txt"):
         out = server.cap.search("foo(?=bar)", path=path, fixed_string=False)
         assert out["match_count"] == 1 and "--pcre2" in out["note"] and "error" not in out
-    # A regex that is wrong either way still reports ripgrep's error.
-    assert "error" in server.cap.search("foo(", fixed_string=False)
+    # A regex that is wrong either way is refused, like the Python engine does; in multi_search only that entry fails.
+    with pytest.raises(RuntimeFault) as bad:
+        server.cap.search("foo(", fixed_string=False)
+    assert bad.value.code == "invalid_arguments" and "Invalid regex" in bad.value.message
+    multi = server.call("multi_search", {"searches": [{"query": "foo(", "fixed_string": False}, {"query": "foobar"}]})
+    broken, fine = multi["results"]
+    assert broken["error"]["code"] == "invalid_arguments" and fine["match_count"] == 1
 
 def test_pcre2_retry_is_kept_despite_per_file_errors(tmp_path, monkeypatch):
     server = make(tmp_path)
@@ -671,13 +676,16 @@ def test_pcre2_retry_is_kept_despite_per_file_errors(tmp_path, monkeypatch):
     replies["pcre2"] = subprocess.CompletedProcess([], 2, "{}\n", "rg: ./big.txt: PCRE2: error matching: match limit exceeded\n")
     notes = []
     assert server.cap._run_rg_regex(["rg", "-e", "foo(?=bar)", "."], notes) is replies["pcre2"] and "--pcre2" in notes[0]
-    # A pattern PCRE2 cannot compile either: the first error stays.
+    # A pattern PCRE2 cannot compile either: refused with the first error.
     replies["pcre2"] = subprocess.CompletedProcess([], 2, "", "rg: PCRE2: error compiling pattern at offset 9: missing closing parenthesis\n")
-    assert server.cap._run_rg_regex(["rg", "-e", "foo(?=bar)", "."], []) is first
-    # A ripgrep built without PCRE2: the first error stays, with a note.
+    with pytest.raises(RuntimeFault) as bad:
+        server.cap._run_rg_regex(["rg", "-e", "foo(?=bar)", "."], [])
+    assert bad.value.code == "invalid_arguments" and "look-around" in bad.value.message
+    # A ripgrep built without PCRE2: refused, and the message keeps the note.
     replies["pcre2"] = subprocess.CompletedProcess([], 2, "", "PCRE2 is not available in this build of ripgrep.\n")
-    notes = []
-    assert server.cap._run_rg_regex(["rg", "-e", "foo(?=bar)", "."], notes) is first and "PCRE2 unavailable" in notes[0]
+    with pytest.raises(RuntimeFault) as bad:
+        server.cap._run_rg_regex(["rg", "-e", "foo(?=bar)", "."], [])
+    assert bad.value.code == "invalid_arguments" and "PCRE2 unavailable" in bad.value.message
 
 def test_search_python_fallback(tmp_path, no_rg):
     server = make(tmp_path)
@@ -1333,18 +1341,26 @@ def test_search_surfaces_rg_errors(tmp_path, monkeypatch):
     (tmp_path / "a.txt").write_text("hello\n")
     monkeypatch.setattr("agent_runtime.capabilities.find_program", lambda name: "rg" if name == "rg" else None)
     real_run = subprocess.run
+    stderr = {}
     def fake_error(*args, **kwargs):
         class R:
             returncode = 2
             stdout = ""
-            stderr = "rg: regex parse error (line 1)"
+        R.stderr = stderr["text"]
         return R()
     monkeypatch.setattr(subprocess, "run", fake_error)
     try:
+        # The search ran, but some files could not be read: results stay, with the error.
+        stderr["text"] = "rg: ./locked.txt: Access is denied. (os error 5)"
         out = server.cap.search("UserService")
+        assert out["results"] == [] and "Access is denied" in out.get("error", "")
+        # A pattern ripgrep cannot compile is refused, not an empty result.
+        stderr["text"] = "rg: regex parse error (line 1)"
+        with pytest.raises(RuntimeFault) as bad:
+            server.cap.search("UserService")
+        assert bad.value.code == "invalid_arguments" and "regex parse error" in bad.value.message
     finally:
         monkeypatch.setattr(subprocess, "run", real_run)
-    assert out["results"] == [] and "regex parse error" in out.get("error", "")
 
 
 def test_search_single_file_with_rg(tmp_path):
