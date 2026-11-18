@@ -109,7 +109,8 @@ class Policy:
         exe = Path(head.strip('"')).name.lower()
         # Markers are looked for past the program's folder: a full path to
         # git under, say, D:\installs is still plain git.
-        lowered = " ".join([exe, *command[1:]]).lower() if isinstance(command, list) else display.lower()
+        rest = command[1:] if isinstance(command, list) else command.strip().split(maxsplit=1)[1:]
+        lowered = " ".join([exe, *rest]).lower()
         if exe in {"gh", "gh.exe"}:
             network = not any(marker in lowered for marker in self.GH_LOCAL_ONLY)
         else:

@@ -1254,6 +1254,17 @@ def test_policy_treats_full_path_git_like_git(tmp_path):
     assert exc.value.code == "network_denied"
 
 
+def test_policy_string_commands_skip_the_program_folder(tmp_path):
+    # Like argv: a folder named "installs" is no network marker.
+    exe = "git.exe" if os.name == "nt" else "git"
+    offline = make(tmp_path, network="disabled")
+    local = offline.policy.authorize_command(os.path.join(os.sep, "installs", exe) + " status", str(tmp_path), shell=True)
+    assert local["network_classified"] is False
+    with pytest.raises(RuntimeFault) as exc:
+        offline.policy.authorize_command(os.path.join(os.sep, "Git", "cmd", exe) + " push", str(tmp_path), shell=True)
+    assert exc.value.code == "network_denied"
+
+
 def test_python_fallback_honors_regex(tmp_path, monkeypatch):
     server = make(tmp_path)
     (tmp_path / "src").mkdir()
