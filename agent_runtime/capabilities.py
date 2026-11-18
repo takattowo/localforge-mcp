@@ -1628,7 +1628,9 @@ class Capabilities:
         command = [part.replace("{path}", str(target)) for part in argv]
         try:
             # kill_on_timeout: a check must never outlive its timeout.
-            run = self.execute(command, timeout=self.cfg.edit_check_timeout_seconds, kill_on_timeout=True)
+            # The file's own folder, not the shared runtime cwd: a linter there finds that repo's config.
+            run = self.execute(command, cwd=str(target.parent), timeout=self.cfg.edit_check_timeout_seconds,
+                               kill_on_timeout=True)
         except RuntimeFault as e:
             result["check"] = {"ok": False, "command": command, "error": e.message}
             return
@@ -1896,7 +1898,10 @@ class Capabilities:
             out = self._search_python(root, query, glob or [], applied, case_sensitive, maximum, files_only, fixed_string, context, int(max_file_size_bytes), bool(include_hidden))
         if not files_only:
             self._group_by_file(out)
-        return self._noted(self._short_paths(base, out), note)
+        # With require_absolute_paths, edits must name absolute paths; absolute hits keep them the file that was read.
+        if not self.cfg.require_absolute_paths:
+            out = self._short_paths(base, out)
+        return self._noted(out, note)
 
     @staticmethod
     def _group_by_file(out):

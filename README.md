@@ -110,7 +110,7 @@ Several repositories under one parent: use `C:\src` for `workspace_root` and bot
 | `log_to_client` | `false` | MCP log notification per tool call (`LOCALFORGE_LOG=1` writes it to stderr). |
 | `structured_content` | `false` | Add `structuredContent` to tool results. |
 | `advanced_features` | `false` | See [Advanced features](#advanced-features). |
-| `require_absolute_paths` | `true` | File changes, `git`, `execute` and `process start` need an absolute `path`/`destination`/`cwd` (`relative_path` otherwise), since the runtime cwd is shared by every chat and task of the client. `false` lets them use the cwd. |
+| `require_absolute_paths` | `true` | File changes, `git`, `execute` and `process start` need an absolute `path`/`destination`/`cwd` (`relative_path` otherwise), since the runtime cwd is shared by every chat and task of the client. Search hits are then absolute. `false` lets them use the cwd. |
 
 `edit_checks` example (keep checks as argv arrays: wrapping one in `cmd /c` or `powershell -Command` lets a crafted file name inject shell syntax):
 
@@ -130,7 +130,7 @@ Argument names are forgiving (`old`/`find` for `old_text`, `new`/`replacement` f
 ### `workspace`
 
 - `get`: workspace root, cwd, Git root, and `project_instructions`: the instruction files in every folder from the Git root (or `workspace_root`) down to the cwd, outermost first, within `max_project_instruction_bytes` (a file past it is listed as `{"path", "skipped": "budget"}`). In a Git repo also `branch` (`(detached at <sha>)` on a detached HEAD), `dirty` (`git status --porcelain` lines, at most 50; `dirty_truncated` and `dirty_count` when cut) and `recent_commits` (the last 5 as `<sha> <subject>`); a field whose git call fails or takes over 5 s is left out. Git state needs a mode that allows running git (`DEVELOPMENT`, `FULL_ACCESS`); `READ_ONLY` and `WORKSPACE` leave it out, since `git status` runs programs named in `.git/config`. Call it once at the start of a task.
-- `set_cwd`: change the cwd inside the read roots; returns the same fields. Use it to switch projects; for a one-off command pass `cwd` instead. `cd` inside a command does not carry over. In `batch` it needs `sequential: true`. The cwd is shared by every chat and task, so with `require_absolute_paths` (default) it only serves reads and searches; changes and commands name their own absolute location.
+- `set_cwd`: change the cwd inside the read roots; returns the same fields. Use it to switch projects; for a one-off command pass `cwd` instead. `cd` inside a command does not carry over. In `batch` it needs `sequential: true`. The cwd is shared by every chat and task, so with `require_absolute_paths` (default) it only serves reads and searches; changes and commands name their own absolute location. A relative read can still pick up another chat's folder, so edit the absolute `path` a read or search returned, not one you built from the cwd.
 
 ### `filesystem`
 

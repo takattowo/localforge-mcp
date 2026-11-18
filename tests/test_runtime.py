@@ -4565,16 +4565,29 @@ def test_require_absolute_paths_guards_writes_and_commands(tmp_path):
     if os.name == "nt":
         # Rooted but driveless: follows the current drive.
         refused.append(("filesystem", {"action": "write", "path": "\\x.txt", "content": "x"}))
+    # Every change action is guarded: the guard's table must match the schema's actions.
+    from agent_runtime.server import SCHEMAS, WRITE_KEYS
+    changes = [a for a in SCHEMAS["filesystem"]["properties"]["action"]["enum"] if a not in {"read", "list", "stat"}]
+    assert set(changes) == set(WRITE_KEYS)
+    for action in changes:
+        refused.append(("filesystem", {"action": action, "path": "a.txt", "destination": "z.txt", "content": "x",
+                                       "old_text": "one", "new_text": "two", "patch": "",
+                                       "edits": [{"old_text": "one", "new_text": "two"}]}))
     for tool, args in refused:
         code, message = _fault(server, tool, args)
         assert code == "relative_path", (tool, args, code)
         assert "shared" in message, message
+    assert "none given" in _fault(server, "filesystem", {"action": "mkdir"})[1]
     assert (tmp_path / "a.txt").read_text() == "one" and not (tmp_path / "b.txt").exists()
+    assert not (tmp_path / "z.txt").exists()
     assert not (tmp_path / "c.txt").exists() and not server.processes.items
 
     # Reads, searches and calls that name absolute locations still work.
     assert server.call("filesystem", {"action": "read", "path": "a.txt"})["content"] == "one"
-    assert server.call("search", {"query": "one", "path": "."})["match_count"] == 1
+    hits = server.call("search", {"query": "one", "path": "."})
+    # Hits come back absolute, so an edit built from one names the file that was read.
+    assert hits["match_count"] == 1 and hits["results"][0]["path"] == a
+    assert "exit_code" in server.call("git", {"action": "root", "cwd": str(tmp_path)})
     assert server.call("filesystem", {"action": "replace_text", "path": a, "old_text": "one", "new_text": "two"})
     assert server.call("filesystem", {"action": "copy", "path": "a.txt", "destination": str(tmp_path / "c.txt")})
     assert server.call("execute", {"command": [sys.executable, "-c", "print(1)"], "cwd": str(tmp_path)})["exit_code"] == 0
@@ -4593,3 +4606,32 @@ def test_require_absolute_paths_guards_writes_and_commands(tmp_path):
     config.write_text(json.dumps({"workspace_root": str(tmp_path), "require_absolute_paths": "yes"}))
     with pytest.raises(ValueError):
         Config.load(str(config))
+
+
+def test_require_absolute_paths_modes_instructions_and_checks(tmp_path):
+    # A mode that forbids the call says so, instead of asking for an absolute path first.
+    readonly = make(tmp_path, "READ_ONLY", require_absolute_paths=True)
+    assert _fault(readonly, "filesystem", {"action": "write", "path": "b.txt", "content": "x"})[0] == "permission_denied"
+    workspace = make(tmp_path, "WORKSPACE", require_absolute_paths=True)
+    assert _fault(workspace, "git", {"action": "status"})[0] == "execution_denied"
+    assert _fault(workspace, "execute", {"command": ["x"]})[0] == "execution_denied"
+    assert _fault(workspace, "filesystem", {"action": "write", "path": "b.txt", "content": "x"})[0] == "relative_path"
+
+    # The rule is in the instructions only when it applies.
+    for advanced in (True, False):
+        on = make(tmp_path, require_absolute_paths=True, advanced_features=advanced).instructions
+        off = make(tmp_path, require_absolute_paths=False, advanced_features=advanced).instructions
+        assert "absolute path/cwd" in on and "absolute path/cwd" not in off
+    # Off, search hits keep the short form.
+    (tmp_path / "a.txt").write_text("one")
+    assert make(tmp_path).call("search", {"query": "one", "path": "."})["results"][0]["path"] == "a.txt"
+
+    # An edit check runs in the edited file's folder, not the shared cwd.
+    (tmp_path / "repo").mkdir()
+    (tmp_path / "elsewhere").mkdir()
+    check = [sys.executable, "-c", "import os, sys; sys.exit(0 if os.path.normcase(os.getcwd()) == "
+             "os.path.normcase(os.path.dirname(sys.argv[1])) else 3)", "{path}"]
+    server = make(tmp_path, require_absolute_paths=True, edit_checks={"*.chk": check})
+    server.call("workspace", {"action": "set_cwd", "path": str(tmp_path / "elsewhere")})
+    out = server.call("filesystem", {"action": "write", "path": str(tmp_path / "repo" / "x.chk"), "content": "x"})
+    assert out["check"] == {"ok": True}, out

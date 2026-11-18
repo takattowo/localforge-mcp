@@ -36,7 +36,6 @@ INSTRUCTIONS = (
     "fan out searches with multi_search. "
     "Edit files only with filesystem write/replace_text/multi_edit/apply_patch, "
     "never via execute, process, or any script. "
-    "File changes, git, execute and process start need an absolute path/cwd: the cwd is shared by every chat. "
     "Long runs (builds, tests): process start, then process wait, not a long execute timeout. "
     "Stage explicit files only; git add -A/./--all is blocked."
 )
@@ -45,24 +44,32 @@ SWITCH_OFF_INSTRUCTIONS = (
     "Call workspace get once at task start; follow project_instructions. "
     "Edit files only with filesystem write/replace_text/apply_patch, "
     "never via execute, process, or any script. "
-    "File changes, git, execute and process start need an absolute path/cwd: the cwd is shared by every chat. "
     "Long runs (builds, tests): process start, then process wait, not a long execute timeout. "
     "Stage explicit files only; git add -A/./--all is blocked."
 )
 
-FS_WRITES = {"write", "replace_text", "multi_edit", "apply_patch", "mkdir", "delete", "move", "copy"}
+# Added to the instructions when require_absolute_paths is on.
+ABSOLUTE_RULE = ("File changes, git, execute and process start need an absolute path/cwd: the cwd is shared by "
+                 "every chat. Edit the absolute path a read or search returned. ")
 
-def _require_absolute(name, args):
+# The filesystem actions that change files, and the arguments of each that must be absolute. copy only reads its source.
+WRITE_KEYS = {"write": ("path",), "replace_text": ("path",), "multi_edit": ("path",), "apply_patch": ("path",),
+              "mkdir": ("path",), "delete": ("path",), "move": ("path", "destination"), "copy": ("destination",)}
+
+def _require_absolute(name, args, mode):
     """Refuse an edit or command that leans on the runtime cwd.
 
     One server serves every chat and task, and a set_cwd anywhere moves
     the cwd, so a relative path or a missing cwd could change another
-    chat's repo. Reads and searches may stay relative.
+    chat's repo. Reads and searches may stay relative. A call the mode
+    forbids anyway is left to that check, so its error says why.
     """
     action = args.get("action")
-    if name == "filesystem" and action in FS_WRITES:
-        keys = {"copy": ("destination",), "move": ("path", "destination")}.get(action, ("path",))
-    elif name in ("git", "execute") or (name == "process" and action == "start"):
+    if mode == "READ_ONLY":
+        return
+    if name == "filesystem" and action in WRITE_KEYS:
+        keys = WRITE_KEYS[action]
+    elif mode != "WORKSPACE" and (name in ("git", "execute") or (name == "process" and action == "start")):
         keys = ("cwd",)
     else:
         return
@@ -73,8 +80,9 @@ def _require_absolute(name, args):
         # On Windows a rooted path without a drive (\x) follows the current drive, so it is not absolute either.
         if not isinstance(value, str) or not Path(value).is_absolute():
             where = f"{name} {action}" if action else name
+            got = "none given" if value is None else f"got {value!r}"
             raise RuntimeFault("relative_path",
-                               f"{where} needs an absolute {key}, got {value!r}: the runtime cwd is shared by every "
+                               f"{where} needs an absolute {key} ({got}): the runtime cwd is shared by every "
                                "chat and task, so a relative one could land in another repo")
 
 def _guarded_write(emit, timeout):
@@ -378,7 +386,7 @@ SCHEMAS = {
 DESCRIPTIONS = {
     "workspace": "Inspect workspace, Git root and repo state (branch, dirty, recent_commits; not in modes that forbid running git), or change runtime current directory. Call get once at the start of a task: it also returns the project's AGENTS.md/CLAUDE.md rules (project_instructions, from the Git root down to the cwd, outermost first), which you must follow; set_cwd returns them for the new folder too.",
     "filesystem": "Policy-checked real filesystem operations: line or byte reads, paginated lists, atomic writes, guarded text replacement, multi_edit for several exact replacements per file (all-or-nothing), policy-checked copy. Edits return a short diff (and a check result when edit_checks is configured), so no re-read is needed to confirm them; a missed old_text gets the closest lines in the error, to retry from, and a missing path gets similar names (a relative one that exists from the Git root is read from there, with a note). Never edit files via execute, process, or scripts; use write, replace_text, multi_edit, and apply_patch.",
-    "search": "Repository text or filename search with glob filters, default ignores, and context lines. Content matches come grouped by file: results [{path, matches: [{line, text, before?, after?}]}] plus match_count; max_results counts matches; a cut page is spread round-robin across files (spread, total_matches). Result paths under the runtime cwd are relative to it. Several searches: use multi_search (or batch) in one call, not one search per turn.",
+    "search": "Repository text or filename search with glob filters, default ignores, and context lines. Content matches come grouped by file: results [{path, matches: [{line, text, before?, after?}]}] plus match_count; max_results counts matches; a cut page is spread round-robin across files (spread, total_matches). Result paths under the runtime cwd are relative to it, unless require_absolute_paths is on (default): then absolute. Several searches: use multi_search (or batch) in one call, not one search per turn.",
     "git": "Common structured Git operations plus a generic argument-array action. Anything beyond the presets goes through run, e.g. {\"action\": \"run\", \"args\": [\"commit\", \"-m\", \"fix parser\", \"--\", \"src/parser.py\"]}. Stage explicit files only; git add -A / --all / . is blocked. git never prompts: GIT_EDITOR is true, so commit needs -m.",
     "execute": "Run a command and wait for it, with structured output; argv arrays preferred. {shell_note}Long output is cut to head and tail and saved at stdout_path/stderr_path (up to max_capture_bytes; past process_buffer_bytes the oldest part is dropped and marked). A command still running at its timeout keeps running in the background instead of being killed (so does one that exited while a process it started still holds its output); the result has the output so far, error_type backgrounded, and a process_id for the process tool (read, stop). For long waits or polling, use the process tool instead of a long-timeout execute. Do not edit files with it; prefer the filesystem write, replace_text, or apply_patch actions.",
     "process": "Manage long-running processes with stable IDs, split streams, cursors, stdin, restart, and tree stop. wait blocks until a process exits or prints a line matching pattern (up to 60 s per call), so a build or test run needs no read polling. execute commands that outlive their timeout appear here with exec-* ids. For file edits, prefer the filesystem write, replace_text, or apply_patch actions.",
@@ -441,6 +449,8 @@ class Server:
         self.schemas = SCHEMAS if advanced else SWITCH_OFF_SCHEMAS
         self.descriptions = DESCRIPTIONS if advanced else SWITCH_OFF_DESCRIPTIONS
         self.instructions = INSTRUCTIONS if advanced else SWITCH_OFF_INSTRUCTIONS
+        if cfg.require_absolute_paths:
+            self.instructions = self.instructions.replace("Long runs", ABSOLUTE_RULE + "Long runs", 1)
         self.paths = PathPolicy(cfg)
         self.policy = Policy(cfg, self.paths)
         self.processes = ProcessManager(cfg, self.paths, self.policy)
@@ -587,7 +597,7 @@ class Server:
             raise RuntimeFault("invalid_arguments", "Invalid argument value(s): " + "; ".join(errors) + ".")
         self._refuse_switched_args(name, args)
         if self.cfg.require_absolute_paths:
-            _require_absolute(name, args)
+            _require_absolute(name, args, self.cfg.mode)
         if name == "workspace": return self.cap.workspace(**args)
         if name == "filesystem": return self.cap.filesystem(**args)
         if name == "search": return self.cap.search(**args)
