@@ -4288,10 +4288,12 @@ def test_example_config_inherits_systemdrive():
     assert "SystemDrive" in json.loads(text)["inherit_environment"]
 
 
-def test_switch_off_instructions_name_process_wait():
+def test_instructions_name_process_wait_and_workspace_get():
     from agent_runtime import server as srv
-    assert "process start, then wait" in srv.SWITCH_OFF_INSTRUCTIONS
-    assert "read with wait_ms" not in srv.SWITCH_OFF_INSTRUCTIONS
+    for text in (srv.INSTRUCTIONS, srv.SWITCH_OFF_INSTRUCTIONS):
+        assert "process start, then process wait" in text
+        assert "read with wait_ms" not in text
+        assert "Call workspace get once at task start; follow project_instructions." in text
 
 
 def test_multi_edit_miss_message_has_no_count_tip(tmp_path):
