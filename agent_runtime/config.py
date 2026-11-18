@@ -63,6 +63,9 @@ class Config:
     max_project_instruction_bytes: int = 8_000
     # Turns on the batch and multi_search tools and filesystem multi_edit.
     advanced_features: bool = False
+    # One server serves every chat and task, and a set_cwd anywhere moves its cwd: edits, git, execute and
+    # process start must then name an absolute path or cwd, so one chat can't change another's repo.
+    require_absolute_paths: bool = True
 
     def __post_init__(self):
         # Resolved once, so the rest of the server only sees real shells.
@@ -112,6 +115,8 @@ class Config:
             raise ValueError("load_project_instructions must be true or false")
         if not isinstance(cfg.advanced_features, bool):
             raise ValueError("advanced_features must be true or false")
+        if not isinstance(cfg.require_absolute_paths, bool):
+            raise ValueError("require_absolute_paths must be true or false")
         if not isinstance(cfg.edit_checks, dict) or not all(
                 isinstance(argv, list) and argv and all(isinstance(part, str) for part in argv)
                 for argv in cfg.edit_checks.values()):

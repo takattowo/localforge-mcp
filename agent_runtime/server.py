@@ -4,6 +4,7 @@ import copy
 import difflib
 import json
 import os
+from pathlib import Path
 import re
 import sys
 import time
@@ -35,6 +36,7 @@ INSTRUCTIONS = (
     "fan out searches with multi_search. "
     "Edit files only with filesystem write/replace_text/multi_edit/apply_patch, "
     "never via execute, process, or any script. "
+    "File changes, git, execute and process start need an absolute path/cwd: the cwd is shared by every chat. "
     "Long runs (builds, tests): process start, then process wait, not a long execute timeout. "
     "Stage explicit files only; git add -A/./--all is blocked."
 )
@@ -43,9 +45,37 @@ SWITCH_OFF_INSTRUCTIONS = (
     "Call workspace get once at task start; follow project_instructions. "
     "Edit files only with filesystem write/replace_text/apply_patch, "
     "never via execute, process, or any script. "
+    "File changes, git, execute and process start need an absolute path/cwd: the cwd is shared by every chat. "
     "Long runs (builds, tests): process start, then process wait, not a long execute timeout. "
     "Stage explicit files only; git add -A/./--all is blocked."
 )
+
+FS_WRITES = {"write", "replace_text", "multi_edit", "apply_patch", "mkdir", "delete", "move", "copy"}
+
+def _require_absolute(name, args):
+    """Refuse an edit or command that leans on the runtime cwd.
+
+    One server serves every chat and task, and a set_cwd anywhere moves
+    the cwd, so a relative path or a missing cwd could change another
+    chat's repo. Reads and searches may stay relative.
+    """
+    action = args.get("action")
+    if name == "filesystem" and action in FS_WRITES:
+        keys = {"copy": ("destination",), "move": ("path", "destination")}.get(action, ("path",))
+    elif name in ("git", "execute") or (name == "process" and action == "start"):
+        keys = ("cwd",)
+    else:
+        return
+    for key in keys:
+        value = args.get(key)
+        if value is None and key == "destination":
+            continue  # the action names its own missing argument
+        # On Windows a rooted path without a drive (\x) follows the current drive, so it is not absolute either.
+        if not isinstance(value, str) or not Path(value).is_absolute():
+            where = f"{name} {action}" if action else name
+            raise RuntimeFault("relative_path",
+                               f"{where} needs an absolute {key}, got {value!r}: the runtime cwd is shared by every "
+                               "chat and task, so a relative one could land in another repo")
 
 def _guarded_write(emit, timeout):
     """Run emit() on a helper thread with a timeout.
@@ -245,7 +275,7 @@ SCHEMAS = {
         "path": {"type": "string", "description": "Directory for set_cwd, relative to cwd or absolute, must resolve inside read roots."}}, "required": ["action"]},
     "filesystem": {"type": "object", "properties": {
         "action": {"enum": ["read", "list", "stat", "write", "replace_text", "multi_edit", "apply_patch", "mkdir", "delete", "move", "copy"], "description": "read defaults to byte mode; pass line_start/line_end for line mode, which returns numbered text (one 'N<TAB>line' per line, up to 2000 lines, each cut to 2000 characters; next_line continues). read on a directory lists it like list, with a note. list is paginated. multi_edit applies several exact replacements to one file, validated end-to-end and written once. apply_patch takes a unified diff string. copy duplicates a file (or a directory with recursive=true) without shell quoting issues."},
-        "path": {"type": "string", "description": "Target path, relative to cwd or absolute. Reads need read roots, writes need write roots."},
+        "path": {"type": "string", "description": "Target path, absolute or relative to cwd; changes need an absolute one unless require_absolute_paths is off (the cwd is shared by every chat). Reads need read roots, writes need write roots."},
         "content": {"type": "string", "description": "Full replacement content for write; overwrites the file."},
         "destination": {"type": "string", "description": "Destination path for move/copy; move and copy create missing parent dirs. An existing file there is refused unless overwrite is true; an existing directory is never replaced. A folder cannot go into itself, nor a file be copied onto itself."},
         "overwrite": {"type": "boolean", "description": "Let move/copy replace an existing destination file, default false."},
@@ -287,10 +317,10 @@ SCHEMAS = {
         "action": {"enum": ["status", "diff", "log", "show", "branch", "root", "run"], "description": "Preset operation, or run for an arbitrary git argument array."},
         "args": {"type": "array", "items": {"type": "string"}, "description": "Extra args appended to presets, or the full git args for run."},
         "include_untracked": {"type": "boolean", "description": "diff only: also show untracked files that .gitignore does not hide, as added (diffed through a fresh throwaway index after the plain diff; the real index is untouched). Each new file is cut to 8000 bytes; nested repos and files over max_file_read_bytes are listed in untracked_skipped instead. Working tree only: not with --cached/--staged or a revision (invalid_arguments); no colour output (--color, --color=always, --color-words, --word-diff=color are refused); option values must be attached (-U1), except after -S, -G, -O, --diff-filter."},
-        "cwd": {"type": "string", "description": "Repository directory, defaults to runtime cwd."}}, "required": ["action"]},
+        "cwd": {"type": "string", "description": "Repository directory, absolute; required unless require_absolute_paths is off, then defaults to runtime cwd (shared by every chat)."}}, "required": ["action"]},
     "execute": {"type": "object", "properties": {
         "command": {"description": "Command to run. Prefer an argv array: no shell parsing, no quoting bugs. A string runs through the configured default_shell, so match its syntax.", "oneOf": [{"type": "array", "items": {"type": "string"}}, {"type": "string"}]},
-        "cwd": {"type": "string", "description": "Working directory, defaults to runtime cwd."},
+        "cwd": {"type": "string", "description": "Working directory, absolute; required (for process: on start) unless require_absolute_paths is off, then defaults to runtime cwd (shared by every chat)."},
         "timeout": {"type": "number", "description": "Seconds to wait, not milliseconds; default 120 (execute_background_after_seconds). A command still running then keeps running in the background: error_type backgrounded plus a process_id to follow with process read/stop. Long foreground waits risk gateway/outpost timeouts; use the process tool for waits and polling."},
         "kill_on_timeout": {"type": "boolean", "description": "Stop the command at its timeout (error_type timeout) instead of moving it to the background, default false."},
         "shell": {"type": "boolean", "description": "Rarely needed. Strings auto-enable the shell; set true only to force an argv array through the shell for pipes and operators."},
@@ -300,7 +330,7 @@ SCHEMAS = {
         "action": {"enum": ["start", "read", "wait", "write", "status", "list", "restart", "stop"], "description": "start, read, wait, write, status, list, restart, or stop. start needs command; the others except list need process_id. wait blocks until the process exits, an output line after `after` (default 0: all kept output) matches pattern, or wait_ms passes (default and max 60000), and returns reason (matched, exited, timeout), matched, tail (last tail_lines lines), and next_after (after a match, a wait from it goes on with the line after the matched one; output_held true when it exited but something it started still holds its output; without a pattern that ends the wait after ~1 s): use it instead of polling read during builds and tests."},
         "process_id": {"type": "string", "description": "Stable id; auto-generated when start omits it."},
         "command": {"description": "Command to start. Prefer an argv array: no shell parsing, no quoting bugs. A string runs through the configured default_shell, so match its syntax.", "oneOf": [{"type": "array", "items": {"type": "string"}}, {"type": "string"}]},
-        "cwd": {"type": "string", "description": "Working directory, defaults to runtime cwd."},
+        "cwd": {"type": "string", "description": "Working directory, absolute; required (for process: on start) unless require_absolute_paths is off, then defaults to runtime cwd (shared by every chat)."},
         "shell": {"type": "boolean", "description": "Rarely needed. Strings auto-enable the shell; set true only to force an argv array through the shell for pipes and operators."},
         "env": {"type": "object", "description": "Extra environment variables; denied names raise environment_denied."},
         "after": {"type": "integer", "description": "Log cursor from previous next_after for incremental reads; for wait, pattern only looks at lines that end after it, a line the cursor cuts matched whole (default 0: all kept output)."},
@@ -556,6 +586,8 @@ class Server:
         if errors:
             raise RuntimeFault("invalid_arguments", "Invalid argument value(s): " + "; ".join(errors) + ".")
         self._refuse_switched_args(name, args)
+        if self.cfg.require_absolute_paths:
+            _require_absolute(name, args)
         if name == "workspace": return self.cap.workspace(**args)
         if name == "filesystem": return self.cap.filesystem(**args)
         if name == "search": return self.cap.search(**args)

@@ -16,6 +16,8 @@ def make(tmp, mode="DEVELOPMENT", network="unrestricted", **kwargs):
     # Keep saved output out of the real %TEMP% folder and out of tmp.
     kwargs.setdefault("spill_dir", str(Path(tmp).parent / (Path(tmp).name + "-spill")))
     kwargs.setdefault("advanced_features", True)
+    # Most tests call with paths relative to tmp; the shared-cwd guard has its own tests.
+    kwargs.setdefault("require_absolute_paths", False)
     cfg = Config(str(tmp), mode=mode, allowed_read_roots=[str(tmp)], allowed_write_roots=[str(tmp)],
                  network=network, inherit_environment=["PATH"], default_shell="cmd" if os.name == "nt" else "sh", **kwargs)
     return Server(cfg)
@@ -3256,7 +3258,8 @@ def test_server_children_print_unicode(tmp_path):
         return err_path.read_bytes().decode("utf-8", "replace")
 
     def execute(n, command, stdin=None):
-        arguments = {"command": command}
+        # The shipped default needs an absolute cwd (require_absolute_paths).
+        arguments = {"command": command, "cwd": str(tmp_path)}
         if stdin is not None:
             arguments["input"] = stdin
         request = {"jsonrpc": "2.0", "id": n, "method": "tools/call",
@@ -4538,3 +4541,55 @@ def test_missing_program_is_a_clear_fault(tmp_path):
         assert ("PATH" in message) == (os.name == "nt")
     # Nothing started, so nothing is left in the process table.
     assert not server.processes.items
+
+
+def test_require_absolute_paths_guards_writes_and_commands(tmp_path):
+    # One server serves every chat and task, and a set_cwd anywhere moves its cwd, so edits and commands must say where.
+    server = make(tmp_path, require_absolute_paths=True)
+    (tmp_path / "a.txt").write_text("one")
+    a = str(tmp_path / "a.txt")
+    refused = [
+        ("filesystem", {"action": "write", "path": "b.txt", "content": "x"}),
+        ("filesystem", {"action": "write", "file": "b.txt", "text": "x"}),
+        ("filesystem", {"action": "replace_text", "path": "a.txt", "old_text": "one", "new_text": "two"}),
+        ("filesystem", {"action": "delete", "path": "a.txt"}),
+        ("filesystem", {"action": "mkdir"}),
+        ("filesystem", {"action": "copy", "path": a, "destination": "c.txt"}),
+        ("filesystem", {"action": "move", "path": "a.txt", "destination": str(tmp_path / "c.txt")}),
+        ("filesystem", {"action": "apply_patch", "path": ".", "patch": ""}),
+        ("git", {"action": "status"}),
+        ("git", {"action": "status", "cwd": "."}),
+        ("execute", {"command": [sys.executable, "-c", "print(1)"]}),
+        ("process", {"action": "start", "command": [sys.executable, "-c", "print(1)"]}),
+    ]
+    if os.name == "nt":
+        # Rooted but driveless: follows the current drive.
+        refused.append(("filesystem", {"action": "write", "path": "\\x.txt", "content": "x"}))
+    for tool, args in refused:
+        code, message = _fault(server, tool, args)
+        assert code == "relative_path", (tool, args, code)
+        assert "shared" in message, message
+    assert (tmp_path / "a.txt").read_text() == "one" and not (tmp_path / "b.txt").exists()
+    assert not (tmp_path / "c.txt").exists() and not server.processes.items
+
+    # Reads, searches and calls that name absolute locations still work.
+    assert server.call("filesystem", {"action": "read", "path": "a.txt"})["content"] == "one"
+    assert server.call("search", {"query": "one", "path": "."})["match_count"] == 1
+    assert server.call("filesystem", {"action": "replace_text", "path": a, "old_text": "one", "new_text": "two"})
+    assert server.call("filesystem", {"action": "copy", "path": "a.txt", "destination": str(tmp_path / "c.txt")})
+    assert server.call("execute", {"command": [sys.executable, "-c", "print(1)"], "cwd": str(tmp_path)})["exit_code"] == 0
+    pid = server.call("process", {"action": "start", "command": [sys.executable, "-c", "print(1)"],
+                                  "cwd": str(tmp_path)})["process_id"]
+    assert server.call("process", {"action": "wait", "process_id": pid, "wait_ms": 20000})["exit_code"] == 0
+    assert (tmp_path / "a.txt").read_text() == "two"
+
+    # batch entries go through the same guard.
+    out = server.call("batch", {"calls": [{"tool": "filesystem", "arguments": {"action": "write", "path": "d.txt", "content": "x"}}]})
+    assert out["results"][0]["error"]["code"] == "relative_path" and not (tmp_path / "d.txt").exists()
+
+    # Off by default only in tests (make); the shipped default is on.
+    assert Config(str(tmp_path)).require_absolute_paths is True
+    config = tmp_path / "lf.json"
+    config.write_text(json.dumps({"workspace_root": str(tmp_path), "require_absolute_paths": "yes"}))
+    with pytest.raises(ValueError):
+        Config.load(str(config))
