@@ -128,8 +128,8 @@ Argument names are forgiving (`old`/`find` for `old_text`, `new`/`replacement` f
 
 ### `workspace`
 
-- `get`: workspace root, cwd, Git root, and `project_instructions`: the instruction files in every folder from the Git root (or `workspace_root`) down to the cwd, outermost first, within `max_project_instruction_bytes` (a file past it is listed as `{"path", "skipped": "budget"}`). Call it once at the start of a task.
-- `set_cwd`: change the cwd inside the read roots; returns the same fields. `cd` inside a command does not carry over.
+- `get`: workspace root, cwd, Git root, and `project_instructions`: the instruction files in every folder from the Git root (or `workspace_root`) down to the cwd, outermost first, within `max_project_instruction_bytes` (a file past it is listed as `{"path", "skipped": "budget"}`). In a Git repo also `branch` (`(detached at <sha>)` on a detached HEAD), `dirty` (`git status --porcelain` lines, at most 50; `dirty_truncated` and `dirty_count` when cut) and `recent_commits` (the last 5 as `<sha> <subject>`); a field whose git call fails or takes over 5 s is left out. Call it once at the start of a task.
+- `set_cwd`: change the cwd inside the read roots; returns the same fields. Use it to switch projects; for a one-off command pass `cwd` instead. `cd` inside a command does not carry over. In `batch` it needs `sequential: true`.
 
 ### `filesystem`
 

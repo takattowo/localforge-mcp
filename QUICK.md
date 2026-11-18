@@ -24,7 +24,7 @@ NEVER create or change files through `execute`, `process`, or any script (python
 ## Commands
 - Prefer argv arrays: {"command": ["npm", "test"]}. A string command runs in the shell the `execute` description names.
 - Long runs (builds, tests): `process` action `start`, then `wait` (until it exits or prints a line matching `pattern`). Do not use long `execute` timeouts. An `execute` still running at its timeout moves to the background (`error_type` `backgrounded` with a `process_id`); follow it with `process wait` or end it with `process stop`.
-- Pass `env` per call; change the working directory with `workspace` action `set_cwd`, not `cd`.
+- Pass `env` per call. Change the working directory with `workspace` action `set_cwd` to switch projects; for a one-off command pass `cwd` instead.
 - Programs started through `execute` or `process` are closed when the server exits (Quick restart included), unless kill_children_on_exit is false.
 - After LocalForge is updated or its config changes, the server only picks it up after a Quick restart.
 
