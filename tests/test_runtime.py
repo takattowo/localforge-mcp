@@ -20,6 +20,11 @@ def make(tmp, mode="DEVELOPMENT", network="unrestricted", **kwargs):
                  network=network, inherit_environment=["PATH"], default_shell="cmd" if os.name == "nt" else "sh", **kwargs)
     return Server(cfg)
 
+@pytest.fixture
+def no_rg(monkeypatch):
+    # find_program finds nothing, so search takes its Python fallback.
+    monkeypatch.setattr("agent_runtime.capabilities.find_program", lambda name: None)
+
 def test_mcp_protocol(tmp_path):
     server = make(tmp_path)
     init = server.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {}})
@@ -302,9 +307,9 @@ def test_process_wait_from_a_read_cursor_never_repeats_what_read_showed(tmp_path
         server.processes.stop(pid, True)
 
 @pytest.mark.parametrize("engine", ["ripgrep", "python"])
-def test_long_lines_are_cut_in_reads_and_search(tmp_path, monkeypatch, engine):
+def test_long_lines_are_cut_in_reads_and_search(tmp_path, request, engine):
     if engine == "python":
-        monkeypatch.setattr("agent_runtime.capabilities.find_program", lambda name: None)
+        request.getfixturevalue("no_rg")
     elif shutil.which("rg") is None:
         pytest.skip("rg unavailable")
     server = make(tmp_path)
@@ -649,11 +654,10 @@ def test_pcre2_retry_is_kept_despite_per_file_errors(tmp_path, monkeypatch):
     notes = []
     assert server.cap._run_rg_regex(["rg", "-e", "foo(?=bar)", "."], notes) is first and "PCRE2 unavailable" in notes[0]
 
-def test_search_python_fallback(tmp_path, monkeypatch):
+def test_search_python_fallback(tmp_path, no_rg):
     server = make(tmp_path)
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "x.py").write_text("# TODO UserService\n")
-    monkeypatch.setattr("agent_runtime.capabilities.find_program", lambda name: None)
     result = server.cap.search("UserService", glob=["*.py"])
     assert result["results"][0]["matches"][0]["line"] == 1
     files = server.cap.search(path=".", glob=["*.py"], files_only=True)
@@ -693,14 +697,13 @@ def test_call_logs_to_stderr_only(tmp_path, capsys):
     assert "tool=workspace" in captured.err and "ok" in captured.err
     assert captured.out == ""
 
-def test_search_defaults_and_guards(tmp_path, monkeypatch):
+def test_search_defaults_and_guards(tmp_path, no_rg):
     server = make(tmp_path)
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "hit.py").write_text("line one\nUserService here\nline three\nline four\n")
     (tmp_path / ".venv").mkdir()
     (tmp_path / ".venv" / "skip.py").write_text("UserService vendored\n")
     (tmp_path / "big.py").write_bytes(b"x" * (1_000_000 + 10) + b"UserService\n")
-    monkeypatch.setattr("agent_runtime.capabilities.find_program", lambda name: None)
     content = server.cap.search("UserService")
     paths = [r["path"] for r in content["results"]]
     assert os.path.join("src", "hit.py") in paths
@@ -1263,11 +1266,10 @@ def test_policy_string_commands_skip_the_program_folder(tmp_path):
     assert exc.value.code == "network_denied"
 
 
-def test_python_fallback_honors_regex(tmp_path, monkeypatch):
+def test_python_fallback_honors_regex(tmp_path, no_rg):
     server = make(tmp_path)
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "hit.py").write_text("line one\nUserService here\nline three\n")
-    monkeypatch.setattr("agent_runtime.capabilities.find_program", lambda name: None)
     found = server.cap.search("User.*here", fixed_string=False)
     assert found["engine"] == "python" and len(found["results"]) == 1
     literal = server.cap.search("User.*here")
@@ -2109,11 +2111,11 @@ def test_read_lines_past_the_end_shows_the_last_lines(tmp_path):
 
 
 @pytest.mark.parametrize("engine", ["ripgrep", "python"])
-def test_search_context_near_matches_and_lone_cr(tmp_path, monkeypatch, engine):
+def test_search_context_near_matches_and_lone_cr(tmp_path, request, engine):
     if engine == "ripgrep" and not shutil.which("rg"):
         pytest.skip("ripgrep unavailable")
     if engine == "python":
-        monkeypatch.setattr("agent_runtime.capabilities.find_program", lambda name: None)
+        request.getfixturevalue("no_rg")
     server = make(tmp_path)
     (tmp_path / "a.txt").write_bytes(b"x\ry\nhit\nhit\nz\n")
     out = server.cap.search("hit", context_lines=1)
@@ -2266,11 +2268,11 @@ def test_apply_patch_reports_where_a_zero_length_hunk_with_context_landed(tmp_pa
 
 
 @pytest.mark.parametrize("engine", ["ripgrep", "python"])
-def test_search_folder_glob_and_exact_truncation(tmp_path, monkeypatch, engine):
+def test_search_folder_glob_and_exact_truncation(tmp_path, monkeypatch, request, engine):
     if engine == "ripgrep" and not shutil.which("rg"):
         pytest.skip("ripgrep unavailable")
     if engine == "python":
-        monkeypatch.setattr("agent_runtime.capabilities.find_program", lambda name: None)
+        request.getfixturevalue("no_rg")
     server = make(tmp_path)
     for folder in ("src", "other"):
         (tmp_path / folder).mkdir()
@@ -2298,11 +2300,11 @@ def test_search_folder_glob_and_exact_truncation(tmp_path, monkeypatch, engine):
 
 
 @pytest.mark.parametrize("engine", ["ripgrep", "python"])
-def test_search_spreads_capped_matches_across_files(tmp_path, monkeypatch, engine):
+def test_search_spreads_capped_matches_across_files(tmp_path, request, engine):
     if engine == "ripgrep" and not shutil.which("rg"):
         pytest.skip("ripgrep unavailable")
     if engine == "python":
-        monkeypatch.setattr("agent_runtime.capabilities.find_program", lambda name: None)
+        request.getfixturevalue("no_rg")
     server = make(tmp_path)
     for name in ("a.txt", "b.txt", "c.txt"):
         (tmp_path / name).write_text("hit\n" * 300)
@@ -2322,8 +2324,7 @@ def test_search_spreads_capped_matches_across_files(tmp_path, monkeypatch, engin
     assert one["match_count"] == 1 and one["truncated"] is True and "spread" not in one
 
 
-def test_python_search_total_is_exact_unless_it_stopped_early(tmp_path, monkeypatch):
-    monkeypatch.setattr("agent_runtime.capabilities.find_program", lambda name: None)
+def test_python_search_total_is_exact_unless_it_stopped_early(tmp_path, no_rg):
     server = make(tmp_path)
     # max_results 1 collects at most 5: five files fill it exactly.
     for n in range(5):
@@ -2336,13 +2337,13 @@ def test_python_search_total_is_exact_unless_it_stopped_early(tmp_path, monkeypa
 
 
 @pytest.mark.parametrize("engine", ["ripgrep", "python"])
-def test_search_globs_follow_ripgrep_rules(tmp_path, monkeypatch, engine):
+def test_search_globs_follow_ripgrep_rules(tmp_path, request, engine):
     # Expectations recorded from ripgrep 15.1.0 run from the search root;
     # the Python fallback must give the same answers.
     if engine == "ripgrep" and not shutil.which("rg"):
         pytest.skip("ripgrep unavailable")
     if engine == "python":
-        monkeypatch.setattr("agent_runtime.capabilities.find_program", lambda name: None)
+        request.getfixturevalue("no_rg")
     server = make(tmp_path)
     for rel in ("src/a.py", "src/deep/a.py", "src/deep/er/y.cs", "a/src/x.py", "scripts/build",
                 "pkg/node_modules/x.js", "pkg/build/out.txt", "pkg/dist/b.js"):
@@ -2401,8 +2402,7 @@ def test_search_globs_follow_ripgrep_rules(tmp_path, monkeypatch, engine):
     assert files(glob=["[a-c-z]*.cs"]) == ["src/deep/er/y.cs"]
 
 
-def test_python_glob_fallback_is_bounded(tmp_path, monkeypatch):
-    monkeypatch.setattr("agent_runtime.capabilities.find_program", lambda name: None)
+def test_python_glob_fallback_is_bounded(tmp_path, no_rg):
     server = make(tmp_path)
     (tmp_path / ("a" * 40 + ".txt")).write_text("hit\n")
     deep = tmp_path.joinpath(*["x"] * 30)
@@ -2510,11 +2510,11 @@ def test_execute_clip_keeps_head_and_tail(tmp_path):
 
 
 @pytest.mark.parametrize("engine", ["ripgrep", "python"])
-def test_search_context_numbered_and_per_file(tmp_path, monkeypatch, engine):
+def test_search_context_numbered_and_per_file(tmp_path, request, engine):
     if engine == "ripgrep" and not shutil.which("rg"):
         pytest.skip("ripgrep unavailable")
     if engine == "python":
-        monkeypatch.setattr("agent_runtime.capabilities.find_program", lambda name: None)
+        request.getfixturevalue("no_rg")
     server = make(tmp_path)
     (tmp_path / "a.txt").write_text("a1\na2\nhit\n")
     (tmp_path / "b.txt").write_text("hit\nb2\nb3\n")
@@ -4016,11 +4016,11 @@ def test_gc_keeps_an_exited_entry_whose_pipes_are_still_held(tmp_path):
 
 
 @pytest.mark.parametrize("engine", ["ripgrep", "python"])
-def test_search_groups_matches_by_file(tmp_path, monkeypatch, engine):
+def test_search_groups_matches_by_file(tmp_path, request, engine):
     if engine == "ripgrep" and not shutil.which("rg"):
         pytest.skip("ripgrep unavailable")
     if engine == "python":
-        monkeypatch.setattr("agent_runtime.capabilities.find_program", lambda name: None)
+        request.getfixturevalue("no_rg")
     server = make(tmp_path)
     (tmp_path / "a.txt").write_text("hit one\nmiss\nhit two\n")
     (tmp_path / "b.txt").write_text("hit three\n")
