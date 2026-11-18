@@ -2706,6 +2706,80 @@ def test_workspace_get_returns_project_instructions(tmp_path):
     assert "project_instructions" not in off.cap.workspace("get")
 
 
+GIT_STATE_KEYS = ("branch", "dirty", "dirty_truncated", "dirty_count", "recent_commits")
+
+
+def _git_repo(path, messages):
+    env = {**os.environ, "GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@example.com",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@example.com"}
+
+    def git(*args):
+        return subprocess.run(["git", "-C", str(path), *args], check=True, capture_output=True,
+                              text=True, env=env).stdout.strip()
+
+    git("init", "-q", "-b", "work")
+    for i, message in enumerate(messages):
+        (path / "f.txt").write_text(f"{i}\n")
+        git("add", "f.txt")
+        git("commit", "-q", "-m", message)
+    return git
+
+
+def test_workspace_get_returns_git_state(tmp_path):
+    if shutil.which("git") is None:
+        pytest.skip("git unavailable")
+    git = _git_repo(tmp_path, ["one", "two", "three", "four", "five", "rotate token=abcd1234"])
+    (tmp_path / "f.txt").write_text("changed\n")
+    (tmp_path / "new.txt").write_text("x\n")
+    server = make(tmp_path)
+    info = server.cap.workspace("get")
+    assert list(info)[:3] == ["workspace_root", "cwd", "repository_root"]
+    assert info["branch"] == "work"
+    assert info["dirty"] == [" M f.txt", "?? new.txt"]
+    assert "dirty_truncated" not in info and "dirty_count" not in info
+    shas = git("log", "-5", "--format=%h").split()
+    # Subjects pass through the same redaction as other git output.
+    assert info["recent_commits"] == [f"{shas[0]} rotate token=[REDACTED]", f"{shas[1]} five",
+                                      f"{shas[2]} four", f"{shas[3]} three", f"{shas[4]} two"]
+    git("checkout", "-q", "--detach")
+    assert server.cap.workspace("get")["branch"] == f"(detached at {shas[0]})"
+
+
+def test_workspace_get_has_no_git_state_outside_a_repo(tmp_path):
+    info = make(tmp_path).cap.workspace("get")
+    assert info["repository_root"] is None
+    assert [key for key in GIT_STATE_KEYS if key in info] == []
+
+
+def test_workspace_git_state_skips_a_field_whose_git_call_fails(tmp_path, monkeypatch):
+    if shutil.which("git") is None:
+        pytest.skip("git unavailable")
+    _git_repo(tmp_path, ["one"])
+    (tmp_path / "new.txt").write_text("x\n")
+    real = subprocess.run
+
+    def slow_status(cmd, *args, **kwargs):
+        if "status" in cmd:
+            raise subprocess.TimeoutExpired(cmd, kwargs.get("timeout"))
+        return real(cmd, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", slow_status)
+    info = make(tmp_path).cap.workspace("get")
+    assert info["repository_root"] and info["branch"] == "work" and len(info["recent_commits"]) == 1
+    assert "dirty" not in info
+
+
+def test_workspace_git_state_cuts_dirty_at_50(tmp_path):
+    if shutil.which("git") is None:
+        pytest.skip("git unavailable")
+    _git_repo(tmp_path, ["one"])
+    for i in range(55):
+        (tmp_path / f"n{i:02}.txt").write_text("x\n")
+    info = make(tmp_path).cap.workspace("get")
+    assert len(info["dirty"]) == 50 and info["dirty"][0] == "?? n00.txt"
+    assert info["dirty_truncated"] is True and info["dirty_count"] == 55
+
+
 def test_project_instructions_follow_the_folder_chain_and_switch(tmp_path, monkeypatch):
     if shutil.which("git") is None:
         pytest.skip("git unavailable")

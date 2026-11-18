@@ -437,6 +437,9 @@ UNTRACKED_DIFF_BYTES = 8000
 UNTRACKED_SKIPPED_SHOWN = 50
 BATCH_SEARCH_WORKERS = 8
 GIT_ROOT_TTL_SECONDS = 30
+# workspace get/set_cwd: per git call, and how many dirty paths to list.
+GIT_STATE_TIMEOUT_SECONDS = 5
+GIT_STATE_MAX_DIRTY = 50
 PATH_LOCK_STRIPES = 256
 # Saved outputs kept in the spill folder; older ones are pruned.
 SPILL_KEEP = 100
@@ -928,12 +931,50 @@ class Capabilities:
     def _workspace_info(self):
         info = {"workspace_root": str(self.paths.workspace), "cwd": str(self.cwd),
                 "repository_root": self._git_root(self.cwd)}
-        if not self.cfg.load_project_instructions:
-            return info
-        instructions = self._project_instructions(info["repository_root"], self.cwd)
-        if instructions:
-            info["project_instructions"] = instructions
+        if self.cfg.load_project_instructions:
+            instructions = self._project_instructions(info["repository_root"], self.cwd)
+            if instructions:
+                info["project_instructions"] = instructions
+        if info["repository_root"]:
+            info.update(self._git_state(self.cwd))
         return info
+
+    def _git_state(self, cwd):
+        """branch, dirty and recent_commits for the repo at cwd.
+
+        Read-only git, no prompts or optional locks; a field whose git
+        call fails or times out is left out.
+        """
+        env = {**safe_environment(self.cfg), **git_environment(self.cfg, True)}
+
+        def git(*args):
+            try:
+                result = subprocess.run(
+                    ["git", "-c", "core.quotepath=false", "-C", str(cwd), *args],
+                    capture_output=True, text=True, encoding="utf-8", errors="replace",
+                    timeout=GIT_STATE_TIMEOUT_SECONDS, stdin=subprocess.DEVNULL, env=env)
+            except (OSError, subprocess.TimeoutExpired):
+                return None
+            return redact(result.stdout) if result.returncode == 0 else None
+
+        state = {}
+        branch = git("branch", "--show-current")
+        if branch is not None and not branch.strip():
+            sha = git("rev-parse", "--short", "HEAD")
+            branch = f"(detached at {sha.strip()})" if sha and sha.strip() else None
+        if branch:
+            state["branch"] = branch.strip()
+        status = git("status", "--porcelain")
+        if status is not None:
+            dirty = [line for line in status.splitlines() if line.strip()]
+            state["dirty"] = dirty[:GIT_STATE_MAX_DIRTY]
+            if len(dirty) > GIT_STATE_MAX_DIRTY:
+                state["dirty_truncated"] = True
+                state["dirty_count"] = len(dirty)
+        log = git("log", "-5", "--format=%h %s")
+        if log is not None:
+            state["recent_commits"] = log.splitlines()
+        return state
 
     def _project_instructions(self, repo_root, cwd):
         """Read agent rule files (AGENTS.md, CLAUDE.md) like CLI agents do.
