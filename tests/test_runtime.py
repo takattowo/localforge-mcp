@@ -2780,6 +2780,42 @@ def test_workspace_git_state_cuts_dirty_at_50(tmp_path):
     assert info["dirty_truncated"] is True and info["dirty_count"] == 55
 
 
+def _fsmonitor_hook(repo):
+    """Point core.fsmonitor at a script that writes MARKER; plain git status runs it."""
+    marker = repo / "MARKER"
+    hook = repo / "hook.sh"
+    hook.write_text(f'#!/bin/sh\necho hi > "{marker.as_posix()}"\n', newline="\n")
+    hook.chmod(0o755)
+    subprocess.run(["git", "-C", str(repo), "config", "core.fsmonitor", hook.as_posix()], check=True)
+    # Without this the tests below would prove nothing.
+    subprocess.run(["git", "-C", str(repo), "status", "--porcelain"], capture_output=True)
+    assert marker.exists(), "git did not run the fsmonitor hook"
+    marker.unlink()
+    return marker
+
+
+@pytest.mark.parametrize("mode", ["READ_ONLY", "WORKSPACE"])
+def test_workspace_git_state_only_in_modes_that_run_git(tmp_path, mode):
+    if shutil.which("git") is None:
+        pytest.skip("git unavailable")
+    _git_repo(tmp_path, ["one"])
+    marker = _fsmonitor_hook(tmp_path)
+    info = make(tmp_path, mode=mode).cap.workspace("get")
+    assert info["repository_root"]
+    assert [key for key in GIT_STATE_KEYS if key in info] == []
+    assert not marker.exists()
+
+
+def test_workspace_git_state_does_not_run_the_fsmonitor_hook(tmp_path):
+    if shutil.which("git") is None:
+        pytest.skip("git unavailable")
+    _git_repo(tmp_path, ["one"])
+    marker = _fsmonitor_hook(tmp_path)
+    info = make(tmp_path).cap.workspace("get")
+    assert info["branch"] == "work" and "?? hook.sh" in info["dirty"] and len(info["recent_commits"]) == 1
+    assert not marker.exists()
+
+
 def test_project_instructions_follow_the_folder_chain_and_switch(tmp_path, monkeypatch):
     if shutil.which("git") is None:
         pytest.skip("git unavailable")

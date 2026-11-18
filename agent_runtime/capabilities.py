@@ -935,9 +935,18 @@ class Capabilities:
             instructions = self._project_instructions(info["repository_root"], self.cwd)
             if instructions:
                 info["project_instructions"] = instructions
-        if info["repository_root"]:
+        if info["repository_root"] and self._may_run_git(self.cwd):
             info.update(self._git_state(self.cwd))
         return info
+
+    def _may_run_git(self, cwd):
+        # git status runs programs named in .git/config (core.fsmonitor),
+        # which modes without process execution let the agent write.
+        try:
+            self.policy.authorize_command(["git", "status"], cwd, False)
+        except RuntimeFault:
+            return False
+        return True
 
     def _git_state(self, cwd):
         """branch, dirty and recent_commits for the repo at cwd.
@@ -950,7 +959,8 @@ class Capabilities:
         def git(*args):
             try:
                 result = subprocess.run(
-                    ["git", "-c", "core.quotepath=false", "-C", str(cwd), *args],
+                    ["git", "-c", "core.quotepath=false", "-c", "core.fsmonitor=false",
+                     "-c", "log.showSignature=false", "-C", str(cwd), *args],
                     capture_output=True, text=True, encoding="utf-8", errors="replace",
                     timeout=GIT_STATE_TIMEOUT_SECONDS, stdin=subprocess.DEVNULL, env=env)
             except (OSError, subprocess.TimeoutExpired):
