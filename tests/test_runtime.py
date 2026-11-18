@@ -649,7 +649,7 @@ def test_pcre2_retry_is_kept_despite_per_file_errors(tmp_path, monkeypatch):
     notes = []
     assert server.cap._run_rg_regex(["rg", "-e", "foo(?=bar)", "."], notes) is first and "PCRE2 unavailable" in notes[0]
 
-def test_search_fallback_and_git(tmp_path, monkeypatch):
+def test_search_python_fallback(tmp_path, monkeypatch):
     server = make(tmp_path)
     (tmp_path / "src").mkdir()
     (tmp_path / "src" / "x.py").write_text("# TODO UserService\n")
@@ -658,8 +658,6 @@ def test_search_fallback_and_git(tmp_path, monkeypatch):
     assert result["results"][0]["matches"][0]["line"] == 1
     files = server.cap.search(path=".", glob=["*.py"], files_only=True)
     assert files["results"]
-    if shutil.which("git") is None:
-        pytest.skip("git unavailable")
 
 def test_git_when_available(tmp_path):
     if shutil.which("git") is None:
@@ -2882,6 +2880,7 @@ def test_internal_git_and_rg_ignore_programs_in_the_cwd(tmp_path, monkeypatch):
     for name in ("git.exe", "rg.exe"):
         shutil.copy(whoami, plant / name)
     me = subprocess.run([str(whoami)], capture_output=True, text=True).stdout.strip().lower()
+    has_rg = shutil.which("rg") is not None
     monkeypatch.chdir(plant)
     server = make(repo)
     info = server.cap.workspace("get")
@@ -2892,6 +2891,8 @@ def test_internal_git_and_rg_ignore_programs_in_the_cwd(tmp_path, monkeypatch):
     assert me not in (version["stdout"] + version["stderr"]).lower()
     found = server.cap.search("0", path=".")
     assert "error" not in found and [r["path"] for r in found["results"]] == ["f.txt"]
+    if has_rg:
+        assert found["engine"] == "ripgrep"
 
 
 def test_missing_git_gives_no_root_and_a_clear_fault(tmp_path, monkeypatch):
