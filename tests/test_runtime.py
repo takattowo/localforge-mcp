@@ -528,6 +528,11 @@ def test_git_diff_can_include_untracked_files(tmp_path):
     # Other actions ignore it, with a note.
     logged = server.call("git", {"action": "log", "include_untracked": True})
     assert logged["success"] and "include_untracked" in logged["note"], logged
+    # log's default count gives way to one in args.
+    assert logged["command"][-2:] == ["-n", "20"], logged
+    for count in (["-1"], ["-n", "1"], ["-n1"], ["--max-count=1"], ["--max-count", "1"]):
+        limited = server.call("git", {"action": "log", "args": count})
+        assert limited["success"] and "20" not in limited["command"], (count, limited)
     # status with it lists every untracked file, even where the repo config hides them.
     server.cap.git("run", ["config", "status.showUntrackedFiles", "no"])
     assert "\n? " not in server.call("git", {"action": "status"})["stdout"]

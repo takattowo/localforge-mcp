@@ -2313,6 +2313,8 @@ class Capabilities:
             "log": ["log", "--oneline", "-n", "20"], "show": ["show"],
             "branch": ["branch"], "root": ["rev-parse", "--show-toplevel"],
         }
+        if action == "log" and any(re.fullmatch(r"-\d+|-n\d*|--max-count(=.*)?", a) for a in args or []):
+            presets["log"] = ["log", "--oneline"]
         subcommand = list(args or []) if action == "run" else presets.get(action)
         if subcommand is None:
             raise RuntimeFault("invalid_action", f"Unknown git action: {action}")
