@@ -3,6 +3,7 @@ from dataclasses import dataclass, field, fields
 from pathlib import Path
 import json
 import os
+import re
 from .security import resolve_shell
 
 MODES = {"READ_ONLY", "WORKSPACE", "DEVELOPMENT", "FULL_ACCESS"}
@@ -128,10 +129,14 @@ class Config:
         if cfg.call_log is not None and not isinstance(cfg.call_log, str):
             raise ValueError("call_log must be a file path or null")
         if cfg.call_log:
-            expanded = os.path.expandvars(cfg.call_log)
-            # expandvars leaves an unset variable as written, which would become a folder named after it.
-            if "$" in expanded or "%" in expanded:
-                raise ValueError(f"call_log names an unset environment variable: {cfg.call_log}")
-            log = Path(expanded).expanduser()
+            # expandvars leaves an unset variable as written, which would become a folder named after it. Only the
+            # explicit forms count as references: a bare $name, d$ (admin share) or a lone % can be part of a real path.
+            refs = re.findall(r"\$\{([^}]+)\}", cfg.call_log)
+            if os.name == "nt":
+                refs += re.findall(r"%([A-Za-z_][A-Za-z0-9_()]*)%", cfg.call_log)
+            missing = sorted({name for name in refs if name not in os.environ})
+            if missing:
+                raise ValueError(f"call_log names unset environment variable(s): {', '.join(missing)}")
+            log = Path(os.path.expandvars(cfg.call_log)).expanduser()
             cfg.call_log = str(log if log.is_absolute() else Path(cfg.config_path).parent / log)
         return cfg

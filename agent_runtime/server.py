@@ -609,6 +609,9 @@ class Server:
             # two writes at the same instant can overwrite each other (a lost or broken line, never a failed call);
             # readers skip lines that don't parse. Add a file lock if that shows up.
             with self._call_log_lock:
+                # Another thread may have just turned the log off; no line after its warning.
+                if self._call_log_off:
+                    return
                 path = Path(self.cfg.call_log)
                 path.parent.mkdir(parents=True, exist_ok=True)
                 with open(path, "a", encoding="utf-8") as handle:

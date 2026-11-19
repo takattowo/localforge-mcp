@@ -1984,12 +1984,16 @@ def test_call_log_config_path(tmp_path, monkeypatch):
     path.write_text(json.dumps({"workspace_root": str(tmp_path), "call_log": 5}))
     with pytest.raises(ValueError, match="call_log"):
         Config.load(str(path))
-    # An unset variable is an error, not a folder named after it.
+    # An unset ${NAME} or %NAME% is an error naming it, not a folder named after it.
     monkeypatch.delenv("LF_TEST_UNSET", raising=False)
-    for unset in ("$LF_TEST_UNSET/calls.jsonl", "%LF_TEST_UNSET%/calls.jsonl"):
+    for unset in ["${LF_TEST_UNSET}/calls.jsonl"] + (["%LF_TEST_UNSET%/calls.jsonl"] if os.name == "nt" else []):
         path.write_text(json.dumps({"workspace_root": str(tmp_path), "call_log": unset}))
-        with pytest.raises(ValueError, match="call_log"):
+        with pytest.raises(ValueError, match="LF_TEST_UNSET"):
             Config.load(str(path))
+    # Literal $ and % in a real path still load: an admin share, a percent folder, a bare $name that isn't set.
+    for literal in ("\\\\nas\\d$\\logs\\calls.jsonl", str(tmp_path / "50%" / "calls.jsonl"), str(tmp_path / "$Recycle" / "c.jsonl")):
+        path.write_text(json.dumps({"workspace_root": str(tmp_path), "call_log": literal}))
+        assert Config.load(str(path)).call_log == literal, literal
 
 
 def test_workspace_get_caches_git_root(tmp_path, monkeypatch):
