@@ -858,6 +858,21 @@ def _numbered(number, body, length, budget):
         text = text[:max(0, budget - len(LINE_CUT))] + LINE_CUT
     return text
 
+# git log options that may take their value as the next argument, so that value is never read as a count.
+LOG_VALUE_OPTIONS = {"--grep", "--author", "--committer", "-S", "-G", "-O", "--since", "--until", "--after",
+                     "--before", "--skip", "--min-parents", "--max-parents", "--encoding", "--format", "--pretty"}
+
+def _log_sets_count(args):
+    # A count option before "--" (paths after it can look like -5), not another option's value.
+    previous = None
+    for arg in args:
+        if arg == "--":
+            return False
+        if previous not in LOG_VALUE_OPTIONS and re.fullmatch(r"-\d+|-n\d*|--max-count(=.*)?", arg):
+            return True
+        previous = arg
+    return False
+
 def _git_program():
     # From PATH only: a bare "git" would also run a git.exe in the cwd.
     git = find_program("git")
@@ -2313,7 +2328,7 @@ class Capabilities:
             "log": ["log", "--oneline", "-n", "20"], "show": ["show"],
             "branch": ["branch"], "root": ["rev-parse", "--show-toplevel"],
         }
-        if action == "log" and any(re.fullmatch(r"-\d+|-n\d*|--max-count(=.*)?", a) for a in args or []):
+        if action == "log" and _log_sets_count(args or []):
             presets["log"] = ["log", "--oneline"]
         subcommand = list(args or []) if action == "run" else presets.get(action)
         if subcommand is None:

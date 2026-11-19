@@ -487,6 +487,20 @@ def test_missing_relative_path_is_retried_from_the_git_root(tmp_path):
         denied.cap.filesystem("read", "src/app.py")
     assert exc.value.code == "path_not_found" and "Git root" not in exc.value.message
 
+def test_git_log_default_count_gives_way(tmp_path):
+    if shutil.which("git") is None:
+        pytest.skip("git unavailable")
+    server = make(tmp_path)
+    for argv in (["init", "-q"], ["config", "user.email", "t@example.com"], ["config", "user.name", "t"],
+                 ["config", "commit.gpgsign", "false"], ["commit", "-q", "--allow-empty", "-m", "base"]):
+        assert server.cap.git("run", argv)["success"]
+    for args in ([], ["--grep", "-n"], ["--author", "-5"], ["-S", "-1"], ["--", "-5"]):
+        out = server.call("git", {"action": "log", "args": args})
+        assert out["success"] and out["command"].count("20") == 1, (args, out)
+    for args in (["-1"], ["-n", "1"], ["-n1"], ["--max-count=1"], ["--max-count", "1"], ["--grep", "x", "-1"]):
+        out = server.call("git", {"action": "log", "args": args})
+        assert out["success"] and "20" not in out["command"], (args, out)
+
 def test_git_diff_can_include_untracked_files(tmp_path):
     if shutil.which("git") is None:
         pytest.skip("git unavailable")
@@ -528,11 +542,6 @@ def test_git_diff_can_include_untracked_files(tmp_path):
     # Other actions ignore it, with a note.
     logged = server.call("git", {"action": "log", "include_untracked": True})
     assert logged["success"] and "include_untracked" in logged["note"], logged
-    # log's default count gives way to one in args.
-    assert logged["command"][-2:] == ["-n", "20"], logged
-    for count in (["-1"], ["-n", "1"], ["-n1"], ["--max-count=1"], ["--max-count", "1"]):
-        limited = server.call("git", {"action": "log", "args": count})
-        assert limited["success"] and "20" not in limited["command"], (count, limited)
     # status with it lists every untracked file, even where the repo config hides them.
     server.cap.git("run", ["config", "status.showUntrackedFiles", "no"])
     assert "\n? " not in server.call("git", {"action": "status"})["stdout"]
