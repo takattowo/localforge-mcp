@@ -1994,6 +1994,20 @@ def test_call_log_config_path(tmp_path, monkeypatch):
     for literal in ("\\\\nas\\d$\\logs\\calls.jsonl", str(tmp_path / "50%" / "calls.jsonl"), str(tmp_path / "$Recycle" / "c.jsonl")):
         path.write_text(json.dumps({"workspace_root": str(tmp_path), "call_log": literal}))
         assert Config.load(str(path)).call_log == literal, literal
+    # Set variables expand wherever they sit; $$ and %% stay as written.
+    monkeypatch.setenv("LF_TEST_SET", "setdir")
+    base = str(tmp_path)
+    cases = {
+        os.path.join(base, "O'Brien", "${LF_TEST_SET}", "c.jsonl"): os.path.join(base, "O'Brien", "setdir", "c.jsonl"),
+        os.path.join(base, "a$$b", "c.jsonl"): os.path.join(base, "a$$b", "c.jsonl"),
+        os.path.join(base, "a%%b", "c.jsonl"): os.path.join(base, "a%%b", "c.jsonl"),
+    }
+    if os.name == "nt":
+        cases[os.path.join(base, "50%", "x", "%LF_TEST_SET%", "c.jsonl")] = os.path.join(base, "50%", "x", "setdir", "c.jsonl")
+        cases[os.path.join(base, "O'Brien", "%LF_TEST_SET%", "c.jsonl")] = os.path.join(base, "O'Brien", "setdir", "c.jsonl")
+    for raw, want in cases.items():
+        path.write_text(json.dumps({"workspace_root": str(tmp_path), "call_log": raw}))
+        assert Config.load(str(path)).call_log == want, raw
 
 
 def test_workspace_get_caches_git_root(tmp_path, monkeypatch):

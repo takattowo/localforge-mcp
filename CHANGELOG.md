@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- New config `call_log` (off by default): a file that gets one JSON line per tool call with `at`, `client`, `tool`, `result` (`ok`, `failed` or the error code), `ms` and `chars`, never the arguments. An unexpected server error is logged as `internal_error`. Several servers (Quick's and codemode's) can share one file; a line written by two at the same instant can rarely be lost or broken. A file that can't be written turns the log off until restart, with one stderr line, instead of failing calls. An unset `${NAME}` or `%NAME%` in the path is a config error; a bare `$` or `%` (an admin share such as `\\nas\d$`) stays as written.
+- New config `call_log` (off by default): a file that gets one JSON line per tool call with `at`, `client`, `tool`, `result` (`ok`, `failed` or the error code), `ms` and `chars`, never the arguments. An unexpected server error is logged as `internal_error`. Several servers (Quick's and codemode's) can share one file; a line written by two at the same instant can rarely be lost or broken. A file that can't be written turns the log off until restart, with one stderr line, instead of failing calls. An unset `${NAME}` or `%NAME%` in the path is a config error; a bare `$NAME` expands if set and otherwise stays as written, as does any other `$` or `%` (an admin share such as `\\nas\d$`).
 
 ## 1.11.0
 

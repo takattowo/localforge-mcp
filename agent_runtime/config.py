@@ -129,14 +129,33 @@ class Config:
         if cfg.call_log is not None and not isinstance(cfg.call_log, str):
             raise ValueError("call_log must be a file path or null")
         if cfg.call_log:
-            # expandvars leaves an unset variable as written, which would become a folder named after it. Only the
-            # explicit forms count as references: a bare $name, d$ (admin share) or a lone % can be part of a real path.
-            refs = re.findall(r"\$\{([^}]+)\}", cfg.call_log)
-            if os.name == "nt":
-                refs += re.findall(r"%([A-Za-z_][A-Za-z0-9_()]*)%", cfg.call_log)
-            missing = sorted({name for name in refs if name not in os.environ})
-            if missing:
-                raise ValueError(f"call_log names unset environment variable(s): {', '.join(missing)}")
-            log = Path(os.path.expandvars(cfg.call_log)).expanduser()
-            cfg.call_log = str(log if log.is_absolute() else Path(cfg.config_path).parent / log)
+            cfg.call_log = _log_path(cfg.call_log, Path(cfg.config_path).parent)
         return cfg
+
+
+# ${NAME} anywhere, %NAME% on Windows, bare $NAME. One pass checks and expands, unlike os.path.expandvars, which on
+# Windows skips text after a quote and turns $$ or %% into one character.
+_VARIABLE = re.compile(r"\$\{([^}]+)\}|%([A-Za-z_][A-Za-z0-9_()]*)%|\$([A-Za-z_][A-Za-z0-9_]*)")
+
+
+def _log_path(raw, base):
+    missing = []
+
+    def expand(match):
+        braced, percent, bare = match.groups()
+        name = braced or percent or bare
+        if percent is not None and os.name != "nt":
+            return match.group(0)
+        if name in os.environ:
+            return os.environ[name]
+        # A bare $name that isn't set is part of a real path ($Recycle.Bin, an admin share's d$); ${NAME} and %NAME% are
+        # unmistakably references, so an unset one is an error rather than a folder named after it.
+        if bare is None:
+            missing.append(name)
+        return match.group(0)
+
+    expanded = _VARIABLE.sub(expand, raw)
+    if missing:
+        raise ValueError(f"call_log names unset environment variable(s): {', '.join(sorted(set(missing)))}")
+    log = Path(expanded).expanduser()
+    return str(log if log.is_absolute() else base / log)
