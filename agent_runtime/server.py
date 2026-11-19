@@ -466,7 +466,7 @@ class Server:
         # Name the client sent in initialize, for call_log lines.
         self.client = None
         self._call_log_lock = threading.Lock()
-        self._call_log_warned = False
+        self._call_log_off = False
         self.pool = ThreadPoolExecutor(max_workers=int(cfg.max_concurrency),
                                        thread_name_prefix="localforge")
         atexit.register(self.cleanup)
@@ -581,13 +581,17 @@ class Server:
             enriched = self._unknown_arg_fault(name, e)
             fault = enriched.code
             raise enriched from e
+        except Exception:
+            # The client gets a JSON-RPC internal error; call_log must not say ok.
+            fault = "internal_error"
+            raise
         finally:
             elapsed = int((time.monotonic() - start) * 1000)
             if os.environ.get("LOCALFORGE_LOG") == "1":
                 print(f"localforge tool={name} ms={elapsed} {fault}", file=sys.stderr)
             if self.cfg.log_to_client:
                 self._log_to_client("info", f"tool={name} ms={elapsed} {fault}")
-            if self.cfg.call_log:
+            if self.cfg.call_log and not self._call_log_off:
                 self._log_call(name, elapsed, fault, value)
 
     def _log_call(self, name, ms, fault, value):
@@ -596,22 +600,25 @@ class Server:
         entry = {"at": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
                  **({"client": self.client} if self.client else {}),
                  "tool": name, "result": "failed" if failed else fault, "ms": ms}
-        # Logging must never fail a call, so the log turns itself off instead.
+        # Logging must never fail a call: on the first failure it warns and stays off, so the log has no silent gap.
         try:
             if value is not None:
                 entry["chars"] = len(json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str))
             line = json.dumps(entry, ensure_ascii=False) + "\n"
-            # shortcut: Quick's LocalForge and codemode's child can append to one file without a shared lock, so two
-            # lines written at the same instant could interleave; add a file lock if broken lines show up.
+            # shortcut: Quick's LocalForge and codemode's child append to one file with no shared lock, and on Windows
+            # two writes at the same instant can overwrite each other (a lost or broken line, never a failed call);
+            # readers skip lines that don't parse. Add a file lock if that shows up.
             with self._call_log_lock:
                 path = Path(self.cfg.call_log)
                 path.parent.mkdir(parents=True, exist_ok=True)
                 with open(path, "a", encoding="utf-8") as handle:
                     handle.write(line)
         except (OSError, ValueError, TypeError) as e:
-            if not self._call_log_warned:
-                self._call_log_warned = True
-                print(f"localforge: call_log unusable, calls are not logged: {e}", file=sys.stderr)
+            with self._call_log_lock:
+                if self._call_log_off:
+                    return
+                self._call_log_off = True
+            print(f"localforge: call_log unusable, calls are not logged until restart: {e}", file=sys.stderr)
 
     def _dispatch(self, name, arguments):
         if name not in self.schemas:

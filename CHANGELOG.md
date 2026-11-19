@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- New config `call_log` (off by default): a file that gets one JSON line per tool call with `at`, `client`, `tool`, `result` (`ok`, `failed` or the error code), `ms` and `chars`, never the arguments. Several servers (Quick's and codemode's) can share one file. A file that can't be written turns the log off with one stderr line instead of failing calls.
+- New config `call_log` (off by default): a file that gets one JSON line per tool call with `at`, `client`, `tool`, `result` (`ok`, `failed` or the error code), `ms` and `chars`, never the arguments. An unexpected server error is logged as `internal_error`. Several servers (Quick's and codemode's) can share one file; a line written by two at the same instant can rarely be lost or broken. A file that can't be written turns the log off until restart, with one stderr line, instead of failing calls. An unset environment variable in the path is a config error.
 
 ## 1.11.0
 

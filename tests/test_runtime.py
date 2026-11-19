@@ -1949,10 +1949,27 @@ def test_call_log(tmp_path):
     assert lines[0]["chars"] > 0 and "chars" not in lines[1]
     # No arguments: paths and commands stay out of the log.
     assert "secret-name" not in text and "SystemExit" not in text
-    # A log that can't be written never fails a call; off by default.
-    broken = make(tmp_path, call_log=str(tmp_path))
-    assert broken.call("workspace", {"action": "get"})["cwd"]
+    # An unexpected exception is logged as internal_error, not ok.
+    def boom(name, arguments):
+        raise RuntimeError("boom")
+    server._dispatch = boom
+    with pytest.raises(RuntimeError):
+        server.call("workspace", {"action": "get"})
+    assert json.loads(log.read_text(encoding="utf-8").splitlines()[-1])["result"] == "internal_error"
     assert make(tmp_path).cfg.call_log is None
+
+
+def test_call_log_that_cannot_be_written_warns_once_and_stops(tmp_path, capsys):
+    # A folder where the file should be: every open fails.
+    blocked = tmp_path.parent / (tmp_path.name + "-blocked")
+    blocked.mkdir()
+    server = make(tmp_path, call_log=str(blocked))
+    assert server.call("workspace", {"action": "get"})["cwd"]
+    # Once the path would work, logging stays off rather than resuming with a gap.
+    blocked.rmdir()
+    assert server.call("workspace", {"action": "get"})["cwd"]
+    assert capsys.readouterr().err.count("call_log unusable") == 1
+    assert not blocked.exists()
 
 
 def test_call_log_config_path(tmp_path, monkeypatch):
@@ -1967,6 +1984,12 @@ def test_call_log_config_path(tmp_path, monkeypatch):
     path.write_text(json.dumps({"workspace_root": str(tmp_path), "call_log": 5}))
     with pytest.raises(ValueError, match="call_log"):
         Config.load(str(path))
+    # An unset variable is an error, not a folder named after it.
+    monkeypatch.delenv("LF_TEST_UNSET", raising=False)
+    for unset in ("$LF_TEST_UNSET/calls.jsonl", "%LF_TEST_UNSET%/calls.jsonl"):
+        path.write_text(json.dumps({"workspace_root": str(tmp_path), "call_log": unset}))
+        with pytest.raises(ValueError, match="call_log"):
+            Config.load(str(path))
 
 
 def test_workspace_get_caches_git_root(tmp_path, monkeypatch):

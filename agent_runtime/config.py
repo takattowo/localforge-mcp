@@ -128,6 +128,10 @@ class Config:
         if cfg.call_log is not None and not isinstance(cfg.call_log, str):
             raise ValueError("call_log must be a file path or null")
         if cfg.call_log:
-            log = Path(os.path.expandvars(cfg.call_log)).expanduser()
+            expanded = os.path.expandvars(cfg.call_log)
+            # expandvars leaves an unset variable as written, which would become a folder named after it.
+            if "$" in expanded or "%" in expanded:
+                raise ValueError(f"call_log names an unset environment variable: {cfg.call_log}")
+            log = Path(expanded).expanduser()
             cfg.call_log = str(log if log.is_absolute() else Path(cfg.config_path).parent / log)
         return cfg
