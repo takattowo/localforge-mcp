@@ -1928,6 +1928,47 @@ def test_client_logging_notifications(tmp_path):
     assert make(tmp_path).cfg.log_to_client is False
 
 
+def test_call_log(tmp_path):
+    log = tmp_path.parent / (tmp_path.name + "-calls") / "calls.jsonl"
+    server = make(tmp_path, call_log=str(log))
+    server.handle({"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"clientInfo": {"name": "tester"}}})
+    (tmp_path / "secret-name.txt").write_text("hi")
+    server.call("filesystem", {"action": "read", "path": "secret-name.txt"})
+    with pytest.raises(RuntimeFault) as refused:
+        server.call("filesystem", {"action": "read", "path": "missing.txt"})
+    assert not server.call("execute", {"command": [sys.executable, "-c", "raise SystemExit(3)"]})["success"]
+    server.call("batch", {"calls": [{"tool": "workspace", "arguments": {"action": "get"}}]})
+    text = log.read_text(encoding="utf-8")
+    lines = [json.loads(line) for line in text.splitlines()]
+    # A batch logs its calls first, then itself.
+    assert [line["tool"] for line in lines] == ["filesystem", "filesystem", "execute", "workspace", "batch"]
+    assert [line["result"] for line in lines] == ["ok", refused.value.code, "failed", "ok", "ok"]
+    for line in lines:
+        assert line["client"] == "tester" and line["at"].endswith("Z") and line["ms"] >= 0, line
+        assert set(line) <= {"at", "client", "tool", "result", "ms", "chars"}, line
+    assert lines[0]["chars"] > 0 and "chars" not in lines[1]
+    # No arguments: paths and commands stay out of the log.
+    assert "secret-name" not in text and "SystemExit" not in text
+    # A log that can't be written never fails a call; off by default.
+    broken = make(tmp_path, call_log=str(tmp_path))
+    assert broken.call("workspace", {"action": "get"})["cwd"]
+    assert make(tmp_path).cfg.call_log is None
+
+
+def test_call_log_config_path(tmp_path, monkeypatch):
+    folder = tmp_path / "cfg"
+    folder.mkdir()
+    path = folder / "localforge.json"
+    path.write_text(json.dumps({"workspace_root": str(tmp_path), "call_log": "logs/calls.jsonl"}))
+    assert Config.load(str(path)).call_log == str(folder / "logs" / "calls.jsonl")
+    monkeypatch.setenv("LF_TEST_LOGS", str(tmp_path / "elsewhere"))
+    path.write_text(json.dumps({"workspace_root": str(tmp_path), "call_log": "$LF_TEST_LOGS/calls.jsonl"}))
+    assert Config.load(str(path)).call_log == str(tmp_path / "elsewhere" / "calls.jsonl")
+    path.write_text(json.dumps({"workspace_root": str(tmp_path), "call_log": 5}))
+    with pytest.raises(ValueError, match="call_log"):
+        Config.load(str(path))
+
+
 def test_workspace_get_caches_git_root(tmp_path, monkeypatch):
     import shutil
     if shutil.which("git") is None:

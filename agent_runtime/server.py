@@ -11,6 +11,7 @@ import time
 import threading
 import traceback
 from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
 from . import __version__
 from .config import Config
 from .errors import RuntimeFault
@@ -462,6 +463,10 @@ class Server:
         self.cap = Capabilities(cfg, self.paths, self.policy, self.processes, self.state)
         self.todos = TodoStore(self.state)
         self._client_log = None
+        # Name the client sent in initialize, for call_log lines.
+        self.client = None
+        self._call_log_lock = threading.Lock()
+        self._call_log_warned = False
         self.pool = ThreadPoolExecutor(max_workers=int(cfg.max_concurrency),
                                        thread_name_prefix="localforge")
         atexit.register(self.cleanup)
@@ -565,8 +570,10 @@ class Server:
     def call(self, name, arguments):
         start = time.monotonic()
         fault = "ok"
+        value = None
         try:
-            return self._dispatch(name, arguments)
+            value = self._dispatch(name, arguments)
+            return value
         except RuntimeFault as e:
             fault = e.code
             raise
@@ -580,6 +587,31 @@ class Server:
                 print(f"localforge tool={name} ms={elapsed} {fault}", file=sys.stderr)
             if self.cfg.log_to_client:
                 self._log_to_client("info", f"tool={name} ms={elapsed} {fault}")
+            if self.cfg.call_log:
+                self._log_call(name, elapsed, fault, value)
+
+    def _log_call(self, name, ms, fault, value):
+        # Tool, outcome, time and size only: arguments can hold paths, commands and secrets.
+        failed = fault == "ok" and isinstance(value, dict) and value.get("success") is False
+        entry = {"at": datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+                 **({"client": self.client} if self.client else {}),
+                 "tool": name, "result": "failed" if failed else fault, "ms": ms}
+        # Logging must never fail a call, so the log turns itself off instead.
+        try:
+            if value is not None:
+                entry["chars"] = len(json.dumps(value, ensure_ascii=False, separators=(",", ":"), default=str))
+            line = json.dumps(entry, ensure_ascii=False) + "\n"
+            # shortcut: Quick's LocalForge and codemode's child can append to one file without a shared lock, so two
+            # lines written at the same instant could interleave; add a file lock if broken lines show up.
+            with self._call_log_lock:
+                path = Path(self.cfg.call_log)
+                path.parent.mkdir(parents=True, exist_ok=True)
+                with open(path, "a", encoding="utf-8") as handle:
+                    handle.write(line)
+        except (OSError, ValueError, TypeError) as e:
+            if not self._call_log_warned:
+                self._call_log_warned = True
+                print(f"localforge: call_log unusable, calls are not logged: {e}", file=sys.stderr)
 
     def _dispatch(self, name, arguments):
         if name not in self.schemas:
@@ -851,6 +883,10 @@ class Server:
         method, request_id = request["method"], request.get("id")
         is_notification = "id" not in request
         if method == "initialize":
+            params = request.get("params")
+            info = params.get("clientInfo") if isinstance(params, dict) else None
+            if isinstance(info, dict) and isinstance(info.get("name"), str):
+                self.client = info["name"][:100]
             result = {"protocolVersion": PROTOCOL,
                       "capabilities": {"tools": {}, "logging": {}},
                       "serverInfo": {"name": "localforge-mcp", "version": __version__},

@@ -46,6 +46,8 @@ class Config:
     extra_environment: dict[str, str] = field(default_factory=dict)
     allow_shell_commands: bool = True
     log_to_client: bool = False
+    # File that gets one JSON line per tool call (tool, outcome, time, size, never arguments); unset logs nothing.
+    call_log: str | None = None
     structured_content: bool = False
     kill_children_on_exit: bool = True
     max_inline_output_bytes: int = 30_000
@@ -123,4 +125,9 @@ class Config:
             raise ValueError('edit_checks must map a file glob to an argv array, e.g. {"*.py": ["python", "-m", "py_compile", "{path}"]}')
         if not cfg.state_file:
             cfg.state_file = str(Path(cfg.config_path).parent / ".localforge-state.json")
+        if cfg.call_log is not None and not isinstance(cfg.call_log, str):
+            raise ValueError("call_log must be a file path or null")
+        if cfg.call_log:
+            log = Path(os.path.expandvars(cfg.call_log)).expanduser()
+            cfg.call_log = str(log if log.is_absolute() else Path(cfg.config_path).parent / log)
         return cfg

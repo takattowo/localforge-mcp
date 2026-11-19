@@ -108,6 +108,7 @@ Several repositories under one parent: use `C:\src` for `workspace_root` and bot
 | `project_instruction_files` | `["AGENTS.md", "CLAUDE.md"]` | Instruction file names. |
 | `max_project_instruction_bytes` | `8000` | Total budget for them. |
 | `log_to_client` | `false` | MCP log notification per tool call (`LOCALFORGE_LOG=1` writes it to stderr). |
+| `call_log` | off | File that gets one JSON line per tool call: `at` (UTC), `client` (the name from `initialize`), `tool`, `result` (`ok`, `failed` for a result with `success: false`, or the error code), `ms` and `chars` (result size). Never the arguments. A relative path is next to the config; environment variables expand. A `batch` logs each call inside it, then itself. A file that can't be written turns the log off with one stderr line; calls are never failed for it. |
 | `structured_content` | `false` | Add `structuredContent` to tool results. |
 | `advanced_features` | `false` | See [Advanced features](#advanced-features). |
 | `require_absolute_paths` | `true` | Every call names its location: `filesystem` and `search` (and each `multi_search` entry) an absolute `path`/`destination` or an absolute `cwd`; `git`, `execute` and `process start` an absolute `cwd`. Otherwise `relative_path`, since the runtime cwd is shared by every chat and task of the client. Search hits are then absolute. `false` lets calls use the runtime cwd. |

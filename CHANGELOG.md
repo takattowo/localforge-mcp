@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- New config `call_log` (off by default): a file that gets one JSON line per tool call with `at`, `client`, `tool`, `result` (`ok`, `failed` or the error code), `ms` and `chars`, never the arguments. Several servers (Quick's and codemode's) can share one file. A file that can't be written turns the log off with one stderr line instead of failing calls.
+
 ## 1.11.0
 
 - `git` `log` drops its default `-n 20` when `args` already give a count (`-5`, `-n 5`, `-n5`, `--max-count=5`), so the command no longer carries two. Git used the last one anyway, so output is unchanged. Only options before `--` count, and not the value of an option such as `--grep` or `-S` given as the next argument (`["--grep", "-n"]` still gets 20).

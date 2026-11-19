@@ -7,5 +7,6 @@ build/
 dist/
 localforge.json
 .localforge-state.json
+.localforge-calls.jsonl
 .superpowers/
 docs/superpowers/
